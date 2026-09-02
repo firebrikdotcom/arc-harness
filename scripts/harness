@@ -1,0 +1,761 @@
+#!/usr/bin/env sh
+set -eu
+
+# Harness CLI: locates the harness root, owns session budgets, and enforces
+# plan -> build -> review phase order. It never executes actions for the model.
+
+STATE_VERSION=1
+DEFAULT_CAP_STEPS=20
+DEFAULT_CAP_TIME_MIN=15
+DEFAULT_CAP_LOOPS=1
+
+EXIT_USAGE=2
+EXIT_BUDGET=3
+EXIT_PHASE=4
+
+ROOT=""
+DB_ROOT=""
+RUNS_DIR=""
+CURRENT_FILE=""
+RUN_DIR=""
+STATE_FILE=""
+
+info() {
+  printf '%s\n' "$*"
+}
+
+usage() {
+  info "Usage: harness COMMAND [ARGS]"
+  info ""
+  info "Commands:"
+  info "  plan start|done      Open or close the planning phase."
+  info "  build start|done     Open or close the build phase (needs plan done)."
+  info "  review start|done    Open or close the review phase (needs build done)."
+  info "  step [--note TEXT] [--tokens N]"
+  info "                       Record one agent step against the session budgets."
+  info "  status [--json]      Show harness root, run, phases, and budget counters."
+  info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
+  info ""
+  info "Budgets (environment overrides, read when the run is created):"
+  info "  HARNESS_BUDGET_STEPS     default $DEFAULT_CAP_STEPS"
+  info "  HARNESS_BUDGET_TIME_MIN  default $DEFAULT_CAP_TIME_MIN"
+  info "  HARNESS_BUDGET_LOOPS     default $DEFAULT_CAP_LOOPS"
+  info "  HARNESS_BUDGET_TOKENS    default unknown (the CLI cannot count tokens)"
+  info ""
+  info "Other environment variables:"
+  info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
+  info "  HARNESS_DB_ROOT  Override the state directory (default HARNESS_ROOT/.harness-db)."
+  info ""
+  info "Exit codes: 0 ok, $EXIT_USAGE usage/environment, $EXIT_BUDGET budget pause, $EXIT_PHASE phase-order violation."
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+now_iso() {
+  date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+now_epoch() {
+  date +%s
+}
+
+# --- harness root discovery -------------------------------------------------
+
+is_harness_root() {
+  [ -f "$1/AGENTS.md" ] && [ -f "$1/scripts/verify.sh" ]
+}
+
+resolve_harness_root() {
+  if [ -n "${HARNESS_ROOT:-}" ]; then
+    if is_harness_root "$HARNESS_ROOT"; then
+      ROOT=$(CDPATH='' cd "$HARNESS_ROOT" && pwd -P)
+      return 0
+    fi
+    info "FAIL: HARNESS_ROOT is set but has no AGENTS.md and scripts/verify.sh: $HARNESS_ROOT"
+    return 1
+  fi
+
+  _dir=$(pwd -P)
+  while :; do
+    if is_harness_root "$_dir"; then
+      ROOT=$_dir
+      return 0
+    fi
+    if [ "$_dir" = "/" ]; then
+      break
+    fi
+    _dir=$(dirname "$_dir")
+  done
+
+  info "FAIL: no harness root found from $(pwd -P) or its ancestors."
+  info "A harness root contains AGENTS.md and scripts/verify.sh."
+  return 1
+}
+
+require_json_runtime() {
+  if has_cmd python3 || has_cmd node; then
+    return 0
+  fi
+  info "FAIL: python3 or node is required to read and write harness run state as JSON."
+  exit "$EXIT_USAGE"
+}
+
+setup_paths() {
+  if ! resolve_harness_root; then
+    exit "$EXIT_USAGE"
+  fi
+  require_json_runtime
+  DB_ROOT=${HARNESS_DB_ROOT:-$ROOT/.harness-db}
+  RUNS_DIR=$DB_ROOT/runs
+  CURRENT_FILE=$RUNS_DIR/current
+}
+
+# --- JSON output ------------------------------------------------------------
+
+# json_write OUT KEY VALUE [KEY VALUE ...]
+# Each VALUE carries an explicit type prefix: s: string, n: number, b: bool, z: null.
+# OUT of "-" writes to stdout.
+json_write() {
+  if has_cmd python3; then
+    python3 - "$@" <<'PY'
+import json
+import sys
+
+out = sys.argv[1]
+args = sys.argv[2:]
+obj = {}
+for index in range(0, len(args), 2):
+    key = args[index]
+    raw = args[index + 1]
+    kind, _, value = raw.partition(":")
+    if kind == "s":
+        obj[key] = value
+    elif kind == "n":
+        obj[key] = int(value) if value.lstrip("-").isdigit() else float(value)
+    elif kind == "b":
+        obj[key] = value == "true"
+    elif kind == "z":
+        obj[key] = None
+    else:
+        sys.stderr.write("FAIL: unknown JSON value prefix: %s\n" % raw)
+        sys.exit(2)
+
+text = json.dumps(obj, indent=2) + "\n"
+if out == "-":
+    sys.stdout.write(text)
+else:
+    with open(out, "w", encoding="utf-8") as handle:
+        handle.write(text)
+PY
+  elif has_cmd node; then
+    node - "$@" <<'JS'
+const fs = require('fs');
+
+const out = process.argv[2];
+const args = process.argv.slice(3);
+const obj = {};
+for (let index = 0; index < args.length; index += 2) {
+  const key = args[index];
+  const raw = args[index + 1];
+  const separator = raw.indexOf(':');
+  const kind = separator === -1 ? '' : raw.slice(0, separator);
+  const value = separator === -1 ? '' : raw.slice(separator + 1);
+  if (kind === 's') {
+    obj[key] = value;
+  } else if (kind === 'n') {
+    obj[key] = Number(value);
+  } else if (kind === 'b') {
+    obj[key] = value === 'true';
+  } else if (kind === 'z') {
+    obj[key] = null;
+  } else {
+    process.stderr.write(`FAIL: unknown JSON value prefix: ${raw}\n`);
+    process.exit(2);
+  }
+}
+
+const text = `${JSON.stringify(obj, null, 2)}\n`;
+if (out === '-') {
+  process.stdout.write(text);
+} else {
+  fs.writeFileSync(out, text);
+}
+JS
+  else
+    info "FAIL: python3 or node is required to write harness run state as JSON."
+    exit "$EXIT_USAGE"
+  fi
+}
+
+typed_number() {
+  if [ "$1" = "unknown" ]; then
+    printf 's:unknown\n'
+  else
+    printf 'n:%s\n' "$1"
+  fi
+}
+
+# --- run state --------------------------------------------------------------
+
+state_get() {
+  _key=$1
+  _fallback=${2:-}
+  _value=""
+  if [ -f "$STATE_FILE" ]; then
+    _value=$(sed -n "s/^$_key=//p" "$STATE_FILE" | tail -n 1)
+  fi
+  if [ -z "$_value" ]; then
+    printf '%s\n' "$_fallback"
+  else
+    printf '%s\n' "$_value"
+  fi
+}
+
+state_set() {
+  _key=$1
+  _value=$2
+  _tmp="$STATE_FILE.tmp.$$"
+  if [ -f "$STATE_FILE" ]; then
+    awk -v key="$_key" -v value="$_value" '
+      BEGIN { FS = "=" }
+      $1 == key { print key "=" value; found = 1; next }
+      { print }
+      END { if (!found) print key "=" value }
+    ' "$STATE_FILE" > "$_tmp"
+  else
+    printf '%s=%s\n' "$_key" "$_value" > "$_tmp"
+  fi
+  mv "$_tmp" "$STATE_FILE"
+}
+
+current_run_id() {
+  if [ -f "$CURRENT_FILE" ]; then
+    head -n 1 "$CURRENT_FILE"
+  else
+    printf '\n'
+  fi
+}
+
+bind_run() {
+  _run_id=$1
+  RUN_DIR="$RUNS_DIR/$_run_id"
+  STATE_FILE="$RUN_DIR/state"
+}
+
+load_current_run() {
+  _run_id=$(current_run_id)
+  if [ -z "$_run_id" ] || [ ! -f "$RUNS_DIR/$_run_id/state" ]; then
+    return 1
+  fi
+  bind_run "$_run_id"
+  return 0
+}
+
+require_run() {
+  if ! load_current_run; then
+    info "FAIL: no harness run exists. Start one with: harness plan start"
+    exit "$EXIT_PHASE"
+  fi
+}
+
+create_run() {
+  _run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  bind_run "$_run_id"
+  mkdir -p "$RUN_DIR/pauses"
+  : > "$STATE_FILE"
+
+  state_set RUN_ID "$_run_id"
+  state_set RUN_STARTED_AT "$(now_iso)"
+  state_set RUN_STARTED_EPOCH "$(now_epoch)"
+  state_set RUN_STATUS active
+  state_set CURRENT_PHASE none
+  state_set PHASE_PLAN pending
+  state_set PHASE_BUILD pending
+  state_set PHASE_REVIEW pending
+  state_set STEPS_USED 0
+  state_set LOOPS_USED 0
+  state_set TOKENS_USED unknown
+  state_set CAP_STEPS "${HARNESS_BUDGET_STEPS:-$DEFAULT_CAP_STEPS}"
+  state_set CAP_TIME_MIN "${HARNESS_BUDGET_TIME_MIN:-$DEFAULT_CAP_TIME_MIN}"
+  state_set CAP_LOOPS "${HARNESS_BUDGET_LOOPS:-$DEFAULT_CAP_LOOPS}"
+  state_set CAP_TOKENS "${HARNESS_BUDGET_TOKENS:-unknown}"
+  state_set EXT_STEPS 0
+  state_set EXT_TIME_MIN 0
+  state_set EXT_LOOPS 0
+  state_set EXT_TOKENS 0
+  state_set PAUSE_SEQ 0
+  state_set PAUSE_BUDGET none
+
+  printf '%s\n' "$_run_id" > "$CURRENT_FILE"
+  info "Run created: $_run_id"
+  info "State: $RUN_DIR"
+}
+
+log_event() {
+  printf '%s\t%s\t%s\n' "$(now_iso)" "$(state_get CURRENT_PHASE)" "$*" >> "$RUN_DIR/log"
+}
+
+# --- budgets ----------------------------------------------------------------
+
+effective_cap() {
+  _name=$1
+  _base=$(state_get "CAP_$_name")
+  _ext=$(state_get "EXT_$_name" 0)
+  if [ "$_base" = "unknown" ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  _grant=$_base
+  if [ "$_grant" -eq 0 ]; then
+    # A zero base cap still needs a usable window after an evaluation.
+    _grant=1
+  fi
+  printf '%s\n' "$(( _base + _ext * _grant ))"
+}
+
+elapsed_min() {
+  _started=$(state_get RUN_STARTED_EPOCH 0)
+  printf '%s\n' "$(( ($(now_epoch) - _started) / 60 ))"
+}
+
+budget_used() {
+  case "$1" in
+    STEPS) state_get STEPS_USED 0 ;;
+    TIME_MIN) elapsed_min ;;
+    LOOPS) state_get LOOPS_USED 0 ;;
+    TOKENS) state_get TOKENS_USED unknown ;;
+  esac
+}
+
+budget_label() {
+  case "$1" in
+    STEPS) printf 'steps\n' ;;
+    TIME_MIN) printf 'time_min\n' ;;
+    LOOPS) printf 'loops\n' ;;
+    TOKENS) printf 'tokens\n' ;;
+    *) printf 'none\n' ;;
+  esac
+}
+
+write_pause_json() {
+  _seq=$(state_get PAUSE_SEQ)
+  _file="$RUN_DIR/pauses/$(printf '%03d' "$_seq").json"
+  _note_file="$RUN_DIR/pauses/$(printf '%03d' "$_seq").note"
+  _resolved=$(state_get PAUSE_RESOLVED false)
+  if [ "$_resolved" = "true" ]; then
+    _resolved_at="s:$(state_get PAUSE_RESOLVED_AT)"
+    _evaluation="s:$(cat "$_note_file")"
+  else
+    _resolved_at="z:"
+    _evaluation="z:"
+  fi
+
+  json_write "$_file" \
+    version "n:$STATE_VERSION" \
+    run_id "s:$(state_get RUN_ID)" \
+    sequence "n:$_seq" \
+    budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")" \
+    used "$(typed_number "$(state_get PAUSE_USED)")" \
+    cap "$(typed_number "$(state_get PAUSE_CAP)")" \
+    phase "s:$(state_get PAUSE_PHASE)" \
+    paused_at "s:$(state_get PAUSE_AT)" \
+    resolved "b:$_resolved" \
+    resolved_at "$_resolved_at" \
+    evaluation "$_evaluation"
+
+  printf '%s\n' "$_file"
+}
+
+write_run_json() {
+  _out=${1:-$RUN_DIR/run.json}
+  json_write "$_out" \
+    version "n:$STATE_VERSION" \
+    run_id "s:$(state_get RUN_ID)" \
+    status "s:$(state_get RUN_STATUS)" \
+    started_at "s:$(state_get RUN_STARTED_AT)" \
+    updated_at "s:$(now_iso)" \
+    current_phase "s:$(state_get CURRENT_PHASE)" \
+    phase_plan "s:$(state_get PHASE_PLAN)" \
+    phase_build "s:$(state_get PHASE_BUILD)" \
+    phase_review "s:$(state_get PHASE_REVIEW)" \
+    steps_used "n:$(state_get STEPS_USED)" \
+    steps_cap "$(typed_number "$(effective_cap STEPS)")" \
+    time_min_used "n:$(elapsed_min)" \
+    time_min_cap "$(typed_number "$(effective_cap TIME_MIN)")" \
+    loops_used "n:$(state_get LOOPS_USED)" \
+    loops_cap "$(typed_number "$(effective_cap LOOPS)")" \
+    tokens_used "$(typed_number "$(state_get TOKENS_USED)")" \
+    tokens_cap "$(typed_number "$(effective_cap TOKENS)")" \
+    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")"
+}
+
+pause_run() {
+  _budget=$1
+  _used=$2
+  _cap=$3
+  _seq=$(( $(state_get PAUSE_SEQ 0) + 1 ))
+
+  state_set RUN_STATUS paused
+  state_set PAUSE_SEQ "$_seq"
+  state_set PAUSE_BUDGET "$_budget"
+  state_set PAUSE_USED "$_used"
+  state_set PAUSE_CAP "$_cap"
+  state_set PAUSE_PHASE "$(state_get CURRENT_PHASE)"
+  state_set PAUSE_AT "$(now_iso)"
+  state_set PAUSE_RESOLVED false
+  state_set PAUSE_RESOLVED_AT ""
+
+  _record=$(write_pause_json)
+  write_run_json
+  log_event "pause budget=$(budget_label "$_budget") used=$_used cap=$_cap"
+
+  info "PAUSE: $(budget_label "$_budget") budget reached (used=$_used cap=$_cap)."
+  info "Run: $(state_get RUN_ID)"
+  info "Pause record: $_record"
+  info "Evaluate the run, then resume with: harness continue \"<evaluation note>\""
+  exit "$EXIT_BUDGET"
+}
+
+check_budgets() {
+  if [ "$(state_get RUN_STATUS)" = "complete" ]; then
+    return 0
+  fi
+  for _budget in STEPS TIME_MIN LOOPS TOKENS; do
+    _cap=$(effective_cap "$_budget")
+    if [ "$_cap" = "unknown" ]; then
+      continue
+    fi
+    _used=$(budget_used "$_budget")
+    if [ "$_used" = "unknown" ]; then
+      continue
+    fi
+    if [ "$_used" -ge "$_cap" ]; then
+      pause_run "$_budget" "$_used" "$_cap"
+    fi
+  done
+}
+
+block_when_paused() {
+  if [ "$(state_get RUN_STATUS)" = "paused" ]; then
+    info "FAIL: run $(state_get RUN_ID) is paused on the $(budget_label "$(state_get PAUSE_BUDGET)") budget."
+    info "Resume with: harness continue \"<evaluation note>\""
+    exit "$EXIT_BUDGET"
+  fi
+}
+
+count_step() {
+  state_set STEPS_USED "$(( $(state_get STEPS_USED 0) + 1 ))"
+}
+
+# --- phases -----------------------------------------------------------------
+
+phase_key() {
+  case "$1" in
+    plan) printf 'PHASE_PLAN\n' ;;
+    build) printf 'PHASE_BUILD\n' ;;
+    review) printf 'PHASE_REVIEW\n' ;;
+  esac
+}
+
+phase_status() {
+  state_get "$(phase_key "$1")" pending
+}
+
+previous_phase() {
+  case "$1" in
+    plan) printf '\n' ;;
+    build) printf 'plan\n' ;;
+    review) printf 'build\n' ;;
+  esac
+}
+
+cmd_phase_start() {
+  _phase=$1
+
+  if load_current_run && [ "$(state_get RUN_STATUS)" != "complete" ]; then
+    block_when_paused
+  elif [ "$_phase" = "plan" ]; then
+    create_run
+  else
+    require_run
+  fi
+
+  _previous=$(previous_phase "$_phase")
+  if [ -n "$_previous" ] && [ "$(phase_status "$_previous")" != "done" ]; then
+    info "FAIL: cannot start $_phase: $_previous is '$(phase_status "$_previous")', not 'done'."
+    if [ "$(phase_status "$_previous")" = "active" ]; then
+      info "Close the earlier phase first: harness $_previous done"
+    else
+      info "Run the earlier phase first: harness $_previous start, then harness $_previous done"
+    fi
+    exit "$EXIT_PHASE"
+  fi
+
+  _status=$(phase_status "$_phase")
+  if [ "$_status" = "active" ]; then
+    info "FAIL: $_phase is already started in run $(state_get RUN_ID)."
+    exit "$EXIT_PHASE"
+  fi
+
+  if [ "$_status" = "done" ]; then
+    state_set LOOPS_USED "$(( $(state_get LOOPS_USED 0) + 1 ))"
+    info "LOOP: re-entering a completed $_phase phase (loops used $(state_get LOOPS_USED))."
+  fi
+
+  state_set "$(phase_key "$_phase")" active
+  state_set CURRENT_PHASE "$_phase"
+  state_set RUN_STATUS active
+  count_step
+  write_run_json
+  log_event "$_phase start"
+
+  info "OK: $_phase started in run $(state_get RUN_ID)."
+  check_budgets
+}
+
+cmd_phase_done() {
+  _phase=$1
+  require_run
+  block_when_paused
+
+  _status=$(phase_status "$_phase")
+  if [ "$_status" != "active" ]; then
+    info "FAIL: cannot mark $_phase done: $_phase is '$_status', not 'active'."
+    info "Start it first: harness $_phase start"
+    exit "$EXIT_PHASE"
+  fi
+
+  state_set "$(phase_key "$_phase")" "done"
+  state_set CURRENT_PHASE "$_phase"
+  count_step
+
+  if [ "$_phase" = "review" ]; then
+    state_set RUN_STATUS complete
+  fi
+
+  write_run_json
+  log_event "$_phase done"
+
+  info "OK: $_phase marked done in run $(state_get RUN_ID)."
+  case "$_phase" in
+    plan) info "Next: harness build start" ;;
+    build) info "Next: harness review start" ;;
+    review) info "Run complete. Next: harness plan start opens a new run." ;;
+  esac
+  check_budgets
+}
+
+# --- step -------------------------------------------------------------------
+
+cmd_step() {
+  _note=""
+  _tokens=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --note)
+        if [ "$#" -lt 2 ]; then
+          info "FAIL: --note requires text."
+          exit "$EXIT_USAGE"
+        fi
+        _note=$2
+        shift 2
+        ;;
+      --tokens)
+        if [ "$#" -lt 2 ]; then
+          info "FAIL: --tokens requires a count."
+          exit "$EXIT_USAGE"
+        fi
+        _tokens=$2
+        shift 2
+        ;;
+      *)
+        info "FAIL: unknown argument: $1"
+        usage
+        exit "$EXIT_USAGE"
+        ;;
+    esac
+  done
+
+  require_run
+  block_when_paused
+
+  if [ "$(state_get CURRENT_PHASE)" = "none" ]; then
+    info "FAIL: no phase is active. Start one first: harness plan start"
+    exit "$EXIT_PHASE"
+  fi
+
+  if [ -n "$_tokens" ]; then
+    case "$_tokens" in
+      ''|*[!0-9]*)
+        info "FAIL: --tokens must be a non-negative integer: $_tokens"
+        exit "$EXIT_USAGE"
+        ;;
+    esac
+    _previous=$(state_get TOKENS_USED unknown)
+    if [ "$_previous" = "unknown" ]; then
+      _previous=0
+    fi
+    state_set TOKENS_USED "$(( _previous + _tokens ))"
+  fi
+
+  count_step
+  write_run_json
+  log_event "step $_note"
+
+  info "OK: step $(state_get STEPS_USED)/$(effective_cap STEPS) recorded in phase $(state_get CURRENT_PHASE)."
+  check_budgets
+}
+
+# --- continue ---------------------------------------------------------------
+
+cmd_continue() {
+  if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+    info "FAIL: continue requires an evaluation note."
+    info "Usage: harness continue \"<evaluation note>\""
+    exit "$EXIT_USAGE"
+  fi
+  _note=$1
+  shift
+  if [ "$#" -gt 0 ]; then
+    info "FAIL: unknown argument: $1"
+    exit "$EXIT_USAGE"
+  fi
+
+  require_run
+
+  if [ "$(state_get RUN_STATUS)" != "paused" ]; then
+    info "FAIL: run $(state_get RUN_ID) is not paused (status: $(state_get RUN_STATUS))."
+    exit "$EXIT_PHASE"
+  fi
+
+  _budget=$(state_get PAUSE_BUDGET)
+  state_set "EXT_$_budget" "$(( $(state_get "EXT_$_budget" 0) + 1 ))"
+
+  printf '%s\n' "$_note" > "$RUN_DIR/pauses/$(printf '%03d' "$(state_get PAUSE_SEQ)").note"
+  state_set PAUSE_RESOLVED true
+  state_set PAUSE_RESOLVED_AT "$(now_iso)"
+  _record=$(write_pause_json)
+
+  state_set RUN_STATUS active
+  write_run_json
+  log_event "continue budget=$(budget_label "$_budget")"
+
+  info "OK: evaluation recorded, run $(state_get RUN_ID) resumed."
+  info "Budget $(budget_label "$_budget") extended to $(effective_cap "$_budget")."
+  info "Pause record: $_record"
+  check_budgets
+}
+
+# --- status -----------------------------------------------------------------
+
+cmd_status() {
+  _json=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json)
+        _json=1
+        shift
+        ;;
+      *)
+        info "FAIL: unknown argument: $1"
+        usage
+        exit "$EXIT_USAGE"
+        ;;
+    esac
+  done
+
+  if ! load_current_run; then
+    if [ "$_json" -eq 1 ]; then
+      json_write - harness_root "s:$ROOT" run_id "z:" status "s:none"
+    else
+      info "Harness root: $ROOT"
+      info "State root:   $DB_ROOT"
+      info "Run:          none. Start one with: harness plan start"
+    fi
+    return 0
+  fi
+
+  if [ "$_json" -eq 1 ]; then
+    write_run_json -
+    return 0
+  fi
+
+  info "Harness root: $ROOT"
+  info "State root:   $DB_ROOT"
+  info "Run:          $(state_get RUN_ID) ($(state_get RUN_STATUS))"
+  info "Run state:    $RUN_DIR"
+  info "Phase:        $(state_get CURRENT_PHASE)"
+  info "  plan   $(phase_status plan)"
+  info "  build  $(phase_status build)"
+  info "  review $(phase_status review)"
+  info "Budgets (used/cap):"
+  info "  steps     $(state_get STEPS_USED)/$(effective_cap STEPS)"
+  info "  time_min  $(elapsed_min)/$(effective_cap TIME_MIN)"
+  info "  loops     $(state_get LOOPS_USED)/$(effective_cap LOOPS)"
+  info "  tokens    $(state_get TOKENS_USED)/$(effective_cap TOKENS)"
+  if [ "$(state_get RUN_STATUS)" = "paused" ]; then
+    info "Paused on:    $(budget_label "$(state_get PAUSE_BUDGET)")"
+    info "Pause record: $RUN_DIR/pauses/$(printf '%03d' "$(state_get PAUSE_SEQ)").json"
+    info "Resume with:  harness continue \"<evaluation note>\""
+  fi
+}
+
+# --- dispatch ---------------------------------------------------------------
+
+if [ "$#" -eq 0 ]; then
+  usage
+  exit "$EXIT_USAGE"
+fi
+
+case "$1" in
+  --help|-h|help)
+    usage
+    exit 0
+    ;;
+esac
+
+setup_paths
+
+COMMAND=$1
+shift
+
+case "$COMMAND" in
+  plan|build|review)
+    if [ "$#" -lt 1 ]; then
+      info "FAIL: $COMMAND requires 'start' or 'done'."
+      usage
+      exit "$EXIT_USAGE"
+    fi
+    ACTION=$1
+    shift
+    if [ "$#" -gt 0 ]; then
+      info "FAIL: unknown argument: $1"
+      exit "$EXIT_USAGE"
+    fi
+    case "$ACTION" in
+      start) cmd_phase_start "$COMMAND" ;;
+      done) cmd_phase_done "$COMMAND" ;;
+      *)
+        info "FAIL: unknown $COMMAND action: $ACTION"
+        usage
+        exit "$EXIT_USAGE"
+        ;;
+    esac
+    ;;
+  step)
+    cmd_step "$@"
+    ;;
+  status)
+    cmd_status "$@"
+    ;;
+  continue)
+    cmd_continue "$@"
+    ;;
+  *)
+    info "FAIL: unknown command: $COMMAND"
+    usage
+    exit "$EXIT_USAGE"
+    ;;
+esac

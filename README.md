@@ -97,11 +97,13 @@ docs/setup.md             Local setup and command documentation
 progress.md               Current goal, decisions, steps, blockers, verification history
 schemas/action.schema.json  Proposed-action contract
 scripts/action.sh           Action validator
+scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
 scripts/init.sh             Safe bootstrap script
 scripts/verify.sh           Local verification sensor
 scripts/review.sh           Review helper
 tasks/task-template.md      Reusable task template
 tests/action-schema.sh      Action schema regression tests
+tests/harness-cli.sh        Harness CLI phase-order and budget regression tests
 ```
 
 Ignored local database content:

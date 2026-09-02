@@ -2,7 +2,7 @@
 
 ## Current Goal
 
-Confirmed harness decisions are recorded. Wait for a build request; do not start implementation from this confirm.
+Build the `harness` CLI slice on branch `lotharthesavior/feat-cli`: harness-root discovery, session budgets with pause/continue, and plan/build/review phase gates. Complete; awaiting review.
 
 ## Decisions
 
@@ -33,44 +33,53 @@ Confirmed harness decisions are recorded. Wait for a build request; do not start
 - 2026-08-31: Confirmed the retrieval model. The graph is retrieval-augmented in shape but not a vector RAG: a full-mode index of this repo produced 277 structural edges (DEFINES, CALLS, USAGE, IMPORTS, CONTAINS_*) against 9 SEMANTICALLY_RELATED similarity edges. Retrieval returns named symbols with exact file and line coordinates, so a stale index yields confidently wrong coordinates rather than merely irrelevant text. This is the justification for freshness-gated trust.
 - 2026-08-30: Accepted residual risk for decision 3. Citing a run record is not enforced, so a completion claim can still reference a stale or invented id. This makes false claims detectable, not impossible.
 - 2026-09-01: First control-plane slice is schema plus validator only. No allowlist, no executor, and no Cursor tool block. Agents can still skip validation; a rejected proposal is detectable.
+- 2026-09-02: The `harness` CLI counts a step for every phase command and for every explicit `harness step`. The CLI cannot observe the model's tool calls, so step counting is a reported, agent-visible rule rather than an enforced measurement.
+- 2026-09-02: Token budget stays `unknown` unless the agent reports counts with `harness step --tokens N`. The CLI does not attempt to count tokens.
+- 2026-09-02: `harness continue` extends the tripped budget by one more window (`cap + extensions * cap`, with a grant of 1 when the base cap is 0) rather than clearing the counter, so total consumption stays visible across evaluations.
+- 2026-09-02: Run state is stored twice on purpose: `state` as `KEY=VALUE` for shell reads without a JSON runtime, and `run.json` as the machine-readable snapshot. Evaluation notes live only in the JSON pause records, so arbitrary text never enters the shell state file.
+- 2026-09-02: `tests/harness-cli.sh` follows the existing convention of a standalone script invoked directly. It is not wired into `scripts/verify.sh`, which is owned by another worktree's scope.
 - 2026-09-01: Grill confirmed. Full keep/leave list is in `harness-review.md`. Overrides: no executor; dry-run dropped; detection stays (no manifest); Make still wins; init still runs project setup immediately; `knowledge/` hooks still always run. Permit is allow-unless-denied with a harness default denylist that a project file replaces. Session budgets and phase gates wait for a future `harness` CLI.
 
 ## Active Plan
 
-Phase: Review complete — 2026-09-01 grill confirmed. Build not started.
+Phase: Build and review complete on `lotharthesavior/feat-cli`. Not merged, not pushed.
 
-Goal: implement only the confirmed keep/build list in `harness-review.md` when a build is requested.
+Goal: add the `harness` CLI from the confirmed keep/build list in `harness-review.md` — harness-root discovery, session budgets, and plan/build/review phase ownership.
 
-Non-goals: permission, execution, dry-run, harness CLI, JSON Schema library.
+Non-goals: action executor, dry-run, command manifest, Make plus native checks together, `init.sh` preview, `knowledge/` hook gating. Those belong to other worktrees.
 
-Harness root: `/Users/savior/Code/harness-template`
+Harness root: `/Users/savior/orca/workspaces/harness-template/feat-cli`
 
-Target project root: `/Users/savior/Code/harness-template`
+Target project root: same as the harness root.
 
 Acceptance criteria:
 
-- `schemas/action.schema.json` defines versioned `run_command` and `write_file` actions.
-- `scripts/action.sh validate PATH` exits 0 for valid actions and 2 for invalid ones.
-- Regression tests cover valid and invalid proposals.
-- Docs state propose-then-validate. Execute is out of scope.
+- `scripts/harness` finds the harness root from the current directory or an ancestor by looking for `AGENTS.md` and `scripts/verify.sh`.
+- Commands `plan|build|review start|done`, `status`, and `continue` exist, plus `step` so the step budget can be counted.
+- Run state lives under `.harness-db/runs/<id>/` with budget counters and the current phase.
+- Default caps are `steps=20`, `time_min=15`, `loops=1`; the token cap is optional and recorded as `unknown`.
+- Reaching a cap writes a pause record and exits non-zero; `continue` requires an evaluation note.
+- `build start` is refused until `plan done`; `review start` is refused until `build done`.
+- Tests cover phase order and pause/continue.
+- `docs/setup.md` documents the CLI.
 
 Implementation plan:
 
-1. Add the schema contract.
-2. Add the validator script.
-3. Add regression tests.
-4. Update setup, architecture, agent guides, README, and the review.
+1. Add `scripts/harness`.
+2. Add `tests/harness-cli.sh`.
+3. Document the CLI in `docs/setup.md` and list the new files in `README.md`.
+4. Write `QA-REVIEW.md` with copy-paste commands and real output.
 
 Verification plan:
 
-- Run `sh tests/action-schema.sh`.
-- Run `scripts/verify.sh` and record the known local ShellCheck gap.
+- Run `sh tests/harness-cli.sh` and `sh tests/action-schema.sh`.
+- Run `scripts/verify.sh` and record the pre-existing ShellCheck failures.
 
 Known risks:
 
-- Agents can skip the validator and still call Write or Shell.
-- Schema file and script rules can drift.
-- Validator needs `python3` or `node`.
+- `scripts/verify.sh` fails on ShellCheck warnings that predate this branch, in files this feature does not touch.
+- Step and token counts are self-reported by the agent; the CLI records and gates but cannot measure them.
+- The earlier action-validator risks still stand: agents can skip the validator, schema and script rules can drift, and the validator needs `python3` or `node`.
 
 Goal: create a progressive harness strategy guide, render it for a 10.3-inch grayscale screen, and transfer it to the NoteAir.
 
@@ -112,6 +121,12 @@ Known risks:
 
 ## Completed Steps
 
+- Planning: read `AGENTS.md`, `CLAUDE.md`, `docs/conventions.md`, `docs/setup.md`, `harness-review.md`, `todo.md`, and the existing scripts and tests before writing the CLI.
+- Build: added `scripts/harness` with harness-root discovery, `KEY=VALUE` plus JSON run state under `.harness-db/runs/<id>/`, session budgets, pause records, and plan/build/review gates.
+- Build: added `tests/harness-cli.sh` covering root discovery, every phase-order refusal, the step/time/loop/token budgets, pause records, refusal while paused, and continue with and without an evaluation note.
+- Build: documented the CLI, its budgets, its exit codes, and its state layout in `docs/setup.md`, and listed the new files in `README.md`.
+- Review: ran both test scripts, replayed the blocked-build and pause/continue sessions by hand, and confirmed the two new files are ShellCheck-clean.
+- Review: wrote `QA-REVIEW.md` with copy-paste commands, expected output, a manual checklist, and the real verification paste.
 - Review: 2026-09-01 grill confirmed. Keep/leave recorded in `harness-review.md`. No build started.
 - Build: added `schemas/action.schema.json`, `scripts/action.sh validate`, and `tests/action-schema.sh`.
 - Build: documented propose-then-validate in setup, architecture, agent guides, README, and `harness-review.md`.
@@ -137,15 +152,22 @@ Known risks:
 
 ## Next Steps
 
+- Review and merge `lotharthesavior/feat-cli`. It is committed on the branch only; nothing was merged or pushed.
+- Clear the pre-existing ShellCheck warnings in `scripts/verify.sh`, `scripts/action.sh`, `scripts/review.sh`, `tests/action-schema.sh`, and `tests/verify-required-checks.sh` so the required `lint` category can pass.
 - Accept the incoming `harness-strategy-guide.pdf` transfer on the NoteAir.
 - Install ShellCheck locally or rely on the configured CI environment for the complete lint-and-test gate.
 
 ## Blockers
 
-- Local ShellCheck is unavailable, so the newly required lint category cannot pass on this machine.
+- None for this feature. `scripts/verify.sh` fails on ShellCheck warnings that predate this branch in files owned by other work; the two new files are clean.
 
 ## Verification History
 
+- 2026-09-02: `sh tests/harness-cli.sh` passed. Result: `PASS: harness CLI phase order, budgets, pause, and continue`.
+- 2026-09-02: `sh tests/action-schema.sh` passed. Result: `PASS: action schema validation`.
+- 2026-09-02: `shellcheck scripts/harness tests/harness-cli.sh` passed with no output.
+- 2026-09-02: `scripts/verify.sh` failed. Result: ran=2 skipped=3 failures=1. The only failure is required `lint`; every ShellCheck warning comes from `scripts/verify.sh`, `scripts/action.sh`, `scripts/review.sh`, `tests/action-schema.sh`, and `tests/verify-required-checks.sh`, and each reproduces against base commit `3e34bf0`. Required `test` was satisfied via `bash:syntax`.
+- 2026-09-02: Manual CLI QA passed: subdirectory root discovery, exit 2 outside any harness root, blocked `build start` before `plan done` (exit 4), step-budget pause (exit 3) and continue with an evaluation note, refusal while paused (exit 3), loop-budget pause, time-budget pause, `status --json` leaving `run.json` unchanged, and `.harness-db/` staying untracked.
 - 2026-09-01: `scripts/verify.sh` after recording the grill confirm. Result: ran=1 skipped=4 failures=1; required `lint` unavailable without ShellCheck; required `test` satisfied via `bash:syntax`.
 - 2026-09-01: `sh tests/action-schema.sh` passed. Result: `PASS: action schema validation`.
 - 2026-09-01: `scripts/verify.sh` failed as intended after adding the action schema. Result: ran=1 skipped=4 failures=1; required `lint` was unavailable without ShellCheck; required `test` was satisfied via `bash:syntax`.

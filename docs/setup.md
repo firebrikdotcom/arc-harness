@@ -15,7 +15,7 @@ Optional, depending on project files:
 - Go when `go.mod` exists.
 - Rust and Cargo when `Cargo.toml` exists.
 - `shellcheck` for stronger Bash/shell linting.
-- `python3` or `node` to validate proposed action JSON with `scripts/action.sh`.
+- `python3` or `node` to validate proposed action JSON with `scripts/action.sh` and to store `scripts/harness` run state.
 - Other language runtimes as documented by future project code.
 
 ## Bootstrap
@@ -55,6 +55,9 @@ No required environment variables are currently known.
 Optional harness variables:
 
 - `HARNESS_TARGET_ROOT`: target project directory for `scripts/init.sh`, `scripts/verify.sh`, and `scripts/review.sh` when `--project` is not passed.
+- `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
+- `HARNESS_DB_ROOT`: harness state directory for `scripts/harness`. Defaults to `HARNESS_ROOT/.harness-db`.
+- `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
 
 When environment variables are introduced, document each one here:
 
@@ -115,6 +118,68 @@ scripts/action.sh validate PATH
 ```
 
 The validator accepts or rejects the file against `schemas/action.schema.json`. It does not execute the action. `python3` is used when available; otherwise `node`. One of those runtimes is required.
+
+To run the harness regression tests:
+
+```sh
+sh tests/action-schema.sh
+sh tests/harness-cli.sh
+```
+
+## Harness CLI
+
+`scripts/harness` owns session budgets and plan/build/review phase order. It is a control plane only: it records and gates, and never runs Write, Shell, or git for the model.
+
+It finds the harness root by walking up from the current directory for a directory containing `AGENTS.md` and `scripts/verify.sh`. Set `HARNESS_ROOT` to skip discovery.
+
+```sh
+scripts/harness plan start
+scripts/harness plan done
+scripts/harness build start
+scripts/harness step --note "edit scripts/verify.sh"
+scripts/harness build done
+scripts/harness review start
+scripts/harness review done
+scripts/harness status
+scripts/harness status --json
+scripts/harness continue "<evaluation note>"
+```
+
+Phase rules:
+
+- `build start` fails until `plan done` has run.
+- `review start` fails until `build done` has run.
+- `PHASE done` fails unless that phase is active.
+- Re-starting a phase that is already done counts against the loop budget.
+
+Session budgets are counted per run and are agent-visible rules:
+
+| Budget | Default cap | Counted by |
+|---|---|---|
+| `steps` | 20 | every phase command and every `harness step` |
+| `time_min` | 15 | wall-clock minutes since the run was created |
+| `loops` | 1 | re-entering a phase that was already marked done |
+| `tokens` | unknown | only what `harness step --tokens N` reports |
+
+Set caps with `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, and `HARNESS_BUDGET_TOKENS`. They are read when the run is created. The CLI cannot count tokens itself, so the token budget stays `unknown` unless the agent reports counts.
+
+When a cap is reached the CLI writes a pause record, refuses further phase and step commands, and exits non-zero. `harness continue` requires an evaluation note, stores it in the pause record, and extends the tripped budget by one more window. There is no way to resume without that evaluation.
+
+Exit codes:
+
+- `0` success.
+- `2` usage or environment error, including no harness root found.
+- `3` budget pause, or a command refused because the run is paused.
+- `4` phase-order violation.
+
+Run state lives under `.harness-db/runs/<run-id>/` in the harness root and is ignored by git:
+
+- `state`: `KEY=VALUE` counters, caps, and phase status.
+- `run.json`: machine-readable snapshot of the same run.
+- `pauses/NNN.json`: one record per budget pause, including the evaluation note once resolved.
+- `log`: append-only record of the commands the run accepted.
+
+Override the state directory with `HARNESS_DB_ROOT`, which is how the regression tests keep runs isolated.
 
 `scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly.
 
