@@ -77,6 +77,7 @@ scripts/review.sh --project /path/to/project
 ## Important Rules
 
 - Do not declare success without running `scripts/verify.sh`.
+- Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`.
 - Keep planning, building, and reviewing as separate phases.
 - Do not assume secrets exist locally or in CI.
 - Do not delete existing files unless the task explicitly requires it.
@@ -94,10 +95,13 @@ docs/architecture.md      Architecture notes and module boundaries
 docs/conventions.md       Coding, testing, logging, and security conventions
 docs/setup.md             Local setup and command documentation
 progress.md               Current goal, decisions, steps, blockers, verification history
-scripts/init.sh           Safe bootstrap script
-scripts/verify.sh         Local verification sensor
-scripts/review.sh         Review helper
-tasks/task-template.md    Reusable task template
+schemas/action.schema.json  Proposed-action contract
+scripts/action.sh           Action validator
+scripts/init.sh             Safe bootstrap script
+scripts/verify.sh           Local verification sensor
+scripts/review.sh           Review helper
+tasks/task-template.md      Reusable task template
+tests/action-schema.sh      Action schema regression tests
 ```
 
 Ignored local database content:

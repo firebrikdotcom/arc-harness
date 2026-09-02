@@ -20,6 +20,7 @@ Before coding:
 
 During work:
 
+- Before a side-effecting tool call, write an action JSON file and run `scripts/action.sh validate PATH`. Do not treat a rejected proposal as approved.
 - Keep changes scoped to the active task.
 - Prefer existing project patterns over new abstractions.
 - Make one meaningful change at a time and update `progress.md` after each meaningful step.

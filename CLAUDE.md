@@ -8,6 +8,7 @@ This template is prepared for AI-assisted development using a harness of guides,
 - Identify the harness root and target project root before planning or editing. They may be different directories.
 - Follow existing patterns first. If no pattern exists, choose the smallest clear implementation and document the decision.
 - Keep task scope narrow. Split large requests into small steps before editing.
+- Before a side-effecting tool call, write an action JSON file and run `scripts/action.sh validate PATH`. Do not treat a rejected proposal as approved.
 - Update `progress.md` after every meaningful step: planning, implementation, verification, review, blockers, and decisions.
 - Do not claim success without running `scripts/verify.sh`.
 - Cite exact commands run and their results in the final response.

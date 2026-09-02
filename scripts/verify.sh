@@ -5,6 +5,8 @@ failures=0
 ran=0
 skipped=0
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
+REQUIRED_CHECKS="${HARNESS_REQUIRED_CHECKS:-}"
+REQUIRED_CHECKS_SOURCE="environment"
 
 usage() {
   info "Usage: scripts/verify.sh [--project PATH]"
@@ -50,6 +52,33 @@ fi
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
 cd "$PROJECT_ROOT"
 
+if [ -z "$REQUIRED_CHECKS" ] && [ -f .harness-required-checks ]; then
+  REQUIRED_CHECKS=$(sed 's/#.*//' .harness-required-checks | tr '\n' ' ')
+  REQUIRED_CHECKS_SOURCE=".harness-required-checks"
+fi
+
+is_required() {
+  wanted="$1"
+  for required in $REQUIRED_CHECKS; do
+    if [ "$required" = "$wanted" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_required_checks() {
+  for required in $REQUIRED_CHECKS; do
+    case "$required" in
+      format|lint|typecheck|test|build) ;;
+      *)
+        info "FAIL: unknown required check category: $required"
+        exit 2
+        ;;
+    esac
+  done
+}
+
 mark_skip() {
   skipped=$((skipped + 1))
   info "SKIP: $*"
@@ -67,6 +96,22 @@ run_check() {
     code=$?
     failures=$((failures + 1))
     info "FAIL: $name (exit $code)"
+  fi
+}
+
+run_category() {
+  category="$1"
+  shift
+  ran_before=$ran
+  failures_before=$failures
+
+  "$@"
+
+  if is_required "$category" && [ "$ran" -eq "$ran_before" ]; then
+    failures=$((failures + 1))
+    info "FAIL: required category '$category' ran no checks"
+  elif is_required "$category" && [ "$failures" -eq "$failures_before" ]; then
+    info "REQUIRED: $category satisfied"
   fi
 }
 
@@ -379,11 +424,18 @@ verify_build() {
 info "Verification started"
 info "Project root: $PROJECT_ROOT"
 
-verify_format
-verify_lint
-verify_typecheck
-verify_test
-verify_build
+validate_required_checks
+if [ -n "$REQUIRED_CHECKS" ]; then
+  info "Required checks ($REQUIRED_CHECKS_SOURCE): $REQUIRED_CHECKS"
+else
+  info "Required checks: none declared"
+fi
+
+run_category format verify_format
+run_category lint verify_lint
+run_category typecheck verify_typecheck
+run_category test verify_test
+run_category build verify_build
 
 info ""
 info "Verification summary: ran=$ran skipped=$skipped failures=$failures"

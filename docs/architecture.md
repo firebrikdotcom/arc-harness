@@ -6,7 +6,7 @@ This repository currently contains AI-agent configuration and harness files. It 
 
 Known repo items:
 
-- `AGENTS.md`, `CLAUDE.md`, `docs/`, `tasks/`, `scripts/`, and `progress.md`: AI development harness.
+- `AGENTS.md`, `CLAUDE.md`, `docs/`, `tasks/`, `scripts/`, `schemas/`, and `progress.md`: AI development harness.
 - `.github/workflows/`: CI automation.
 - `.gitignore` and `SECURITY.md`: repository hygiene and security guidance.
 
@@ -48,6 +48,7 @@ Until application code exists, use these boundaries:
 - `docs/`: project documentation and architectural decisions.
 - `tasks/`: task definitions and acceptance criteria.
 - `scripts/`: local automation and verification sensors.
+- `schemas/`: contracts for proposed agent actions. The model writes JSON; `scripts/action.sh validate` accepts or rejects it. This slice does not permit or execute the action.
 - `.github/workflows/`: CI automation.
 - `.harness-db/`: ignored local database state; never required for a clean template checkout.
 
@@ -76,3 +77,4 @@ Add dated decisions here as the system takes shape.
 - 2026-05-24: Added an AI development harness with guides, verification scripts, progress tracking, and CI defaults. Application architecture remains unknown.
 - 2026-05-25: Classified `.codex/`, `.agents/`, and `.venv/` as local-only artifacts because they can contain machine-specific paths, hooks, generated state, or installed dependencies.
 - 2026-05-25: Defined the harness as a cross-project orchestrator. Project-specific documents and run state are local database content under ignored harness database directories, not tracked template files.
+- 2026-09-01: Added a proposed-action schema and validator. The model proposes `run_command` or `write_file` JSON. The harness validates the shape. Permission checks and execution are not in this slice.

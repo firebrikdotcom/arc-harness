@@ -15,6 +15,7 @@ Optional, depending on project files:
 - Go when `go.mod` exists.
 - Rust and Cargo when `Cargo.toml` exists.
 - `shellcheck` for stronger Bash/shell linting.
+- `python3` or `node` to validate proposed action JSON with `scripts/action.sh`.
 - Other language runtimes as documented by future project code.
 
 ## Bootstrap
@@ -107,7 +108,17 @@ scripts/review.sh --project /path/to/project
 
 The review script runs verification in the target project root and prints target git changes separately from harness git changes.
 
+To validate a proposed action JSON file:
+
+```sh
+scripts/action.sh validate PATH
+```
+
+The validator accepts or rejects the file against `schemas/action.schema.json`. It does not execute the action. `python3` is used when available; otherwise `node`. One of those runtimes is required.
+
 `scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly.
+
+Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
 
 Detection order:
 
