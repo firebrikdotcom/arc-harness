@@ -58,6 +58,14 @@ state_dir() {
   printf '%s\n' "$HARNESS_DB_ROOT/runs/$run_id"
 }
 
+# record KIND EXIT [EPOCH_OFFSET]  Fake a scripts/verify.sh or scripts/review.sh record.
+record() {
+  mkdir -p "$HARNESS_DB_ROOT/records"
+  epoch=$(( $(date +%s) + ${3:-0} ))
+  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "GIT_HEAD=fixture" "EXIT=$2" \
+    > "$HARNESS_DB_ROOT/records/$1.state"
+}
+
 # --- harness root discovery -------------------------------------------------
 
 new_case
@@ -99,8 +107,11 @@ expect_output "cannot start review: build is 'pending'"
 run 0 build start
 run 4 review start
 expect_output "cannot start review: build is 'active'"
+record verify 0
 run 0 build "done"
+expect_output "Gate: verify record"
 run 0 review start
+record review 0
 run 0 review "done"
 expect_output "Run complete"
 run 0 status
@@ -108,6 +119,33 @@ expect_output "Run:.*(complete)"
 expect_output "  plan   done"
 expect_output "  build  done"
 expect_output "  review done"
+run 4 build start
+expect_output "is complete. Start a new run"
+
+# --- gates: build done needs a fresh passing verify record ------------------
+
+new_case
+run 0 plan start
+run 0 plan "done"
+run 0 build start
+run 4 build "done"
+expect_output "no verify record"
+record verify 1
+run 4 build "done"
+expect_output "last verify run failed (exit 1)"
+record verify 0 -100
+run 4 build "done"
+expect_output "predates build start"
+record verify 0
+run 0 build "done"
+run 0 review start
+run 4 review "done"
+expect_output "no review record"
+record review 0 -100
+run 4 review "done"
+expect_output "predates review start"
+record review 0
+run 0 review "done"
 
 # --- phase done requires an active phase ------------------------------------
 
@@ -139,6 +177,7 @@ expect_output "steps     1/20"
 expect_output "time_min  0/15"
 expect_output "loops     0/1"
 expect_output "tokens    unknown/unknown"
+expect_output "continues 0/3"
 
 # --- step budget: pause and continue ----------------------------------------
 
@@ -212,6 +251,7 @@ new_case
 run 0 plan start
 run 0 plan "done"
 run 0 build start
+record verify 0
 run 0 build "done"
 run 3 plan start
 expect_output "LOOP: re-entering a completed plan phase"
@@ -220,6 +260,41 @@ run 0 continue "Re-planning once because the build uncovered a missing acceptanc
 expect_output "Budget loops extended to 2"
 run 0 status
 expect_output "loops     1/2"
+
+# --- continue cap -----------------------------------------------------------
+
+new_case
+HARNESS_BUDGET_STEPS=1
+HARNESS_BUDGET_CONTINUES=1
+export HARNESS_BUDGET_STEPS HARNESS_BUDGET_CONTINUES
+run 3 plan start
+run 0 continue "first evaluation"
+expect_output "continue 1/1"
+run 3 step --note "uses the extended window"
+run 3 continue "second evaluation"
+expect_output "continue cap reached (1/1)"
+expect_output "harness abort"
+run 3 step --note "still paused"
+
+# --- abort ------------------------------------------------------------------
+
+new_case
+run 4 abort "nothing to abort"
+expect_output "no harness run exists"
+run 0 plan start
+run 2 abort
+expect_output "abort requires a reason"
+run 0 abort "Scope was wrong; starting over."
+expect_output "aborted"
+RUN_STATE=$(state_dir)
+grep -q 'Scope was wrong' "$RUN_STATE/abort.note" || fail "abort reason not stored"
+grep -q '"status": "aborted"' "$RUN_STATE/run.json" || fail "run.json should show aborted"
+run 4 build start
+expect_output "is aborted. Start a new run"
+run 4 abort "again"
+expect_output "already aborted"
+run 0 plan start
+expect_output "Run created"
 
 # --- token accounting -------------------------------------------------------
 
@@ -252,4 +327,4 @@ expect_output "unknown plan action: finish"
 run 2 bogus
 expect_output "unknown command: bogus"
 
-printf '%s\n' 'PASS: harness CLI phase order, budgets, pause, and continue'
+printf '%s\n' 'PASS: harness CLI phase order, budgets, pause, continue cap, abort, and gates'

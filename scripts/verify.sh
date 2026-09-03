@@ -4,6 +4,9 @@ set -u
 failures=0
 ran=0
 skipped=0
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
+HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}"
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
 REQUIRED_CHECKS="${HARNESS_REQUIRED_CHECKS:-}"
 REQUIRED_CHECKS_SOURCE="environment"
@@ -50,7 +53,7 @@ if [ ! -d "$PROJECT_ROOT" ]; then
 fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 2
 
 if [ -z "$REQUIRED_CHECKS" ] && [ -f .harness-required-checks ]; then
   REQUIRED_CHECKS=$(sed 's/#.*//' .harness-required-checks | tr '\n' ' ')
@@ -181,6 +184,45 @@ has_shell_files() {
   find . \
     \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune \
     -o -type f \( -name '*.sh' -o -path './scripts/*' \) -print -quit | grep -q .
+}
+
+# Run this harness's own regression tests when verifying the harness itself.
+run_harness_tests() {
+  status=0
+  for test_file in tests/*.sh; do
+    info "--> $test_file"
+    if ! sh "$test_file"; then
+      status=1
+    fi
+  done
+  return "$status"
+}
+
+# Write a KEY=VALUE run record that `scripts/harness build done` requires.
+write_run_record() {
+  exit_code="$1"
+  records_dir="$HARNESS_DB_ROOT/records"
+  if ! mkdir -p "$records_dir" 2>/dev/null; then
+    info "WARN: could not create $records_dir; no run record written."
+    return 0
+  fi
+  git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
+  git_dirty=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | grep -c . || true)
+  record="$records_dir/verify.state"
+  {
+    printf 'RECORD_KIND=verify\n'
+    printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
+    printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
+    printf 'GIT_HEAD=%s\n' "$git_head"
+    printf 'GIT_DIRTY_FILES=%s\n' "$git_dirty"
+    printf 'RAN=%s\n' "$ran"
+    printf 'SKIPPED=%s\n' "$skipped"
+    printf 'FAILURES=%s\n' "$failures"
+    printf 'EXIT=%s\n' "$exit_code"
+  } > "$record.tmp.$$"
+  mv "$record.tmp.$$" "$record"
+  info "Run record: $record"
 }
 
 run_make_or_skip() {
@@ -369,6 +411,11 @@ verify_test() {
     ran_any=1
   fi
 
+  if [ -x scripts/harness ] && ls tests/*.sh >/dev/null 2>&1; then
+    run_check "harness:tests" run_harness_tests
+    ran_any=1
+  fi
+
   if has_shell_files; then
     run_check "bash:syntax" find . \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/*' \) -exec sh -n {} +
     ran_any=1
@@ -441,8 +488,10 @@ info ""
 info "Verification summary: ran=$ran skipped=$skipped failures=$failures"
 
 if [ "$failures" -ne 0 ]; then
+  write_run_record 1
   info "Verification failed."
   exit 1
 fi
 
+write_run_record 0
 info "Verification passed."

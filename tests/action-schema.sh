@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
-HARNESS_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 ACTION="$HARNESS_ROOT/scripts/action.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-action.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM

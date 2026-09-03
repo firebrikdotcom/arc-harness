@@ -54,3 +54,20 @@ An agent may only mark work complete when:
 - `scripts/verify.sh` has run.
 - Failures, skips, or missing project tooling are documented.
 - `progress.md` reflects the final state.
+
+<!-- harness-cli:start -->
+## Harness Phases
+
+Every session runs inside a harness phase. Open one before editing files or running commands. Where the phase guard hook is installed, Write, Edit, and Bash are blocked until a phase is active.
+
+```sh
+scripts/harness plan start      # read, scope the task, record the plan in progress.md
+scripts/harness plan done
+scripts/harness build start     # implement; run scripts/verify.sh before finishing
+scripts/harness build done
+scripts/harness review start    # run scripts/review.sh and inspect the diff
+scripts/harness review done
+```
+
+Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
+<!-- harness-cli:end -->

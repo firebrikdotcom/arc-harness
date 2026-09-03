@@ -1,8 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
-HARNESS_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
+HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}"
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
 
 info() {
@@ -85,3 +86,23 @@ info "2. Are tests meaningful?"
 info "3. Did we avoid scope creep?"
 info "4. Are docs/progress updated?"
 info "5. Are there security or performance risks?"
+
+# Write the KEY=VALUE record that `scripts/harness review done` requires.
+records_dir="$HARNESS_DB_ROOT/records"
+if mkdir -p "$records_dir" 2>/dev/null; then
+  git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
+  record="$records_dir/review.state"
+  {
+    printf 'RECORD_KIND=review\n'
+    printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
+    printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
+    printf 'GIT_HEAD=%s\n' "$git_head"
+    printf 'EXIT=0\n'
+  } > "$record.tmp.$$"
+  mv "$record.tmp.$$" "$record"
+  info ""
+  info "Run record: $record"
+else
+  info "WARN: could not create $records_dir; no review record written."
+fi

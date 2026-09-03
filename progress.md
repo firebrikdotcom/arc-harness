@@ -121,6 +121,10 @@ Known risks:
 
 ## Completed Steps
 
+- Build: 2026-09-03 items 3, 4, 5, 10, 12 of `todo.md`: verify/review run records under `.harness-db/records/` gate `build done` and `review done`; `harness abort` and a per-run continue cap; the hook refuses `continue`/`abort` from the agent and records one step per allowed tool call; ShellCheck warnings fixed; `scripts/verify.sh` runs `tests/*.sh` on the harness root. Live check: the hook blocked this session when the stale 2026-09-02 run tripped its time budget, and a human aborted it from a terminal.
+- Build: 2026-09-03 item 2 of `todo.md`: added `Makefile` target `install-guides` and `scripts/install-guides.sh`, which add or refresh a marked Harness Phases block in `AGENTS.md` and `CLAUDE.md`; ran it on this repo; added `tests/install-guides.sh`; documented in `docs/setup.md` and `README.md`.
+- Build: 2026-09-03 item 1 of `todo.md`: added `.claude/settings.json` PreToolUse hook and `scripts/hooks/require-phase.sh` that block Write/Edit/Bash unless a harness phase is active; added `tests/harness-hook.sh`; documented in `docs/setup.md` and `README.md`.
+- Review: 2026-09-03 harness review found 19 concerns; recorded with why and fix in `todo.md` under "Review Findings 2026-09-03".
 - Planning: read `AGENTS.md`, `CLAUDE.md`, `docs/conventions.md`, `docs/setup.md`, `harness-review.md`, `todo.md`, and the existing scripts and tests before writing the CLI.
 - Build: added `scripts/harness` with harness-root discovery, `KEY=VALUE` plus JSON run state under `.harness-db/runs/<id>/`, session budgets, pause records, and plan/build/review gates.
 - Build: added `tests/harness-cli.sh` covering root discovery, every phase-order refusal, the step/time/loop/token budgets, pause records, refusal while paused, and continue with and without an evaluation note.
@@ -163,6 +167,9 @@ Known risks:
 
 ## Verification History
 
+- 2026-09-03: `scripts/verify.sh` passed for the first time since required checks were added. Result: ran=3 skipped=3 failures=0; `bash:shellcheck`, `harness:tests` (five test scripts), and `bash:syntax` all passed; run record written to `.harness-db/records/verify.state`.
+- 2026-09-03: `sh tests/install-guides.sh` passed; `make install-guides` twice on this repo produced identical files; `scripts/verify.sh` still ran no make targets and fails only on the pre-existing ShellCheck warnings (todo #10).
+- 2026-09-03: `sh tests/harness-hook.sh` passed. `shellcheck scripts/hooks/require-phase.sh tests/harness-hook.sh` clean. `scripts/verify.sh` still fails only on the pre-existing ShellCheck warnings (todo #10).
 - 2026-09-02: `sh tests/harness-cli.sh` passed. Result: `PASS: harness CLI phase order, budgets, pause, and continue`.
 - 2026-09-02: `sh tests/action-schema.sh` passed. Result: `PASS: action schema validation`.
 - 2026-09-02: `shellcheck scripts/harness tests/harness-cli.sh` passed with no output.

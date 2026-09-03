@@ -31,48 +31,25 @@ These files explain how agents and humans should work in this repo.
 
 ## Daily Workflow
 
-1. Define the task.
-   - Copy `tasks/task-template.md` into a new task note, or use it as a checklist.
-   - Write the goal, context, acceptance criteria, constraints, implementation plan, verification plan, and rollback notes.
-   - For cross-project work, keep project-specific task notes and progress in `.harness-db/` or another ignored harness database path.
-
-2. Plan before coding.
-   - Read the relevant docs and files.
-   - Identify both the harness root and target project root.
-   - Break work into small steps.
-   - Record the current goal and plan in `progress.md`.
-
-3. Build in small steps.
-   - Keep changes scoped to the task.
-   - Follow existing patterns first.
-   - Update tests and docs when behavior changes.
-   - Update `progress.md` after each meaningful step.
-
-4. Verify before calling work complete.
-   - Run:
-
 ```sh
-scripts/verify.sh
+scripts/harness plan start
+# plan the work
+scripts/harness plan done
+
+scripts/harness build start
+# do the work; run scripts/verify.sh before you call it done
+scripts/harness build done
+
+scripts/harness review start
+# review; run scripts/review.sh
+scripts/harness review done
 ```
 
-For a separate target project:
+You cannot build before plan is done. You cannot review before build is done.
 
-```sh
-scripts/verify.sh --project /path/to/project
-```
+`build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start`.
 
-5. Review before handoff or PR.
-   - Run:
-
-```sh
-scripts/review.sh
-```
-
-For a separate target project:
-
-```sh
-scripts/review.sh --project /path/to/project
-```
+If it stops you: `scripts/harness status`. Only a human may run `scripts/harness continue "why it is ok to go on"` or `scripts/harness abort "reason"`, in a terminal or with the `!` prefix.
 
 ## Important Rules
 
@@ -89,6 +66,7 @@ scripts/review.sh --project /path/to/project
 .github/workflows/ci.yml  CI verification
 .gitignore                Repo hygiene for local artifacts, secrets, and generated output
 AGENTS.md                 Agent operating guide
+Makefile                  Helper targets: make install-guides
 CLAUDE.md                 Claude-specific project instructions
 SECURITY.md               Security and repository hygiene guidance
 docs/architecture.md      Architecture notes and module boundaries
@@ -98,12 +76,17 @@ progress.md               Current goal, decisions, steps, blockers, verification
 schemas/action.schema.json  Proposed-action contract
 scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
+scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
+.claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Safe bootstrap script
+scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
 scripts/verify.sh           Local verification sensor
 scripts/review.sh           Review helper
 tasks/task-template.md      Reusable task template
 tests/action-schema.sh      Action schema regression tests
 tests/harness-cli.sh        Harness CLI phase-order and budget regression tests
+tests/harness-hook.sh       Phase guard hook regression tests
+tests/install-guides.sh     Guide block installer regression tests
 ```
 
 Ignored local database content:
@@ -135,7 +118,7 @@ The script detects common project tooling:
 - `Cargo.toml` for Rust projects.
 - Bash/shell files, including `scripts/*.sh`.
 
-It attempts formatter/check, lint, typecheck, tests, and build. Missing checks are reported as explicit skips.
+It attempts formatter/check, lint, typecheck, tests, and build. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
 
 ## CI
 

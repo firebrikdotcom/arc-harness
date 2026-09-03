@@ -1,11 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
-HARNESS_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && pwd -P)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 VERIFY="$HARNESS_ROOT/scripts/verify.sh"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-verify.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# Keep fixture run records out of the real harness database.
+HARNESS_DB_ROOT="$TMP_ROOT/db"
+export HARNESS_DB_ROOT
 
 pass_project="$TMP_ROOT/pass"
 missing_project="$TMP_ROOT/missing"
@@ -24,6 +27,6 @@ if "$VERIFY" --project "$missing_project" >/dev/null 2>&1; then
   exit 1
 fi
 
-HARNESS_REQUIRED_CHECKS=test "$VERIFY" --project "$override_project" >/dev/null
+HARNESS_REQUIRED_CHECKS='test' "$VERIFY" --project "$override_project" >/dev/null
 
 printf '%s\n' 'PASS: required-check enforcement'

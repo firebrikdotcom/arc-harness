@@ -80,3 +80,20 @@ A task is complete only when:
 - `scripts/verify.sh` has run.
 - Verification result is recorded in `progress.md`.
 - The final response cites exact commands and outcomes.
+
+<!-- harness-cli:start -->
+## Harness Phases
+
+Every session runs inside a harness phase. Open one before editing files or running commands. Where the phase guard hook is installed, Write, Edit, and Bash are blocked until a phase is active.
+
+```sh
+scripts/harness plan start      # read, scope the task, record the plan in progress.md
+scripts/harness plan done
+scripts/harness build start     # implement; run scripts/verify.sh before finishing
+scripts/harness build done
+scripts/harness review start    # run scripts/review.sh and inspect the diff
+scripts/harness review done
+```
+
+Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
+<!-- harness-cli:end -->

@@ -8,6 +8,7 @@ STATE_VERSION=1
 DEFAULT_CAP_STEPS=20
 DEFAULT_CAP_TIME_MIN=15
 DEFAULT_CAP_LOOPS=1
+DEFAULT_CAP_CONTINUES=3
 
 EXIT_USAGE=2
 EXIT_BUDGET=3
@@ -16,6 +17,7 @@ EXIT_PHASE=4
 ROOT=""
 DB_ROOT=""
 RUNS_DIR=""
+RECORDS_DIR=""
 CURRENT_FILE=""
 RUN_DIR=""
 STATE_FILE=""
@@ -35,18 +37,24 @@ usage() {
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
+  info "  abort \"REASON\"       Abort the current run so a new one can start. The reason is required."
   info ""
   info "Budgets (environment overrides, read when the run is created):"
   info "  HARNESS_BUDGET_STEPS     default $DEFAULT_CAP_STEPS"
   info "  HARNESS_BUDGET_TIME_MIN  default $DEFAULT_CAP_TIME_MIN"
   info "  HARNESS_BUDGET_LOOPS     default $DEFAULT_CAP_LOOPS"
   info "  HARNESS_BUDGET_TOKENS    default unknown (the CLI cannot count tokens)"
+  info "  HARNESS_BUDGET_CONTINUES default $DEFAULT_CAP_CONTINUES (continues allowed per run)"
   info ""
   info "Other environment variables:"
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
   info "  HARNESS_DB_ROOT  Override the state directory (default HARNESS_ROOT/.harness-db)."
   info ""
-  info "Exit codes: 0 ok, $EXIT_USAGE usage/environment, $EXIT_BUDGET budget pause, $EXIT_PHASE phase-order violation."
+  info ""
+  info "Gates: 'build done' needs a passing scripts/verify.sh record newer than 'build start';"
+  info "'review done' needs a scripts/review.sh record newer than 'review start'."
+  info ""
+  info "Exit codes: 0 ok, $EXIT_USAGE usage/environment, $EXIT_BUDGET budget pause, $EXIT_PHASE phase-order or gate violation."
 }
 
 has_cmd() {
@@ -109,6 +117,7 @@ setup_paths() {
   require_json_runtime
   DB_ROOT=${HARNESS_DB_ROOT:-$ROOT/.harness-db}
   RUNS_DIR=$DB_ROOT/runs
+  RECORDS_DIR=$DB_ROOT/records
   CURRENT_FILE=$RUNS_DIR/current
 }
 
@@ -281,6 +290,10 @@ create_run() {
   state_set CAP_TIME_MIN "${HARNESS_BUDGET_TIME_MIN:-$DEFAULT_CAP_TIME_MIN}"
   state_set CAP_LOOPS "${HARNESS_BUDGET_LOOPS:-$DEFAULT_CAP_LOOPS}"
   state_set CAP_TOKENS "${HARNESS_BUDGET_TOKENS:-unknown}"
+  state_set CAP_CONTINUES "${HARNESS_BUDGET_CONTINUES:-$DEFAULT_CAP_CONTINUES}"
+  state_set CONTINUES_USED 0
+  state_set PHASE_BUILD_STARTED_EPOCH 0
+  state_set PHASE_REVIEW_STARTED_EPOCH 0
   state_set EXT_STEPS 0
   state_set EXT_TIME_MIN 0
   state_set EXT_LOOPS 0
@@ -388,6 +401,8 @@ write_run_json() {
     loops_cap "$(typed_number "$(effective_cap LOOPS)")" \
     tokens_used "$(typed_number "$(state_get TOKENS_USED)")" \
     tokens_cap "$(typed_number "$(effective_cap TOKENS)")" \
+    continues_used "n:$(state_get CONTINUES_USED 0)" \
+    continues_cap "n:$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")" \
     paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")"
 }
 
@@ -419,9 +434,9 @@ pause_run() {
 }
 
 check_budgets() {
-  if [ "$(state_get RUN_STATUS)" = "complete" ]; then
-    return 0
-  fi
+  case "$(state_get RUN_STATUS)" in
+    complete|aborted) return 0 ;;
+  esac
   for _budget in STEPS TIME_MIN LOOPS TOKENS; do
     _cap=$(effective_cap "$_budget")
     if [ "$_cap" = "unknown" ]; then
@@ -449,6 +464,62 @@ count_step() {
   state_set STEPS_USED "$(( $(state_get STEPS_USED 0) + 1 ))"
 }
 
+# --- gate records -----------------------------------------------------------
+# scripts/verify.sh and scripts/review.sh write KEY=VALUE records under
+# RECORDS_DIR. A phase can only be marked done when the matching record is
+# newer than the phase start and reports exit 0.
+
+record_get() {
+  sed -n "s/^$2=//p" "$1" | tail -n 1
+}
+
+require_gate_record() {
+  case "$1" in
+    build)
+      _kind=verify
+      _since=$(state_get PHASE_BUILD_STARTED_EPOCH 0)
+      _cmd="scripts/verify.sh"
+      ;;
+    review)
+      _kind=review
+      _since=$(state_get PHASE_REVIEW_STARTED_EPOCH 0)
+      _cmd="scripts/review.sh"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  _file="$RECORDS_DIR/$_kind.state"
+
+  if [ ! -f "$_file" ]; then
+    info "FAIL: cannot mark $1 done: no $_kind record at $_file."
+    info "Run $_cmd first; it writes the record."
+    exit "$EXIT_PHASE"
+  fi
+
+  _epoch=$(record_get "$_file" RECORD_EPOCH)
+  _exit=$(record_get "$_file" EXIT)
+  case "$_epoch" in
+    ''|*[!0-9]*)
+      info "FAIL: cannot mark $1 done: $_kind record has no usable RECORD_EPOCH."
+      exit "$EXIT_PHASE"
+      ;;
+  esac
+  if [ "$_epoch" -lt "$_since" ]; then
+    info "FAIL: cannot mark $1 done: the last $_kind record ($(record_get "$_file" RECORD_AT)) predates $1 start."
+    info "Run $_cmd again."
+    exit "$EXIT_PHASE"
+  fi
+  if [ "$_exit" != "0" ]; then
+    info "FAIL: cannot mark $1 done: the last $_kind run failed (exit ${_exit:-unknown})."
+    info "Fix the failures and run $_cmd again."
+    exit "$EXIT_PHASE"
+  fi
+
+  info "Gate: $_kind record $(record_get "$_file" RECORD_AT) exit=0 head=$(record_get "$_file" GIT_HEAD)"
+  log_event "$1 gate: $_kind record at $(record_get "$_file" RECORD_AT) head=$(record_get "$_file" GIT_HEAD)"
+}
+
 # --- phases -----------------------------------------------------------------
 
 phase_key() {
@@ -474,8 +545,21 @@ previous_phase() {
 cmd_phase_start() {
   _phase=$1
 
-  if load_current_run && [ "$(state_get RUN_STATUS)" != "complete" ]; then
-    block_when_paused
+  if load_current_run; then
+    _run_status=$(state_get RUN_STATUS)
+    case "$_run_status" in
+      active|paused)
+        block_when_paused
+        ;;
+      *)
+        if [ "$_phase" = "plan" ]; then
+          create_run
+        else
+          info "FAIL: run $(state_get RUN_ID) is $_run_status. Start a new run: harness plan start"
+          exit "$EXIT_PHASE"
+        fi
+        ;;
+    esac
   elif [ "$_phase" = "plan" ]; then
     create_run
   else
@@ -507,6 +591,10 @@ cmd_phase_start() {
   state_set "$(phase_key "$_phase")" active
   state_set CURRENT_PHASE "$_phase"
   state_set RUN_STATUS active
+  case "$_phase" in
+    build) state_set PHASE_BUILD_STARTED_EPOCH "$(now_epoch)" ;;
+    review) state_set PHASE_REVIEW_STARTED_EPOCH "$(now_epoch)" ;;
+  esac
   count_step
   write_run_json
   log_event "$_phase start"
@@ -526,6 +614,8 @@ cmd_phase_done() {
     info "Start it first: harness $_phase start"
     exit "$EXIT_PHASE"
   fi
+
+  require_gate_record "$_phase"
 
   state_set "$(phase_key "$_phase")" "done"
   state_set CURRENT_PHASE "$_phase"
@@ -630,6 +720,15 @@ cmd_continue() {
     exit "$EXIT_PHASE"
   fi
 
+  _continues=$(state_get CONTINUES_USED 0)
+  _continue_cap=$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")
+  if [ "$_continues" -ge "$_continue_cap" ]; then
+    info "FAIL: continue cap reached ($_continues/$_continue_cap) for run $(state_get RUN_ID)."
+    info "A human must decide: harness abort \"<reason>\" and then harness plan start."
+    exit "$EXIT_BUDGET"
+  fi
+  state_set CONTINUES_USED "$(( _continues + 1 ))"
+
   _budget=$(state_get PAUSE_BUDGET)
   state_set "EXT_$_budget" "$(( $(state_get "EXT_$_budget" 0) + 1 ))"
 
@@ -642,10 +741,42 @@ cmd_continue() {
   write_run_json
   log_event "continue budget=$(budget_label "$_budget")"
 
-  info "OK: evaluation recorded, run $(state_get RUN_ID) resumed."
+  info "OK: evaluation recorded, run $(state_get RUN_ID) resumed (continue $(state_get CONTINUES_USED)/$(state_get CAP_CONTINUES))."
   info "Budget $(budget_label "$_budget") extended to $(effective_cap "$_budget")."
   info "Pause record: $_record"
   check_budgets
+}
+
+# --- abort ------------------------------------------------------------------
+
+cmd_abort() {
+  if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+    info "FAIL: abort requires a reason."
+    info "Usage: harness abort \"<reason>\""
+    exit "$EXIT_USAGE"
+  fi
+  _reason=$1
+  shift
+  if [ "$#" -gt 0 ]; then
+    info "FAIL: unknown argument: $1"
+    exit "$EXIT_USAGE"
+  fi
+
+  require_run
+  case "$(state_get RUN_STATUS)" in
+    complete|aborted)
+      info "FAIL: run $(state_get RUN_ID) is already $(state_get RUN_STATUS)."
+      exit "$EXIT_PHASE"
+      ;;
+  esac
+
+  printf '%s\n' "$_reason" > "$RUN_DIR/abort.note"
+  state_set RUN_STATUS aborted
+  write_run_json
+  log_event "abort"
+
+  info "OK: run $(state_get RUN_ID) aborted. Reason stored in $RUN_DIR/abort.note"
+  info "Next: harness plan start opens a new run."
 }
 
 # --- status -----------------------------------------------------------------
@@ -695,6 +826,7 @@ cmd_status() {
   info "  time_min  $(elapsed_min)/$(effective_cap TIME_MIN)"
   info "  loops     $(state_get LOOPS_USED)/$(effective_cap LOOPS)"
   info "  tokens    $(state_get TOKENS_USED)/$(effective_cap TOKENS)"
+  info "  continues $(state_get CONTINUES_USED 0)/$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")"
   if [ "$(state_get RUN_STATUS)" = "paused" ]; then
     info "Paused on:    $(budget_label "$(state_get PAUSE_BUDGET)")"
     info "Pause record: $RUN_DIR/pauses/$(printf '%03d' "$(state_get PAUSE_SEQ)").json"
@@ -752,6 +884,9 @@ case "$COMMAND" in
     ;;
   continue)
     cmd_continue "$@"
+    ;;
+  abort)
+    cmd_abort "$@"
     ;;
   *)
     info "FAIL: unknown command: $COMMAND"
