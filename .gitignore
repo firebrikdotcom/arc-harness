@@ -47,3 +47,6 @@ __pycache__/
 # Keep portable harness docs/scripts in the repo; regenerate these locally.
 .codex/
 .agents/
+
+# Personal Claude Code settings; the shared hook config lives in .claude/settings.json.
+.claude/settings.local.json

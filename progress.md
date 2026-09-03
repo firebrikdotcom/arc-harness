@@ -48,7 +48,7 @@ Goal: add the `harness` CLI from the confirmed keep/build list in `harness-revie
 
 Non-goals: action executor, dry-run, command manifest, Make plus native checks together, `init.sh` preview, `knowledge/` hook gating. Those belong to other worktrees.
 
-Harness root: `/Users/savior/orca/workspaces/harness-template/feat-cli`
+Harness root: this repository checkout
 
 Target project root: same as the harness root.
 
@@ -121,6 +121,7 @@ Known risks:
 
 ## Completed Steps
 
+- Cleanup: 2026-09-03 removed done items and empty sections from `todo.md` (numbers stay stable); moved `QA-REVIEW.md` into ignored `.harness-db/reviews/`; ignored `.claude/settings.local.json`; removed a machine-local path from this file.
 - Build: 2026-09-03 items 3, 4, 5, 10, 12 of `todo.md`: verify/review run records under `.harness-db/records/` gate `build done` and `review done`; `harness abort` and a per-run continue cap; the hook refuses `continue`/`abort` from the agent and records one step per allowed tool call; ShellCheck warnings fixed; `scripts/verify.sh` runs `tests/*.sh` on the harness root. Live check: the hook blocked this session when the stale 2026-09-02 run tripped its time budget, and a human aborted it from a terminal.
 - Build: 2026-09-03 item 2 of `todo.md`: added `Makefile` target `install-guides` and `scripts/install-guides.sh`, which add or refresh a marked Harness Phases block in `AGENTS.md` and `CLAUDE.md`; ran it on this repo; added `tests/install-guides.sh`; documented in `docs/setup.md` and `README.md`.
 - Build: 2026-09-03 item 1 of `todo.md`: added `.claude/settings.json` PreToolUse hook and `scripts/hooks/require-phase.sh` that block Write/Edit/Bash unless a harness phase is active; added `tests/harness-hook.sh`; documented in `docs/setup.md` and `README.md`.
