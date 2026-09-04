@@ -54,7 +54,9 @@ If it stops you: `scripts/harness status`. Only a human may run `scripts/harness
 ## Important Rules
 
 - Do not declare success without running `scripts/verify.sh`.
-- Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`.
+- Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`. The same denylist is applied by the guard hook to every real Write, Edit, and Bash call.
+- `scripts/init.sh` previews project-owned setup commands and runs them only after you confirm, or with `--yes`.
+- A `knowledge/` folder is followed only after a human runs `scripts/knowledge-trust.sh approve`.
 - Keep planning, building, and reviewing as separate phases.
 - Do not assume secrets exist locally or in CI.
 - Do not delete existing files unless the task explicitly requires it.
@@ -78,15 +80,15 @@ scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 .claude/settings.json       Registers the phase guard hook
-scripts/init.sh             Safe bootstrap script
+scripts/init.sh             Bootstrap: previews project-owned commands, runs them after confirmation
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
-scripts/verify.sh           Local verification sensor
-scripts/review.sh           Review helper
+scripts/permit.sh           Denylist check for commands and write paths
+scripts/knowledge-trust.sh  Human approval gate for a project's knowledge/ folder
+schemas/denylist.default    Default denylist; a project replaces it with .harness-denylist
+scripts/verify.sh           Local verification sensor (check-only, never rewrites)
+scripts/review.sh           Review helper: full patch, continues after a failing verify
 tasks/task-template.md      Reusable task template
-tests/action-schema.sh      Action schema regression tests
-tests/harness-cli.sh        Harness CLI phase-order and budget regression tests
-tests/harness-hook.sh       Phase guard hook regression tests
-tests/install-guides.sh     Guide block installer regression tests
+tests/*.sh                  Regression tests; scripts/verify.sh runs them all on the harness root
 ```
 
 Ignored local database content:
@@ -118,7 +120,7 @@ The script detects common project tooling:
 - `Cargo.toml` for Rust projects.
 - Bash/shell files, including `scripts/*.sh`.
 
-It attempts formatter/check, lint, typecheck, tests, and build. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
+It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
 
 ## CI
 
@@ -127,7 +129,7 @@ CI is defined in `.github/workflows/ci.yml`.
 It runs:
 
 ```sh
-scripts/init.sh
+scripts/init.sh --yes
 scripts/verify.sh
 ```
 

@@ -26,7 +26,7 @@ From the repository root:
 scripts/init.sh
 ```
 
-The bootstrap script is safe and idempotent. It checks available tools, installs dependencies when a known lockfile or manifest is present, and prints next steps.
+The bootstrap script checks required tools, then detects project-owned setup commands (`make init` or `make setup`, `npm`/`pnpm`/`yarn install`, `composer install`, `go mod download`, `cargo fetch`). It prints that list and runs it only after you answer `y`, or when `--yes` or `HARNESS_INIT_YES=1` is given. Without a terminal and without `--yes` it refuses with exit `3`, so nothing from an unfamiliar repository runs by accident. CI passes `--yes`.
 
 To bootstrap a separate target project directory from this harness:
 
@@ -109,7 +109,7 @@ To review a separate target project directory:
 scripts/review.sh --project /path/to/project
 ```
 
-The review script runs verification in the target project root and prints target git changes separately from harness git changes.
+The review script runs verification in the target project root, then prints the full patch: status, staged diff, unstaged diff, and every untracked file as a new-file diff, for the target and separately for the harness when they differ. It keeps going when verification fails, so the reviewer still sees the change, and exits with the verification status. Its record carries `VERIFY_EXIT`, and `scripts/harness review done` accepts it only when that is `0`.
 
 To validate a proposed action JSON file:
 
@@ -117,15 +117,37 @@ To validate a proposed action JSON file:
 scripts/action.sh validate PATH
 ```
 
-The validator accepts or rejects the file against `schemas/action.schema.json`. It does not execute the action. `python3` is used when available; otherwise `node`. One of those runtimes is required.
+The validator accepts or rejects the file against `schemas/action.schema.json`, then checks it against the denylist (see below) and exits `3` when denied. It does not execute the action. `python3` is used when available; otherwise `node`. One of those runtimes is required.
 
 To run the harness regression tests:
 
 ```sh
-sh tests/action-schema.sh
-sh tests/harness-cli.sh
-sh tests/harness-hook.sh
-sh tests/install-guides.sh
+for t in tests/*.sh; do sh "$t"; done
+```
+
+`scripts/verify.sh` runs the same set under its `harness:tests` check.
+
+## Denylist
+
+`scripts/permit.sh` holds the allow-unless-denied rules. `schemas/denylist.default` is the harness default; a project replaces it entirely by adding `.harness-denylist` at its root. Each line is `command <regex>` (matched against the whole shell command) or `path <regex>` (matched against a write target, relative to the project root when inside it). The default denies destroying root, home, or `.git`, privilege escalation, piping downloads into a shell, force pushes and history rewrites, publishing, and any edit to the guard itself: `.claude/settings.json`, `scripts/hooks/`, `scripts/permit.sh`, `schemas/denylist.default`, `.harness-denylist`, and the trust and gate records.
+
+```sh
+scripts/permit.sh check --command "git push --force"     # exit 1, DENY with the rule
+scripts/permit.sh check --path .env                      # exit 1
+scripts/permit.sh rules                                  # print the effective rules
+sh tests/permit.sh
+```
+
+`scripts/action.sh validate` runs this check after schema validation. The phase guard hook runs it on every real Write, Edit, and Bash call, so the check and the action are the same event.
+
+## Knowledge Trust
+
+A `knowledge/` folder inside a project can carry instructions and hooks, so nothing in it is followed until a human approves its exact content once per machine. `scripts/knowledge-trust.sh check` exits `1` while the folder is unapproved or changed since approval; the phase guard hook blocks every tool call in that state. Approval is human-only: the hook refuses `approve` from the agent.
+
+```sh
+scripts/knowledge-trust.sh status  --project /path/to/project
+scripts/knowledge-trust.sh approve --project /path/to/project   # run by a person, after reading the folder
+sh tests/knowledge-trust.sh
 ```
 
 ## Harness CLI
@@ -162,8 +184,8 @@ Session budgets are counted per run and are agent-visible rules:
 
 | Budget | Default cap | Counted by |
 |---|---|---|
-| `steps` | 20 | every phase command and every `harness step` |
-| `time_min` | 15 | wall-clock minutes since the run was created |
+| `steps` | 200 | every phase command, every `harness step`, and every tool call the hook counts |
+| `time_min` | 120 | wall-clock minutes since the run was created or last resumed from a time pause |
 | `loops` | 1 | re-entering a phase that was already marked done |
 | `tokens` | unknown | only what `harness step --tokens N` reports |
 | `continues` | 3 | every accepted `harness continue` in the run |
@@ -172,7 +194,7 @@ Set caps with `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET
 
 When a cap is reached the CLI writes a pause record, refuses further phase and step commands, and exits non-zero. `harness continue` requires an evaluation note, stores it in the pause record, and extends the tripped budget by one more window. There is no way to resume without that evaluation. Once the `continues` cap is reached, `continue` is refused and the only way forward is `harness abort "<reason>"` followed by `harness plan start`.
 
-`continue` and `abort` are human decisions. The phase guard hook refuses them when the agent issues them through the Bash tool; a person runs them in a terminal or with the `!` prefix in the Claude Code prompt. Set `HARNESS_BUDGET_CONTINUES` to change the cap.
+A `continue` on the time budget restarts the clock as well as adding a window, so a run left overnight resumes cleanly. `continue` and `abort` are human decisions. The phase guard hook refuses them when the agent issues them through the Bash tool; a person runs them in a terminal or with the `!` prefix in the Claude Code prompt. Set `HARNESS_BUDGET_CONTINUES` to change the cap.
 
 Exit codes:
 
@@ -212,7 +234,9 @@ The `Makefile` deliberately has no `format`, `lint`, `typecheck`, `test`, or `bu
 
 `.claude/settings.json` registers `scripts/hooks/require-phase.sh` as a Claude Code `PreToolUse` hook for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. The hook asks `scripts/harness status` for the run state and blocks the tool call (exit 2) unless a phase is active and the run is not paused, complete, or aborted. Bash calls whose whole command is `scripts/harness ...` or `scripts/action.sh validate ...` are allowed so the agent can open a phase; a chained command such as `scripts/harness plan start; rm -rf build` is not, and `scripts/harness continue` or `abort` from the agent is always refused.
 
-Every allowed call is recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. The default cap of 20 steps is tight for that; start runs with `HARNESS_BUDGET_STEPS=<n> scripts/harness plan start` when a task needs more. Tokens stay `unknown` because the hook payload carries no token counts.
+Before the phase check, the hook applies the denylist to the actual command or write path and refuses to work while a `knowledge/` folder is unapproved. Every allowed call is then recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. Start runs with `HARNESS_BUDGET_STEPS=<n>` or `HARNESS_BUDGET_TIME_MIN=<n>` when a task needs more than the defaults. Tokens stay `unknown` because the hook payload carries no token counts.
+
+A person can switch the hook off for one session by exporting `HARNESS_HOOK_DISABLE=1` in the environment Claude Code starts from. The denylist refuses that string inside agent commands, so the agent cannot do it for itself.
 
 The hook is enforcement for Claude Code only. Other agents still rely on the written rules. Run its regression test with:
 
@@ -220,7 +244,7 @@ The hook is enforcement for Claude Code only. Other agents still rely on the wri
 sh tests/harness-hook.sh
 ```
 
-`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
+`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
 
 Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
 

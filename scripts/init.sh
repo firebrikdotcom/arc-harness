@@ -2,15 +2,19 @@
 set -eu
 
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
+ASSUME_YES="${HARNESS_INIT_YES:-0}"
+PLAN_FILE=""
 
 info() {
   printf '%s\n' "$*"
 }
 
 usage() {
-  info "Usage: scripts/init.sh [--project PATH]"
+  info "Usage: scripts/init.sh [--project PATH] [--yes]"
   info ""
   info "Bootstraps dependencies in PATH. Defaults to the current directory."
+  info "Project-owned commands (make init, npm install, composer install, ...) are"
+  info "previewed first and only run after you confirm, or with --yes / HARNESS_INIT_YES=1."
 }
 
 has_cmd() {
@@ -26,6 +30,10 @@ while [ "$#" -gt 0 ]; do
       fi
       PROJECT_ROOT="$2"
       shift 2
+      ;;
+    --yes|-y)
+      ASSUME_YES=1
+      shift
       ;;
     --help|-h)
       usage
@@ -45,13 +53,56 @@ if [ ! -d "$PROJECT_ROOT" ]; then
 fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
-cd "$PROJECT_ROOT"
+cd "$PROJECT_ROOT" || exit 2
 
+PLAN_FILE=$(mktemp "${TMPDIR:-/tmp}/harness-init-plan.XXXXXX")
+trap 'rm -f "$PLAN_FILE"' EXIT HUP INT TERM
+
+# run_if_available DESC CMD...  Queues a project-owned command for the preview.
+# Nothing runs until the plan is confirmed.
 run_if_available() {
   desc="$1"
   shift
-  info "==> $desc"
-  "$@"
+  printf '%s\t%s\n' "$desc" "$*" >> "$PLAN_FILE"
+}
+
+confirm_and_run_plan() {
+  if [ ! -s "$PLAN_FILE" ]; then
+    info "No project-owned setup commands detected; nothing to run."
+    return 0
+  fi
+
+  info ""
+  info "Project-owned commands that would run in $PROJECT_ROOT:"
+  while IFS="$(printf '\t')" read -r desc cmd; do
+    info "  $cmd    # $desc"
+  done < "$PLAN_FILE"
+  info ""
+  info "These come from the project's own files and run with your permissions."
+
+  if [ "$ASSUME_YES" != "1" ]; then
+    if [ ! -t 0 ]; then
+      info "REFUSED: no terminal to confirm on. Re-run with --yes (or HARNESS_INIT_YES=1) to run them."
+      exit 3
+    fi
+    printf 'Run them now? [y/N] '
+    read -r answer
+    case "$answer" in
+      y|Y|yes|YES) ;;
+      *)
+        info "REFUSED: nothing was run."
+        exit 3
+        ;;
+    esac
+  fi
+
+  while IFS="$(printf '\t')" read -r desc cmd; do
+    info "==> $desc"
+    sh -c "$cmd" || {
+      info "FAIL: $desc (exit $?)"
+      exit 1
+    }
+  done < "$PLAN_FILE"
 }
 
 make_has_target() {
@@ -188,6 +239,7 @@ bootstrap_node
 bootstrap_php
 bootstrap_go
 bootstrap_rust
+confirm_and_run_plan
 
 info ""
 info "Next steps:"

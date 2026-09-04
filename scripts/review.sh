@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -eu
+set -u
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
@@ -55,28 +55,44 @@ if [ ! -x "$SCRIPT_DIR/verify.sh" ]; then
   exit 1
 fi
 
-"$SCRIPT_DIR/verify.sh" --project "$PROJECT_ROOT"
-
-info ""
-info "==> target git diff summary"
-if command -v git >/dev/null 2>&1 && git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C "$PROJECT_ROOT" status --short -- .
+# Verification failing is exactly when a reviewer needs the evidence below,
+# so its status is captured and the review continues.
+verify_status=0
+"$SCRIPT_DIR/verify.sh" --project "$PROJECT_ROOT" || verify_status=$?
+if [ "$verify_status" -ne 0 ]; then
   info ""
-  git -C "$PROJECT_ROOT" diff --stat -- .
-else
-  info "SKIP: git is unavailable or project root is not a git worktree."
+  info "WARN: verification failed (exit $verify_status); continuing the review so the change can still be inspected."
 fi
 
-if [ "$PROJECT_ROOT" != "$HARNESS_ROOT" ]; then
+# show_patch ROOT LABEL  Prints status, the full staged and unstaged patch, and
+# every untracked file as a new-file diff.
+show_patch() {
+  root="$1"
+  label="$2"
   info ""
-  info "==> harness git diff summary"
-  if command -v git >/dev/null 2>&1 && git -C "$HARNESS_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$HARNESS_ROOT" status --short -- .
-    info ""
-    git -C "$HARNESS_ROOT" diff --stat -- .
-  else
-    info "SKIP: git is unavailable or harness root is not a git worktree."
+  info "==> $label changes"
+  if ! command -v git >/dev/null 2>&1 || ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    info "SKIP: git is unavailable or $label root is not a git worktree."
+    return 0
   fi
+  git -C "$root" status --short -- .
+  info ""
+  info "--- $label patch: staged"
+  git -C "$root" --no-pager diff --cached -- .
+  info ""
+  info "--- $label patch: unstaged"
+  git -C "$root" --no-pager diff -- .
+  info ""
+  info "--- $label patch: untracked files"
+  git -C "$root" ls-files --others --exclude-standard -- . | while IFS= read -r untracked; do
+    [ -n "$untracked" ] || continue
+    git -C "$root" --no-pager diff --no-index -- /dev/null "$untracked" || true
+  done
+}
+
+show_patch "$PROJECT_ROOT" "target"
+if [ "$PROJECT_ROOT" != "$HARNESS_ROOT" ]; then
+  show_patch "$HARNESS_ROOT" "harness"
 fi
 
 info ""
@@ -98,7 +114,8 @@ if mkdir -p "$records_dir" 2>/dev/null; then
     printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
     printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
     printf 'GIT_HEAD=%s\n' "$git_head"
-    printf 'EXIT=0\n'
+    printf 'VERIFY_EXIT=%s\n' "$verify_status"
+    printf 'EXIT=%s\n' "$verify_status"
   } > "$record.tmp.$$"
   mv "$record.tmp.$$" "$record"
   info ""
@@ -106,3 +123,9 @@ if mkdir -p "$records_dir" 2>/dev/null; then
 else
   info "WARN: could not create $records_dir; no review record written."
 fi
+
+if [ "$verify_status" -ne 0 ]; then
+  info "Review finished with verification failures (exit $verify_status)."
+  exit "$verify_status"
+fi
+info "Review finished."

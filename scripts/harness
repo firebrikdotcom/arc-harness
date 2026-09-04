@@ -5,8 +5,8 @@ set -eu
 # plan -> build -> review phase order. It never executes actions for the model.
 
 STATE_VERSION=1
-DEFAULT_CAP_STEPS=20
-DEFAULT_CAP_TIME_MIN=15
+DEFAULT_CAP_STEPS=200
+DEFAULT_CAP_TIME_MIN=120
 DEFAULT_CAP_LOOPS=1
 DEFAULT_CAP_CONTINUES=3
 
@@ -731,6 +731,11 @@ cmd_continue() {
 
   _budget=$(state_get PAUSE_BUDGET)
   state_set "EXT_$_budget" "$(( $(state_get "EXT_$_budget" 0) + 1 ))"
+  if [ "$_budget" = "TIME_MIN" ]; then
+    # Restart the clock: an old run must not re-pause the moment it resumes.
+    # The elapsed time before this evaluation stays visible in the pause record.
+    state_set RUN_STARTED_EPOCH "$(now_epoch)"
+  fi
 
   printf '%s\n' "$_note" > "$RUN_DIR/pauses/$(printf '%03d' "$(state_get PAUSE_SEQ)").note"
   state_set PAUSE_RESOLVED true

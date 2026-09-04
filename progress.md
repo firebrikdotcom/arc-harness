@@ -121,6 +121,8 @@ Known risks:
 
 ## Completed Steps
 
+- Build: 2026-09-03 critical items 6, 7, 8, 9, 27, 39, 40 and reopened 14: denylist (`schemas/denylist.default`, `scripts/permit.sh`) applied by `scripts/action.sh` and by the hook to every real tool call; `scripts/init.sh` previews and confirms project-owned commands (`--yes` in CI); `scripts/knowledge-trust.sh` human approval gate enforced by the hook; `scripts/verify.sh` runs only check-style formatters; `scripts/review.sh` prints the full patch and continues after a failing verify; budget defaults raised to 200 steps and 120 minutes; a time-budget continue restarts the clock. New tests: permit, knowledge-trust, review, init-preview, verify-no-rewrite; hook, CLI, and action tests extended.
+- Cleanup: 2026-09-03 pruned `todo.md` to 19 open items: merged duplicates (progress, guides, tooling, review, timeouts) and dropped six nitpicks, listed at the end of the file.
 - Cleanup: 2026-09-03 removed done items and empty sections from `todo.md` (numbers stay stable); moved `QA-REVIEW.md` into ignored `.harness-db/reviews/`; ignored `.claude/settings.local.json`; removed a machine-local path from this file.
 - Build: 2026-09-03 items 3, 4, 5, 10, 12 of `todo.md`: verify/review run records under `.harness-db/records/` gate `build done` and `review done`; `harness abort` and a per-run continue cap; the hook refuses `continue`/`abort` from the agent and records one step per allowed tool call; ShellCheck warnings fixed; `scripts/verify.sh` runs `tests/*.sh` on the harness root. Live check: the hook blocked this session when the stale 2026-09-02 run tripped its time budget, and a human aborted it from a terminal.
 - Build: 2026-09-03 item 2 of `todo.md`: added `Makefile` target `install-guides` and `scripts/install-guides.sh`, which add or refresh a marked Harness Phases block in `AGENTS.md` and `CLAUDE.md`; ran it on this repo; added `tests/install-guides.sh`; documented in `docs/setup.md` and `README.md`.
@@ -168,6 +170,7 @@ Known risks:
 
 ## Verification History
 
+- 2026-09-03: `scripts/verify.sh` passed after the critical items. Result: ran=3 skipped=3 failures=0; `bash:shellcheck`, `harness:tests` (ten test scripts), and `bash:syntax` passed; run record written. A human fixed one ShellCheck nit in `scripts/permit.sh` because the denylist forbids the agent from editing the guard.
 - 2026-09-03: `scripts/verify.sh` passed for the first time since required checks were added. Result: ran=3 skipped=3 failures=0; `bash:shellcheck`, `harness:tests` (five test scripts), and `bash:syntax` all passed; run record written to `.harness-db/records/verify.state`.
 - 2026-09-03: `sh tests/install-guides.sh` passed; `make install-guides` twice on this repo produced identical files; `scripts/verify.sh` still ran no make targets and fails only on the pre-existing ShellCheck warnings (todo #10).
 - 2026-09-03: `sh tests/harness-hook.sh` passed. `shellcheck scripts/hooks/require-phase.sh tests/harness-hook.sh` clean. `scripts/verify.sh` still fails only on the pre-existing ShellCheck warnings (todo #10).

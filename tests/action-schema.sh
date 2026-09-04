@@ -44,4 +44,14 @@ expect_fail "command as string" "$TMP_ROOT/command-string.json"
 expect_fail "missing version" "$TMP_ROOT/missing-version.json"
 expect_fail "invalid JSON" "$TMP_ROOT/invalid.json"
 
+# Denylist: a well-formed action can still be refused.
+printf '%s\n' '{"version":1,"type":"run_command","command":["rm","-rf","/"]}' > "$TMP_ROOT/deny-run.json"
+printf '%s\n' '{"version":1,"type":"write_file","path":".git/hooks/pre-commit","content":"x"}' > "$TMP_ROOT/deny-write.json"
+status=0
+"$ACTION" validate "$TMP_ROOT/deny-run.json" >/dev/null 2>&1 || status=$?
+[ "$status" -eq 3 ] || fail "dangerous run_command exited $status, expected 3"
+status=0
+"$ACTION" validate "$TMP_ROOT/deny-write.json" >/dev/null 2>&1 || status=$?
+[ "$status" -eq 3 ] || fail "write into .git exited $status, expected 3"
+
 printf '%s\n' 'PASS: action schema validation'

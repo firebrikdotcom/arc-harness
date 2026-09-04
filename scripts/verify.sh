@@ -235,18 +235,26 @@ run_make_or_skip() {
 }
 
 verify_format() {
-  if run_make_or_skip format || run_make_or_skip fmt; then
+  # Only check-style targets run here. `make format`/`make fmt` and a plain
+  # `format` script usually rewrite files, and verification must never do that.
+  if run_make_or_skip format-check || run_make_or_skip fmt-check || run_make_or_skip check-format; then
     return
+  fi
+  if make_has_target format || make_has_target fmt; then
+    mark_skip "Makefile has format/fmt but no format-check target; verification never runs a rewriting formatter"
   fi
 
   ran_any=0
 
   pm="$(detect_node_pm)"
-  if [ -n "$pm" ] && json_has_script package.json format; then
-    run_node_script "$pm" format
-    ran_any=1
-  elif [ -n "$pm" ] && json_has_script package.json "format:check"; then
+  if [ -n "$pm" ] && json_has_script package.json "format:check"; then
     run_node_script "$pm" "format:check"
+    ran_any=1
+  elif [ -n "$pm" ] && json_has_script package.json "prettier:check"; then
+    run_node_script "$pm" "prettier:check"
+    ran_any=1
+  elif [ -n "$pm" ] && json_has_script package.json format; then
+    mark_skip "package.json has a format script but no format:check; verification never runs a rewriting formatter"
     ran_any=1
   fi
 

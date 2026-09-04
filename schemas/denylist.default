@@ -1,0 +1,56 @@
+# Harness default denylist. A project replaces it entirely with a .harness-denylist file at its root.
+# Format: "command <regex>" matches the whole shell command string; "path <regex>" matches a write
+# target, relative to the project root when inside it and absolute otherwise. Regexes must be valid
+# in both Python and JavaScript. Rules are deny-only: anything not listed is allowed.
+
+# Destroying root, home, the parent or current directory, or the git directory
+command (^|[;&|(]\s*)rm\s+(-[A-Za-z]+\s+)*(-[A-Za-z]*[rRf][A-Za-z]*\s+)(-[A-Za-z]+\s+)*(/\*?|~/?|\$HOME/?|\.\.|\.)(\s|$|[;&|)])
+command (^|[;&|(]\s*)rm\s+(-[A-Za-z]+\s+)*(-[A-Za-z]*[rR][A-Za-z]*\s+)(-[A-Za-z]+\s+)*(\./)?\.git(/|\s|$|[;&|)])
+command \bfind\s+(/|~)\s.*\s-delete\b
+command \b(mkfs|fdisk|diskutil\s+erase|dd\s+if=)
+command >\s*/dev/(sd|disk|nvme|hd)
+command \b(shutdown|reboot|halt|poweroff)\b
+
+# Privilege escalation and piping downloads into an interpreter
+command (^|[;&|(]\s*)(sudo|doas|su)\b
+command \|\s*(sudo\s+)?(ba|z|da|k|c|tc)?sh\b
+command \b(curl|wget)\b.*\|\s*(python3?|perl|node|ruby)\b
+
+# History-rewriting or destructive git
+command \bgit\s+push\b.*(\s--force\b|\s-f\b|\s\+[A-Za-z])
+command \bgit\s+(reset\s+--hard|clean\s+-[A-Za-z]*[fFxX]|checkout\s+--\s+\.|restore\s+(--staged\s+)?\.\s*$)
+command \bgit\s+(branch\s+-D|filter-branch|filter-repo|update-ref\s+-d)\b
+command \bgit\s+config\b.*\bcore\.hooksPath\b
+
+# Publishing to the outside world
+command \b(npm|pnpm|yarn)\s+publish\b
+command \b(cargo|gem)\s+(publish|push)\b
+command \btwine\s+upload\b
+command \bgh\s+(release\s+create|repo\s+delete)\b
+
+# Loosening permissions or tampering with the harness guard and its records
+command \bchmod\s+(-R\s+)?[0-7]*777\b
+command HARNESS_HOOK_DISABLE
+command \.claude/(settings(\.local)?\.json|CLAUDE\.md)
+command (^|[\s"'=(])scripts/hooks/
+command (^|[\s"'=(])scripts/permit\.sh
+command (^|[\s"'=(])schemas/denylist\.default
+command \.harness-denylist
+command knowledge-trust\.sh\s+approve\b
+command (^|[\s"'=(])\.harness-db/(trust|records)/
+
+# Write targets: git internals, secrets, the guard itself
+path (^|/)\.git(/|$)
+path (^|/)\.env$
+path (^|/)\.env\.(?!example$)
+path (^|/)id_(rsa|dsa|ecdsa|ed25519)$
+path \.(pem|key|p12|pfx)$
+path (^|/)\.(ssh|gnupg|aws)/
+path ^/etc/
+path (^|/)\.claude/(settings(\.local)?\.json|CLAUDE\.md)$
+path ^scripts/hooks/
+path ^scripts/permit\.sh$
+path ^scripts/knowledge-trust\.sh$
+path ^schemas/denylist\.default$
+path ^\.harness-denylist$
+path ^\.harness-db/(trust|records)/

@@ -11,8 +11,9 @@ info() {
 usage() {
   info "Usage: scripts/action.sh validate PATH"
   info ""
-  info "Validates a proposed action JSON file against schemas/action.schema.json."
-  info "Does not execute the action."
+  info "Validates a proposed action JSON file against schemas/action.schema.json,"
+  info "then checks it against the denylist (scripts/permit.sh). Does not execute it."
+  info "Exit codes: 0 valid and allowed, 2 invalid or usage error, 3 denied."
 }
 
 has_cmd() {
@@ -100,7 +101,7 @@ elif action_type == "write_file":
     if "content" in data and not isinstance(data["content"], str):
         fail("content must be a string")
 
-sys.stdout.write("PASS: action valid (type=%s)\n" % action_type)
+sys.stdout.write("%s\n" % action_type)
 PY
 }
 
@@ -190,7 +191,7 @@ if (actionType === 'run_command') {
   }
 }
 
-process.stdout.write(`PASS: action valid (type=${actionType})\n`);
+process.stdout.write(`${actionType}\n`);
 JS
 }
 
@@ -220,13 +221,32 @@ case "$1" in
       exit 2
     fi
     if has_cmd python3; then
-      validate_with_python "$ACTION_FILE"
+      action_type=$(validate_with_python "$ACTION_FILE")
     elif has_cmd node; then
-      validate_with_node "$ACTION_FILE"
+      action_type=$(validate_with_node "$ACTION_FILE")
     else
       info "FAIL: python3 or node is required to validate action JSON."
       exit 2
     fi
+
+    # Denylist: the same rules the phase guard hook applies to real tool calls.
+    if has_cmd python3; then
+      subject=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(d["command"]) if d["type"]=="run_command" else d["path"])' "$ACTION_FILE")
+    else
+      subject=$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(d.type==="run_command" ? d.command.join(" ") : d.path)' "$ACTION_FILE")
+    fi
+    if [ "$action_type" = "run_command" ]; then
+      verdict=$("$HARNESS_ROOT/scripts/permit.sh" check --command "$subject" --project "${HARNESS_TARGET_ROOT:-$HARNESS_ROOT}" 2>&1) || {
+        info "FAIL: action denied. $verdict"
+        exit 3
+      }
+    else
+      verdict=$("$HARNESS_ROOT/scripts/permit.sh" check --path "$subject" --project "${HARNESS_TARGET_ROOT:-$HARNESS_ROOT}" 2>&1) || {
+        info "FAIL: action denied. $verdict"
+        exit 3
+      }
+    fi
+    info "PASS: action valid and allowed (type=$action_type)"
     ;;
   *)
     info "FAIL: unknown argument: $1"
