@@ -9,6 +9,8 @@ DEFAULT_CAP_STEPS=200
 DEFAULT_CAP_TIME_MIN=120
 DEFAULT_CAP_LOOPS=1
 DEFAULT_CAP_CONTINUES=3
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+SCRIPT_HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 
 EXIT_USAGE=2
 EXIT_BUDGET=3
@@ -97,7 +99,13 @@ resolve_harness_root() {
     _dir=$(dirname "$_dir")
   done
 
+  if is_harness_root "$SCRIPT_HARNESS_ROOT"; then
+    ROOT=$SCRIPT_HARNESS_ROOT
+    return 0
+  fi
+
   info "FAIL: no harness root found from $(pwd -P) or its ancestors."
+  info "The CLI installation root is not a harness root either: $SCRIPT_HARNESS_ROOT"
   info "A harness root contains AGENTS.md and scripts/verify.sh."
   return 1
 }

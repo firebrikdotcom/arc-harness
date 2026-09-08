@@ -42,6 +42,32 @@ Build the `harness` CLI slice on branch `lotharthesavior/feat-cli`: harness-root
 
 ## Active Plan
 
+Goal: let external projects invoke `scripts/harness` by absolute path without repeating an inline `HARNESS_ROOT` assignment.
+
+Acceptance criteria:
+
+- The CLI falls back to its own installation root when neither `HARNESS_ROOT` nor current-directory discovery resolves a harness.
+- An explicit `HARNESS_ROOT` remains authoritative.
+- External guide blocks contain a clean absolute `scripts/harness` command.
+- CLI, guide-installer, and full harness verification pass.
+
+Implementation plan:
+
+1. Add executable-location root discovery to `scripts/harness`.
+2. Simplify the external-project command emitted by `scripts/install-guides.sh`.
+3. Update regression tests for the new behavior.
+4. Run build verification, then a separate review phase.
+
+Verification plan:
+
+- Run `sh tests/harness-cli.sh` and `sh tests/install-guides.sh`.
+- Run `scripts/verify.sh` during build.
+- Run `scripts/review.sh` during review.
+
+Known risks:
+
+- Executable-location discovery follows the invoked path; a symlink installed outside the harness still needs `HARNESS_ROOT` unless symlink resolution is added separately.
+
 Phase: Build and review complete on `lotharthesavior/feat-cli`. Not merged, not pushed.
 
 Goal: add the `harness` CLI from the confirmed keep/build list in `harness-review.md` — harness-root discovery, session budgets, and plan/build/review phase ownership.
@@ -121,6 +147,10 @@ Known risks:
 
 ## Completed Steps
 
+- Build: added executable-location fallback to `scripts/harness`, simplified external guide commands to the absolute CLI path, and updated root-discovery and installer regression coverage.
+- Build: isolated `tests/harness-hook.sh` from machine-local `knowledge/` trust state after the first full verification exposed that fixture dependency.
+- Review: inspected the scoped diff and `git diff --check`; no whitespace errors or unresolved functional risks found. Absolute-path discovery, explicit override behavior, orphan failure, guide idempotence, and hook isolation are covered.
+
 - Build: 2026-09-03 critical items 6, 7, 8, 9, 27, 39, 40 and reopened 14: denylist (`schemas/denylist.default`, `scripts/permit.sh`) applied by `scripts/action.sh` and by the hook to every real tool call; `scripts/init.sh` previews and confirms project-owned commands (`--yes` in CI); `scripts/knowledge-trust.sh` human approval gate enforced by the hook; `scripts/verify.sh` runs only check-style formatters; `scripts/review.sh` prints the full patch and continues after a failing verify; budget defaults raised to 200 steps and 120 minutes; a time-budget continue restarts the clock. New tests: permit, knowledge-trust, review, init-preview, verify-no-rewrite; hook, CLI, and action tests extended.
 - Cleanup: 2026-09-03 pruned `todo.md` to 19 open items: merged duplicates (progress, guides, tooling, review, timeouts) and dropped six nitpicks, listed at the end of the file.
 - Cleanup: 2026-09-03 removed done items and empty sections from `todo.md` (numbers stay stable); moved `QA-REVIEW.md` into ignored `.harness-db/reviews/`; ignored `.claude/settings.local.json`; removed a machine-local path from this file.
@@ -169,6 +199,9 @@ Known risks:
 - None for this feature. `scripts/verify.sh` fails on ShellCheck warnings that predate this branch in files owned by other work; the two new files are clean.
 
 ## Verification History
+
+- 2026-09-03: `scripts/verify.sh` initially failed because `tests/harness-hook.sh` used the live harness root and encountered its unapproved machine-local `knowledge/`; after moving the test to an isolated harness fixture, the same `scripts/verify.sh` command passed with `bash:shellcheck`, all ten harness tests, and `bash:syntax` passing (ran=3, skipped=3, failures=0).
+- 2026-09-03: `sh tests/harness-cli.sh`, `sh tests/install-guides.sh`, and the isolated `sh tests/harness-hook.sh` all passed for executable-location root discovery and clean external guide commands.
 
 - 2026-09-03: `scripts/verify.sh` passed after the critical items. Result: ran=3 skipped=3 failures=0; `bash:shellcheck`, `harness:tests` (ten test scripts), and `bash:syntax` passed; run record written. A human fixed one ShellCheck nit in `scripts/permit.sh` because the denylist forbids the agent from editing the guard.
 - 2026-09-03: `scripts/verify.sh` passed for the first time since required checks were added. Result: ran=3 skipped=3 failures=0; `bash:shellcheck`, `harness:tests` (five test scripts), and `bash:syntax` all passed; run record written to `.harness-db/records/verify.state`.

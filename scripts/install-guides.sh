@@ -50,11 +50,12 @@ if [ ! -d "$PROJECT_ROOT" ]; then
 fi
 PROJECT_ROOT=$(CDPATH='' cd "$PROJECT_ROOT" && pwd -P)
 
-# Inside the harness root the CLI finds itself; elsewhere it needs the root.
+# Inside the harness root a relative command is convenient. External projects
+# use the absolute CLI path, which now resolves its root from its own location.
 if [ "$PROJECT_ROOT" = "$HARNESS_ROOT" ]; then
   CLI="scripts/harness"
 else
-  CLI="HARNESS_ROOT=$HARNESS_ROOT $HARNESS_ROOT/scripts/harness"
+  CLI="$HARNESS_ROOT/scripts/harness"
 fi
 
 block_file="$PROJECT_ROOT/.harness-guide-block.tmp.$$"

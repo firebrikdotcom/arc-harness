@@ -75,7 +75,18 @@ expect_output "Run:          none"
 
 status=0
 (cd "$TMP_ROOT" && "$CLI" status) > "$OUT" 2>&1 || status=$?
-[ "$status" -eq 2 ] || fail "harness status outside a harness root exited $status, expected 2"
+[ "$status" -eq 0 ] || fail "absolute harness path outside its root exited $status, expected 0"
+grep -q "Harness root: $HARNESS_ROOT_UNDER_TEST" "$OUT" \
+  || fail "absolute harness path should infer its installation root"
+
+# A copied CLI with neither a surrounding harness nor a valid installation root
+# still fails with a clear discovery error.
+ORPHAN="$TMP_ROOT/orphan"
+mkdir -p "$ORPHAN/scripts" "$ORPHAN/work"
+cp "$CLI" "$ORPHAN/scripts/harness"
+status=0
+(cd "$ORPHAN/work" && "$ORPHAN/scripts/harness" status) > "$OUT" 2>&1 || status=$?
+[ "$status" -eq 2 ] || fail "orphan harness CLI exited $status, expected 2"
 grep -q "no harness root found" "$OUT" || fail "expected a clear no-harness-root message"
 
 # --- phase order ------------------------------------------------------------

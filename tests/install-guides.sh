@@ -27,9 +27,13 @@ grep -q 'Keep this line.' "$PROJECT/AGENTS.md" || fail "existing AGENTS.md conte
 [ "$(count_markers "$PROJECT/CLAUDE.md")" -eq 1 ] || fail "CLAUDE.md should hold exactly one block"
 grep -q 'plan start' "$PROJECT/AGENTS.md" || fail "block missing the plan command"
 
-# Outside the harness root the commands must carry HARNESS_ROOT and an absolute path.
-grep -q "HARNESS_ROOT=$HARNESS_ROOT_UNDER_TEST $HARNESS_ROOT_UNDER_TEST/scripts/harness plan start" "$PROJECT/AGENTS.md" \
-  || fail "external project block should point at the harness root"
+# Outside the harness root the commands use a clean absolute CLI path. The CLI
+# infers its root from that path, so no repeated environment assignment is needed.
+grep -q "^$HARNESS_ROOT_UNDER_TEST/scripts/harness plan start" "$PROJECT/AGENTS.md" \
+  || fail "external project block should point at the harness CLI"
+if grep -q 'HARNESS_ROOT=' "$PROJECT/AGENTS.md"; then
+  fail "external project block should not repeat HARNESS_ROOT"
+fi
 
 # Second run changes nothing.
 cp "$PROJECT/AGENTS.md" "$TMP_ROOT/agents.before"

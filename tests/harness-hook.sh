@@ -2,12 +2,25 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
-HARNESS_ROOT_UNDER_TEST=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
-HOOK="$HARNESS_ROOT_UNDER_TEST/scripts/hooks/require-phase.sh"
-CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
+SOURCE_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-hook.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 OUT="$TMP_ROOT/out.txt"
+
+# Exercise an isolated harness installation so machine-local knowledge/ state
+# in the source checkout cannot change the hook's initial result.
+HARNESS_ROOT_UNDER_TEST="$TMP_ROOT/harness"
+mkdir -p "$HARNESS_ROOT_UNDER_TEST/scripts/hooks" "$HARNESS_ROOT_UNDER_TEST/schemas"
+cp "$SOURCE_ROOT/AGENTS.md" "$HARNESS_ROOT_UNDER_TEST/AGENTS.md"
+cp "$SOURCE_ROOT/scripts/harness" "$HARNESS_ROOT_UNDER_TEST/scripts/harness"
+cp "$SOURCE_ROOT/scripts/verify.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh"
+cp "$SOURCE_ROOT/scripts/permit.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/permit.sh"
+cp "$SOURCE_ROOT/scripts/knowledge-trust.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/knowledge-trust.sh"
+cp "$SOURCE_ROOT/scripts/hooks/require-phase.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/hooks/require-phase.sh"
+cp "$SOURCE_ROOT/schemas/denylist.default" "$HARNESS_ROOT_UNDER_TEST/schemas/denylist.default"
+
+HOOK="$HARNESS_ROOT_UNDER_TEST/scripts/hooks/require-phase.sh"
+CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 
 HARNESS_DB_ROOT="$TMP_ROOT/db"
 export HARNESS_DB_ROOT
