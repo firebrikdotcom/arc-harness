@@ -14,6 +14,12 @@ This template is prepared for AI-assisted development using a harness of guides,
 - Cite exact commands run and their results in the final response.
 - For cross-project work, store project-specific registries, task notes, progress, and generated indexes in ignored harness database state such as `.harness-db/`; do not track those records in this template repo.
 
+## Task-entry Routing
+
+For tasks launched with structured metadata, use `scripts/harness launch --state TASK.json` before starting the agent. It defaults to shadow mode and preserves the existing launch command. Never send raw prompts, code, diffs, credentials, or personal data to TypeSafe; deterministic rules own permissions and required verification. See `docs/setup.md`. Direct interactive sessions do not pass through this launch step.
+
+For a real judgment that arises during work, use `scripts/harness advise --context DECISION.json`. Its context must be a concise, redacted summary of the goal, facts, constraints, risks, and situation-specific options. Treat the returned choice as advice only: deterministic permission, safety, failure, and verification rules still decide whether work may proceed.
+
 ## Planning Behavior
 
 Planning should be a separate run or clearly separated phase.

@@ -51,6 +51,9 @@ Until application code exists, use these boundaries:
 - `schemas/`: contracts for proposed agent actions. The model writes JSON; `scripts/action.sh validate` accepts or rejects it. This slice does not permit or execute the action.
 - `.github/workflows/`: CI automation.
 - `.harness-db/`: ignored local database state; never required for a clean template checkout.
+- `scripts/task_route.py`: accepts only bounded, enum-based task metadata. It applies hard rules before optional TypeSafe routing and writes private route records under `.harness-db/routes/`. No prompt, source file, or diff is sent to the API.
+- `scripts/agent_launch.py`: selects an exact argv command profile from the route. It runs no shell interpreter and leaves existing agent launches unchanged unless the launcher is used.
+- `scripts/context_advice.py`: accepts a curated decision context and dynamically supplied options during agent work, asks TypeSafe for one advisory choice, and saves a private record under `.harness-db/advice/`. It cannot execute the chosen option.
 
 When application code is added, document each module with:
 
@@ -67,6 +70,8 @@ When application code is added, document each module with:
 - Avoid circular dependencies.
 - Keep scripts idempotent and safe to rerun.
 - Keep harness scripts explicit about whether they operate on the harness root or a target project root.
+- Keep task routing separate from permission and verification gates. Shadow mode preserves the default command; active routing requires observed outcomes and explicit opt-in.
+- Dynamic TypeSafe advice may inform contextual judgment, but it cannot authorize work, waive required checks, or become an arbitrary command executor.
 - Do not introduce new runtime dependencies without a clear reason and setup documentation.
 - Do not require secrets for local verification or CI.
 
@@ -78,3 +83,4 @@ Add dated decisions here as the system takes shape.
 - 2026-05-25: Classified `.codex/`, `.agents/`, and `.venv/` as local-only artifacts because they can contain machine-specific paths, hooks, generated state, or installed dependencies.
 - 2026-05-25: Defined the harness as a cross-project orchestrator. Project-specific documents and run state are local database content under ignored harness database directories, not tracked template files.
 - 2026-09-01: Added a proposed-action schema and validator. The model proposes `run_command` or `write_file` JSON. The harness validates the shape. Permission checks and execution are not in this slice.
+- 2026-09-19: Added dynamic TypeSafe advice as a separate, non-executing path. It takes a small redacted context and per-situation choices instead of a fixed global template; the existing deterministic gates remain authoritative.

@@ -183,7 +183,7 @@ check_go_format() {
 has_shell_files() {
   find . \
     \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune \
-    -o -type f \( -name '*.sh' -o -path './scripts/*' \) -print -quit | grep -q .
+    -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -print -quit | grep -q .
 }
 
 # Run this harness's own regression tests when verifying the harness itself.
@@ -318,7 +318,7 @@ verify_lint() {
 
   if has_shell_files; then
     if has_cmd shellcheck; then
-      run_check "bash:shellcheck" find . \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/*' \) -exec shellcheck {} +
+      run_check "bash:shellcheck" find . \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec shellcheck {} +
     else
       mark_skip "shell scripts found, but shellcheck is unavailable"
     fi
@@ -425,7 +425,7 @@ verify_test() {
   fi
 
   if has_shell_files; then
-    run_check "bash:syntax" find . \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/*' \) -exec sh -n {} +
+    run_check "bash:syntax" find . \( -path './.git' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec sh -n {} +
     ran_any=1
   fi
 

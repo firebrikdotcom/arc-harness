@@ -76,6 +76,8 @@ $CLI review done
 \`\`\`
 
 Record work with \`$CLI step --note "..."\`. When blocked, run \`$CLI status\`. After a budget pause, evaluate and run \`$CLI continue "<evaluation note>"\`.
+
+For a task started by a launcher with compact, structured metadata, use \`$CLI launch --state TASK.json --agent codex\` (or another configured command). The default is shadow mode, which preserves the existing launch path while TypeSafe records a routing judgment. Do not put raw prompts, code, diffs, credentials, or personal data in task metadata. Direct interactive sessions bypass this task-entry route.
 $END_MARK
 BLOCK
 
