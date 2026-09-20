@@ -46,6 +46,14 @@ Use separate runs/processes for distinct responsibilities:
 
 If a single interactive session performs multiple responsibilities, mark the phase transition in `progress.md` and keep the review phase separate from implementation decisions.
 
+## Task-entry Routing
+
+When a task is started through an agent launcher, use `scripts/harness launch --state TASK.json` with compact metadata prepared by the launcher. The default route is shadow mode: TypeSafe records its judgment, while the existing agent command runs. Never put a raw prompt, source, diff, credential, or personal data in the task metadata. Required checks, known failures, user choices, permissions, and irreversible work follow deterministic rules before any API call. See `docs/setup.md` for the schema, command profiles, and active-mode gate. Direct interactive sessions do not pass through this launch step.
+
+## Dynamic TypeSafe Advice
+
+During work, use `scripts/harness advise --context DECISION.json` only when a real context-specific judgment remains. The context contains a concise goal, relevant facts and constraints, plus the options that fit this situation; it is not a raw prompt, source file, diff, credential, or personal data. The result is advisory: it never executes an option or overrides permissions, failed checks, destructive-action rules, or required verification.
+
 ## Success Bar
 
 An agent may only mark work complete when:

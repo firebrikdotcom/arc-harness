@@ -78,6 +78,9 @@ progress.md               Current goal, decisions, steps, blockers, verification
 schemas/action.schema.json  Proposed-action contract
 scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
+scripts/task_route.py       Structured task-entry route with deterministic gates and optional TypeSafe call
+scripts/agent_launch.py     Launches an argv command profile selected by the task-entry route
+scripts/context_advice.py   Makes a non-executing, context-specific TypeSafe choice during agent work
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 .claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Bootstrap: previews project-owned commands, runs them after confirmation

@@ -166,9 +166,89 @@ scripts/harness review start
 scripts/harness review done
 scripts/harness status
 scripts/harness status --json
+scripts/harness route --state /path/to/task-metadata.json --project /path/to/project
+scripts/harness launch --state /path/to/task-metadata.json --project /path/to/project --agent codex
+scripts/harness advise --context /path/to/decision-context.json
 scripts/harness continue "<evaluation note>"
 scripts/harness abort "<reason>"
 ```
+
+### Task-entry routing
+
+`harness route` and `harness launch` run before an agent starts. They require Python 3. The route input is a compact metadata object with fixed enum fields, not the user's prompt or repository content. Example:
+
+```json
+{
+  "version": 1,
+  "task_kind": "change",
+  "area": "mobile",
+  "proposed_action": "start_routine_agent",
+  "reversibility": "reversible",
+  "uncertainty_reason": "test_gap",
+  "diff_size": "small",
+  "changed_file_count": 2,
+  "known_failures": 0,
+  "required_checks_pending": false
+}
+```
+
+Allowed `task_kind`: `change`, `bug`, `review`, `research`, `question`, `ops`. Allowed `area`: `mobile`, `frontend`, `backend`, `infrastructure`, `docs`, `other`. Allowed `proposed_action`: `start_routine_agent`, `run_targeted_check`, `start_deep_agent`, `ask_for_missing_input`. Allowed `uncertainty_reason`: `none`, `scope_unclear`, `test_gap`, `unknown_dependency`, `conflicting_evidence`, `other`. `reversibility` is `reversible` or `irreversible`; `diff_size` is `none`, `small`, `medium`, or `large`. Optional booleans are `approval_required` and `user_choice_explicit`. Unknown fields, including `prompt`, are rejected.
+
+For a direct dry run, save that object to a JSON file and run:
+
+```sh
+scripts/harness route --state /tmp/task-metadata.json --project /path/to/project
+scripts/harness launch --state /tmp/task-metadata.json --project /path/to/project --agent codex --dry-run
+```
+
+`launch` can also take `--default-command`, `--routine-command`, `--targeted-command`, and `--deep-command`. Each command file contains one JSON argv array, such as `["codex", "--model", "<configured-routine-model>"]`. Without a matching profile, it uses the default command. It executes the chosen argv directly, never through a shell. Use command files to call an existing Herdr or other launcher when that is the established start path. Sessions started directly in a terminal or Herdr bypass this intake route; the launcher must be the entrypoint for token savings at task start.
+
+Deterministic conditions bypass TypeSafe: required checks, known failures, explicit user choices, authorization, irreversible actions, and tasks with no route ambiguity. Ambiguous reversible tasks use the TypeSafe routing skill at `~/.agents/skills/typesafe-routing/scripts/route.py` (override with `HARNESS_TYPESAFE_ROUTER`). The call uses `--strict`, so any detected secret cancels the API request. Missing credentials or service errors fall back to the default command and are recorded.
+
+The default mode is `shadow`: TypeSafe answers and logs its judgment while `launch` keeps the existing default command. Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`). The TypeSafe skill records its own calls under `~/.typesafe-routing/logs/`. Record each real outcome using the skill's `route.py record --call-id ...` command and inspect `route.py report` for accuracy, token usage, and latency. The harness cannot measure avoided reasoning tokens itself.
+
+Active mode requires `--mode active`, `HARNESS_TYPESAFE_ACTIVE=1`, at least 30 distinct correct shadow outcomes (including five correct `proceed` routes), and zero `under_escalated` outcomes. The route and outcome logs are joined by call ID; model checks and fabricated unpaired outcomes do not count. Review the report before opting in. Until then, the launcher keeps the existing agent command; this integration does not yet claim token savings. Required verification and permission gates are unchanged.
+
+### Dynamic advice during work
+
+`harness advise` is for a genuine decision that arises while an agent is working. Unlike task-entry routing, the agent supplies a small, situation-specific set of options. TypeSafe selects one option and returns a confidence score; the harness writes a private record under `.harness-db/advice/` and does not execute the selection. This is advisory only: permissions, destructive-action safeguards, known failures, required checks, and verification remain deterministic and cannot be waived.
+
+The context is deliberately concise and must not contain raw prompts, source files, diffs, credentials, personal data, or secrets. It is rejected before the API request if the strict redaction scan finds sensitive material. The JSON format is:
+
+```json
+{
+  "version": 1,
+  "decision": {
+    "question": "For this ledger feature, which persistence approach is the better fit?"
+  },
+  "context": {
+    "goal": "Keep banking transfers, reversals, balances, and audit history correct.",
+    "facts": ["The ledger is append-only."],
+    "constraints": ["Financial correctness is mandatory."],
+    "risks": ["An incorrect design can weaken auditability."]
+  },
+  "options": [
+    {"id": "crud", "description": "CRUD tables with an explicit audit-log design."},
+    {"id": "event_sourcing", "description": "Events are the ledger source of truth."}
+  ]
+}
+```
+
+Run it with:
+
+```sh
+scripts/harness advise --context /path/to/decision-context.json
+```
+
+The output contains `choice`, `confidence`, `call_id`, and `record_path`. Treat `choice` as evidence for the ongoing judgment, not an instruction to bypass a rule or automatically change code.
+
+Five unrelated live fixtures exercise this path (banking ledger, clinic appointments, offline field work, storefront search, and staff authentication). They are opt-in because they require the local TypeSafe credential and network access:
+
+```sh
+HARNESS_TYPESAFE_LIVE=1 sh tests/live-context-advice.sh
+```
+
+The ordinary harness test run invokes the wrapper without that variable and reports a skip, so CI never requires the credential. The fixtures are test-only; `scripts/context_advice.py` has no domain-specific options or terms.
 
 Phase rules:
 
@@ -185,12 +265,12 @@ Session budgets are counted per run and are agent-visible rules:
 | Budget | Default cap | Counted by |
 |---|---|---|
 | `steps` | 200 | every phase command, every `harness step`, and every tool call the hook counts |
-| `time_min` | 120 | wall-clock minutes since the run was created or last resumed from a time pause |
+| `time_min` | disabled | Optional wall-clock cap; set `HARNESS_BUDGET_TIME_MIN` to a non-negative minute value only for a deliberately time-boxed run |
 | `loops` | 1 | re-entering a phase that was already marked done |
-| `tokens` | unknown | only what `harness step --tokens N` reports |
+| `tokens` | unknown | Only what `harness step --tokens N` reports; the harness does not receive model usage automatically |
 | `continues` | 3 | every accepted `harness continue` in the run |
 
-Set caps with `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, and `HARNESS_BUDGET_TOKENS`. They are read when the run is created. The CLI cannot count tokens itself, so the token budget stays `unknown` unless the agent reports counts.
+Set caps with `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, and `HARNESS_BUDGET_TOKENS`. They are read when the run is created. The CLI cannot count tokens itself, so the token budget stays `unknown` unless the agent reports counts. A token cap is therefore enforced only when the agent launcher or runtime reports its measured token use through `harness step --tokens N`; the current Claude hook records tool steps but receives no token-usage field.
 
 When a cap is reached the CLI writes a pause record, refuses further phase and step commands, and exits non-zero. `harness continue` requires an evaluation note, stores it in the pause record, and extends the tripped budget by one more window. There is no way to resume without that evaluation. Once the `continues` cap is reached, `continue` is refused and the only way forward is `harness abort "<reason>"` followed by `harness plan start`.
 
@@ -234,7 +314,7 @@ The `Makefile` deliberately has no `format`, `lint`, `typecheck`, `test`, or `bu
 
 `.claude/settings.json` registers `scripts/hooks/require-phase.sh` as a Claude Code `PreToolUse` hook for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. The hook asks `scripts/harness status` for the run state and blocks the tool call (exit 2) unless a phase is active and the run is not paused, complete, or aborted. Bash calls whose whole command is `scripts/harness ...` or `scripts/action.sh validate ...` are allowed so the agent can open a phase; a chained command such as `scripts/harness plan start; rm -rf build` is not, and `scripts/harness continue` or `abort` from the agent is always refused.
 
-Before the phase check, the hook applies the denylist to the actual command or write path and refuses to work while a `knowledge/` folder is unapproved. Every allowed call is then recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. Start runs with `HARNESS_BUDGET_STEPS=<n>` or `HARNESS_BUDGET_TIME_MIN=<n>` when a task needs more than the defaults. Tokens stay `unknown` because the hook payload carries no token counts.
+Before the phase check, the hook applies the denylist to the actual command or write path and refuses to work while a `knowledge/` folder is unapproved. Every allowed call is then recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. Use `HARNESS_BUDGET_TIME_MIN=<n>` only for a deliberately time-boxed run. Tokens stay `unknown` because the hook payload carries no token counts.
 
 A person can switch the hook off for one session by exporting `HARNESS_HOOK_DISABLE=1` in the environment Claude Code starts from. The denylist refuses that string inside agent commands, so the agent cannot do it for itself.
 

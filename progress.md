@@ -2,7 +2,48 @@
 
 ## Current Goal
 
-Build the `harness` CLI slice on branch `lotharthesavior/feat-cli`: harness-root discovery, session budgets with pause/continue, and plan/build/review phase gates. Complete; awaiting review.
+Verify the dynamic TypeSafe advice path across five unrelated, caller-supplied decision contexts. The harness must remain domain-neutral: subject terms live only in test fixtures, and every request must carry only its own dynamic context and options.
+
+## Current Test Expansion Plan (2026-09-19)
+
+- Add five offline fixture contexts to prove the generic harness forwards arbitrary option identifiers without a domain template.
+- Add an opt-in live test that invokes `harness advise` once for each fixture and verifies a valid choice, confidence, and private record.
+- Run the five live calls now with credentials available; keep them out of default CI so clean checkouts do not require network access or a credential.
+- Run the complete verification and review gates.
+
+## Current Test Expansion Results (2026-09-19)
+
+- Added five caller-owned fixtures plus offline forwarding coverage that verifies their dynamic options reach TypeSafe unchanged and that the generic harness source contains none of their subject terms.
+- `HARNESS_TYPESAFE_LIVE=1 sh tests/live-context-advice.sh` passed: banking ledger → `event_sourcing` (0.99), clinic appointments → `relational` (1.00), offline field app → `operation_log` (0.95), storefront search → `keyword_index` (1.00), staff portal authentication → `server_sessions` (1.00).
+- The live suite is opt-in; its normal wrapper skips without a credential, preserving offline CI. Full verification passed (ran=3, skipped=3, failures=0) and the separate review pass completed successfully.
+
+## Current Task Plan (2026-09-19)
+
+- Add `harness advise --context PATH`, backed by a context validator and a TypeSafe choice request with caller-supplied, situation-specific options.
+- Keep the existing task-entry router unchanged for backward compatibility; advice is a separate, non-executing capability available during agent work.
+- Reject unsafe or oversized context before any API call, retain strict redaction, save private audit records, and expose the selected choice, confidence, and rationale to the caller.
+- Add offline regression coverage for validation, redaction refusal, API response validation, and deterministic no-execution behavior; update setup, architecture, README, and agent guidance.
+- Verify with the targeted test, the full harness verification sensor, and a separate review pass.
+
+## Current Task Results (2026-09-19)
+
+- Added `scripts/context_advice.py` and `harness advise --context PATH`. It validates a compact context with a per-decision option set, rejects secret-like content before an API call, requests a dynamic TypeSafe choice, and writes a mode-0600 private record. It never runs the chosen option.
+- Added offline coverage for option forwarding, secret rejection before a call, and invalid API choices. A live banking-ledger request through `harness advise` returned `event_sourcing` at 0.99 confidence and saved an isolated harness record.
+- Updated the README, agent guides, setup guide, and architecture boundaries. `HARNESS_DB_ROOT=/tmp/harness-dynamic-typesafe-db scripts/verify.sh --project /home/savior/Code/harness-template` passed (ran=3, skipped=3, failures=0); the same-root `scripts/review.sh` passed and inspected the full dirty worktree.
+
+## Current Task Plan (2026-09-18)
+
+- Harness root and target: `/home/savior/Code/harness-template`. Run state is isolated in `/tmp/harness-typesafe-intake-db` because another harness run is active.
+- Add `harness route --state` for a small enum-based task record. Apply deterministic rules first; call the installed TypeSafe router only for a remaining ambiguous route, using strict redaction and shadow mode by default.
+- Add a launcher that selects exact command arrays from the route; preserve the default command in shadow mode and fall back to it when TypeSafe is unavailable.
+- Record route and outcome identifiers in ignored harness state. Require 30 correct outcomes, zero under-escalations, and an explicit opt-in before active routing.
+- Test deterministic bypass, malformed input, shadow and active behavior, unavailable service, command selection, and no shell interpolation. Run the full harness verify and review gates.
+
+## Current Task Results (2026-09-18)
+
+- Added `harness route` and `harness launch` with compact metadata, deterministic gates, private route records, shadow TypeSafe calls, an explicit active-mode threshold, and argv-based command profiles. Added the task-entry rule to the four global agent guides and a `harness` link on PATH.
+- A live shadow call succeeded and returned `reasoning_model`; the route record links its TypeSafe call ID. A deterministic dry run selected the existing `codex` command without an API call.
+- The first full verification exposed a shell-file detector that selected the new Python files; fixed the selector and added a regression test. Targeted tests, the full `verify.sh` gate, and `review.sh` then passed: ran=3, skipped=3, failures=0. The review inspected the patch and found no remaining issue requiring a code change.
 
 ## Decisions
 

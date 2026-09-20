@@ -26,6 +26,7 @@ grep -q 'Keep this line.' "$PROJECT/AGENTS.md" || fail "existing AGENTS.md conte
 [ "$(count_markers "$PROJECT/AGENTS.md")" -eq 1 ] || fail "AGENTS.md should hold exactly one block"
 [ "$(count_markers "$PROJECT/CLAUDE.md")" -eq 1 ] || fail "CLAUDE.md should hold exactly one block"
 grep -q 'plan start' "$PROJECT/AGENTS.md" || fail "block missing the plan command"
+grep -q 'launch --state TASK.json' "$PROJECT/AGENTS.md" || fail "block missing the task-entry launch command"
 
 # Outside the harness root the commands use a clean absolute CLI path. The CLI
 # infers its root from that path, so no repeated environment assignment is needed.

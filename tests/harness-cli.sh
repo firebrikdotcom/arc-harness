@@ -185,7 +185,7 @@ new_case
 run 0 plan start
 run 0 status
 expect_output "steps     1/200"
-expect_output "time_min  0/120"
+expect_output "time_min  0/unknown"
 expect_output "loops     0/1"
 expect_output "tokens    unknown/unknown"
 expect_output "continues 0/3"
@@ -258,16 +258,27 @@ run 0 step --note "work within the extended window"
 
 # A run that is hours over its cap resumes cleanly because continue restarts the clock.
 new_case
+HARNESS_BUDGET_TIME_MIN=120
+export HARNESS_BUDGET_TIME_MIN
 run 0 plan start
 RUN_STATE=$(state_dir)
 old_epoch=$(( $(date +%s) - 36000 ))
 sed -i.bak "s/^RUN_STARTED_EPOCH=.*/RUN_STARTED_EPOCH=$old_epoch/" "$RUN_STATE/state" && rm -f "$RUN_STATE/state.bak"
-run 3 step --note "trips the time cap"
+run 3 step --note "trips the explicitly configured time cap"
 expect_output "PAUSE: time_min budget reached (used=600 cap=120)"
 run 0 continue "Resuming after a long break."
 run 0 step --note "clock restarted"
 run 0 status
 expect_output "time_min  0/240"
+
+new_case
+run 0 plan start
+RUN_STATE=$(state_dir)
+old_epoch=$(( $(date +%s) - 36000 ))
+sed -i.bak "s/^RUN_STARTED_EPOCH=.*/RUN_STARTED_EPOCH=$old_epoch/" "$RUN_STATE/state" && rm -f "$RUN_STATE/state.bak"
+run 0 step --note "does not trip the disabled default time cap"
+run 0 status
+expect_output "time_min  600/unknown"
 
 # --- loop budget ------------------------------------------------------------
 

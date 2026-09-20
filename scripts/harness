@@ -6,10 +6,21 @@ set -eu
 
 STATE_VERSION=1
 DEFAULT_CAP_STEPS=200
-DEFAULT_CAP_TIME_MIN=120
+# Wall-clock limits are opt-in. Interactive sessions routinely span breaks and
+# must not pause merely because time passed while no tokens were consumed.
+DEFAULT_CAP_TIME_MIN=unknown
 DEFAULT_CAP_LOOPS=1
 DEFAULT_CAP_CONTINUES=3
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+SCRIPT_PATH=$0
+while [ -L "$SCRIPT_PATH" ]; do
+  _link_dir=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
+  _link_target=$(readlink "$SCRIPT_PATH")
+  case "$_link_target" in
+    /*) SCRIPT_PATH=$_link_target ;;
+    *) SCRIPT_PATH=$_link_dir/$_link_target ;;
+  esac
+done
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
 SCRIPT_HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 
 EXIT_USAGE=2
@@ -38,12 +49,16 @@ usage() {
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
+  info "  route --state PATH   Route compact task metadata before an agent starts."
+  info "  launch --state PATH --default-command PATH"
+  info "                       Select and start an argv command profile."
+  info "  advise --context PATH  Request a non-executing, context-specific TypeSafe choice."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
   info "  abort \"REASON\"       Abort the current run so a new one can start. The reason is required."
   info ""
   info "Budgets (environment overrides, read when the run is created):"
   info "  HARNESS_BUDGET_STEPS     default $DEFAULT_CAP_STEPS"
-  info "  HARNESS_BUDGET_TIME_MIN  default $DEFAULT_CAP_TIME_MIN"
+  info "  HARNESS_BUDGET_TIME_MIN  default disabled (set a non-negative minute cap to enable)"
   info "  HARNESS_BUDGET_LOOPS     default $DEFAULT_CAP_LOOPS"
   info "  HARNESS_BUDGET_TOKENS    default unknown (the CLI cannot count tokens)"
   info "  HARNESS_BUDGET_CONTINUES default $DEFAULT_CAP_CONTINUES (continues allowed per run)"
@@ -894,6 +909,19 @@ case "$COMMAND" in
     ;;
   status)
     cmd_status "$@"
+    ;;
+  route|launch|advise)
+    if ! has_cmd python3; then
+      info "FAIL: python3 is required for task-entry routing."
+      exit "$EXIT_USAGE"
+    fi
+    if [ "$COMMAND" = "route" ]; then
+      exec python3 "$SCRIPT_DIR/task_route.py" --db-root "$DB_ROOT" "$@"
+    fi
+    if [ "$COMMAND" = "advise" ]; then
+      exec python3 "$SCRIPT_DIR/context_advice.py" --db-root "$DB_ROOT" "$@"
+    fi
+    exec python3 "$SCRIPT_DIR/agent_launch.py" --db-root "$DB_ROOT" "$@"
     ;;
   continue)
     cmd_continue "$@"
