@@ -9,6 +9,7 @@ This template is prepared for AI-assisted development using a harness of guides,
 - Follow existing patterns first. If no pattern exists, choose the smallest clear implementation and document the decision.
 - Keep task scope narrow. Split large requests into small steps before editing.
 - Before a side-effecting tool call, write an action JSON file and run `scripts/action.sh validate PATH`. Do not treat a rejected proposal as approved.
+- Treat a budget pause, `harness continue`, and `harness abort` as human-only decisions. Report the state instead of attempting to resume or abort the run.
 - Update `progress.md` after every meaningful step: planning, implementation, verification, review, blockers, and decisions.
 - Do not claim success without running `scripts/verify.sh`.
 - Cite exact commands run and their results in the final response.
@@ -86,6 +87,8 @@ A task is complete only when:
 - `scripts/verify.sh` has run.
 - Verification result is recorded in `progress.md`.
 - The final response cites exact commands and outcomes.
+
+`scripts/verify.sh` detects non-rewriting format checks, lint, typecheck, tests, and builds. `.harness-required-checks` or `HARNESS_REQUIRED_CHECKS` can require any category; a required category that runs no check fails. The verify and review scripts write their gate records under `.harness-db/records/`.
 
 <!-- harness-cli:start -->
 ## Harness Phases

@@ -54,6 +54,10 @@ Until application code exists, use these boundaries:
 - `scripts/task_route.py`: accepts only bounded, enum-based task metadata. It applies hard rules before optional TypeSafe routing and writes private route records under `.harness-db/routes/`. No prompt, source file, or diff is sent to the API.
 - `scripts/agent_launch.py`: selects an exact argv command profile from the route. It runs no shell interpreter and leaves existing agent launches unchanged unless the launcher is used.
 - `scripts/context_advice.py`: accepts a curated decision context and dynamically supplied options during agent work, asks TypeSafe for one advisory choice, and saves a private record under `.harness-db/advice/`. It cannot execute the chosen option.
+- `scripts/init.sh`: discovers project-owned dependency setup, previews it, and executes it only after confirmation or explicit non-interactive opt-in.
+- `scripts/verify.sh` and `scripts/review.sh`: non-mutating verification and review sensors. They write the records used by the build and review gates.
+- `scripts/install-guides.sh`: idempotently refreshes the marked harness block in a target's agent guides without changing its surrounding instructions.
+- `.claude/settings.json` and `scripts/hooks/require-phase.sh`: Claude Code-only enforcement for denylist, knowledge trust, active phase, and tool-step accounting.
 
 When application code is added, document each module with:
 
