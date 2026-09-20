@@ -1,5 +1,13 @@
 # Progress
 
+## Current Documentation Task (2026-09-19)
+
+- Goal: reconcile the portable harness documentation with the executable scripts and add the requested machine-wide commit-message guidance.
+- Plan: document phase pause ownership, verification categories and records, bootstrap's lockfile-aware commands, guide installation, and TypeSafe entry points; then update both global instruction files with the commit-message rule.
+- First step complete: compared `README.md`, agent guides, and setup/architecture documentation with `scripts/harness`, `init.sh`, `verify.sh`, `review.sh`, `install-guides.sh`, routing, and advice implementations.
+- Verification: `scripts/verify.sh` passed on 2026-09-19 (ran=3, skipped=3, failures=0); the only live TypeSafe suite was intentionally skipped because `HARNESS_TYPESAFE_LIVE` was not set.
+- Review: `scripts/review.sh` passed on 2026-09-19 after rerunning the same verification suite (ran=3, skipped=3, failures=0); no documentation or implementation risk was found.
+
 ## Current Goal
 
 Verify the dynamic TypeSafe advice path across five unrelated, caller-supplied decision contexts. The harness must remain domain-neutral: subject terms live only in test fixtures, and every request must carry only its own dynamic context and options.

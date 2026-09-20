@@ -49,13 +49,16 @@ You cannot build before plan is done. You cannot review before build is done.
 
 `build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start`.
 
-If it stops you: `scripts/harness status`. Only a human may run `scripts/harness continue "why it is ok to go on"` or `scripts/harness abort "reason"`, in a terminal or with the `!` prefix.
+If it stops you: `scripts/harness status`. A budget pause requires a human to run `scripts/harness continue "why it is ok to go on"`; only a human may also abort a run. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
+
+The phase guard is a Claude Code hook only. It checks the denylist and knowledge-trust state before requiring an active phase, then counts an allowed tool call as a harness step. Other agents must follow the written workflow themselves.
 
 ## Important Rules
 
 - Do not declare success without running `scripts/verify.sh`.
 - Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`. The same denylist is applied by the guard hook to every real Write, Edit, and Bash call.
 - `scripts/init.sh` previews project-owned setup commands and runs them only after you confirm, or with `--yes`.
+- Bootstrap uses the lockfile-aware install command: `npm ci`, `yarn install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists.
 - A `knowledge/` folder is followed only after a human runs `scripts/knowledge-trust.sh approve`.
 - Keep planning, building, and reviewing as separate phases.
 - Do not assume secrets exist locally or in CI.
@@ -124,6 +127,16 @@ The script detects common project tooling:
 - Bash/shell files, including `scripts/*.sh`.
 
 It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
+
+Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
+
+## Agent Entry Points
+
+`make install-guides PROJECT=/path/to/project` refreshes the marked Harness Phases block in a target's `AGENTS.md` and `CLAUDE.md`, preserving the rest of each file. For an external target, that block uses this harness's absolute CLI path.
+
+For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Shadow mode always preserves the default command; active mode additionally requires an explicit switch and sufficient recorded shadow outcomes.
+
+`scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option.
 
 ## CI
 

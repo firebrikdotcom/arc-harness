@@ -21,6 +21,7 @@ Before coding:
 During work:
 
 - Before a side-effecting tool call, write an action JSON file and run `scripts/action.sh validate PATH`. Do not treat a rejected proposal as approved.
+- A budget pause, `harness continue`, and `harness abort` are human decisions. Do not resume or abort a run yourself; report the pause and request human direction.
 - Keep changes scoped to the active task.
 - Prefer existing project patterns over new abstractions.
 - Make one meaningful change at a time and update `progress.md` after each meaningful step.
@@ -62,6 +63,8 @@ An agent may only mark work complete when:
 - `scripts/verify.sh` has run.
 - Failures, skips, or missing project tooling are documented.
 - `progress.md` reflects the final state.
+
+Verification detects non-rewriting format checks, lint, typecheck, tests, and builds. A target can require any of those categories through `.harness-required-checks` or `HARNESS_REQUIRED_CHECKS`; a required category with no runnable check fails. `scripts/verify.sh` and `scripts/review.sh` write gate records beneath `.harness-db/records/` for `build done` and `review done`.
 
 <!-- harness-cli:start -->
 ## Harness Phases

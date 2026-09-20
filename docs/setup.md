@@ -43,10 +43,10 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 Detected bootstrap inputs:
 
 - `Makefile`: runs `make init` or `make setup` when either target exists.
-- `package.json`: installs JavaScript/TypeScript dependencies with `pnpm`, `yarn`, or `npm`.
-- `composer.json`: installs PHP dependencies with Composer.
+- `package.json`: installs JavaScript/TypeScript dependencies with `pnpm install`, `yarn install` (`--frozen-lockfile` when locked), or `npm ci` (`npm install` without a lockfile).
+- `composer.json`: installs PHP dependencies with `composer install --no-interaction`, adding `--prefer-dist` when locked.
 - `go.mod`: downloads Go modules with `go mod download`.
-- `Cargo.toml`: fetches Rust dependencies with Cargo.
+- `Cargo.toml`: fetches Rust dependencies with `cargo fetch`, adding `--locked` when `Cargo.lock` exists.
 
 ## Environment Variables
 
@@ -55,9 +55,15 @@ No required environment variables are currently known.
 Optional harness variables:
 
 - `HARNESS_TARGET_ROOT`: target project directory for `scripts/init.sh`, `scripts/verify.sh`, and `scripts/review.sh` when `--project` is not passed.
+- `HARNESS_INIT_YES`: set to `1` to let `scripts/init.sh` run its previewed project-owned setup commands non-interactively.
 - `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
 - `HARNESS_DB_ROOT`: harness state directory for `scripts/harness`. Defaults to `HARNESS_ROOT/.harness-db`.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
+- `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
+- `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
+- `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
+- `HARNESS_TYPESAFE_ACTIVE`: set to `1` only after the active-routing outcome gate is satisfied and reviewed.
+- `TYPESAFE_HOME` or `TYPESAFE_LOG_DIR`: optional TypeSafe outcome-log location used when checking eligibility for active routing.
 
 When environment variables are introduced, document each one here:
 
