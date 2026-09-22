@@ -106,3 +106,7 @@ scripts/harness review done
 
 Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, wait for an explicit user instruction to continue in this conversation, then evaluate and run `scripts/harness continue "<evaluation note that records that authorization>"`.
 <!-- harness-cli:end -->
+
+## Jev consideration during work
+
+Consider Jev at every meaningful decision: tool selection, reasoning allocation, identification, prioritization, evidence selection/assessment, progress, handoff, context selection, and clarification. Apply explicit rules and user choices first; consideration does not require an API call. Use version 2 `scripts/harness advise --context CHECKPOINT.json` for remaining bounded judgments, capturing the baseline action before evaluation and keeping the checkpoint in shadow mode. Record the actual action and independently supported outcome with `advise --record OUTCOME.json`; inspect `advise --report`. Batch independent questions and revisit only after material evidence changes. Jev never overrides authorization, required verification, failures, or completion gates. See [Jev checkpoints](docs/jev-checkpoints.md) for input formats and the 30-decision pilot. This is guidance plus observable checkpoints, not interception of private reasoning.

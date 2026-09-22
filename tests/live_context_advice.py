@@ -61,7 +61,7 @@ def context(case: dict) -> dict:
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="harness-live-advice-") as temporary:
         root = Path(temporary)
-        environment = os.environ | {"HARNESS_DB_ROOT": str(root / "db")}
+        environment = os.environ | {"HARNESS_DB_ROOT": str(root / "db"), "TYPESAFE_LOG_DIR": str(root / "logs")}
         for case in CASES:
             path = root / f"{case['name'].replace(' ', '-')}.json"
             path.write_text(json.dumps(context(case)))
@@ -79,6 +79,36 @@ def main() -> int:
                 print(f"FAIL: {case['name']} did not create a private advice record", file=sys.stderr)
                 return 1
             print(f"PASS: {case['name']} -> {answer['choice']} ({answer['confidence']:.2f})")
+        checkpoint = {
+            "version": 2,
+            "checkpoint": {"family": "identification", "question_version": "fixture-1", "policy_version": "fixture-1",
+                           "baseline_action": "troubleshooting", "bypass_reason": "none"},
+            "context": {"goal": "Classify a synthetic documentation summary.",
+                        "facts": ["The page describes diagnosing an intermittent connection problem and checking its symptoms."]},
+            "questions": {
+                "recommendation": {"type": "choice", "instructions": "What is the primary purpose of this page?",
+                                   "criteria": {"tutorial": "Teach a new task", "troubleshooting": "Diagnose a problem"}},
+                "diagnostic": {"type": "boolean", "instructions": "The page is primarily diagnostic."},
+                "specificity": {"type": "score", "instructions": "How specific is the supplied summary?",
+                                "criteria": ["No diagnostic detail", "Some symptom detail", "Full reproducible procedure"]},
+            },
+        }
+        path = root / "batch.json"
+        path.write_text(json.dumps(checkpoint))
+        result = subprocess.run([str(CLI), "advise", "--context", str(path)], text=True,
+                                capture_output=True, env=environment, check=False)
+        if result.returncode:
+            print(result.stderr, file=sys.stderr)
+            return result.returncode
+        answer = json.loads(result.stdout)
+        if answer.get("status") != "evaluated" or answer.get("action") != "troubleshooting" or answer.get("shadow") is not True:
+            print(f"FAIL: live shadow batch: {answer}", file=sys.stderr)
+            return 1
+        record = json.loads(Path(answer["record_path"]).read_text())
+        if record.get("model_returned") != record.get("model_requested") or not record.get("usage"):
+            print("FAIL: live batch missing model or usage", file=sys.stderr)
+            return 1
+        print("PASS: live Choice/Score/Boolean batch; baseline preserved, model and usage recorded")
     return 0
 
 

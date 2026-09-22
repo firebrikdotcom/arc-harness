@@ -28,6 +28,10 @@ grep -q 'Keep this line.' "$PROJECT/AGENTS.md" || fail "existing AGENTS.md conte
 grep -q 'plan start' "$PROJECT/AGENTS.md" || fail "block missing the plan command"
 grep -q 'launch --state TASK.json' "$PROJECT/AGENTS.md" || fail "block missing the task-entry launch command"
 
+grep -q 'advise --context CHECKPOINT.json' "$PROJECT/AGENTS.md" || fail "checkpoint command missing"
+grep -q 'advise --record OUTCOME.json' "$PROJECT/CLAUDE.md" || fail "outcome command missing"
+grep -q 'shadow mode' "$PROJECT/AGENTS.md" || fail "shadow boundary missing"
+
 # Outside the harness root the commands use a clean absolute CLI path. The CLI
 # infers its root from that path, so no repeated environment assignment is needed.
 grep -q "^$HARNESS_ROOT_UNDER_TEST/scripts/harness plan start" "$PROJECT/AGENTS.md" \

@@ -78,6 +78,8 @@ $CLI review done
 Record work with \`$CLI step --note "..."\`. When blocked, run \`$CLI status\`. After a budget pause, evaluate and run \`$CLI continue "<evaluation note>"\`.
 
 For a task started by a launcher with compact, structured metadata, use \`$CLI launch --state TASK.json --agent codex\` (or another configured command). The default is shadow mode, which preserves the existing launch path while TypeSafe records a routing judgment. Do not put raw prompts, code, diffs, credentials, or personal data in task metadata. Direct interactive sessions bypass this task-entry route.
+
+Consider Jev at every meaningful decision: tools, reasoning, identification, prioritization, evidence, progress, handoff, context, and clarification. Explicit rules and user choices decide first; consideration does not mean an API call. For remaining bounded judgments, use version 2 \`$CLI advise --context CHECKPOINT.json\` in shadow mode with the intended action recorded before evaluation. Record independently supported outcomes with \`$CLI advise --record OUTCOME.json\`; inspect \`$CLI advise --report\`. Batch independent questions; reconsider only when evidence changes. Permissions, failed tests, required checks, and completion gates remain authoritative. See $HARNESS_ROOT/docs/jev-checkpoints.md for formats. Interactive coverage is guidance plus checkpoints, not private-reasoning interception.
 $END_MARK
 BLOCK
 
