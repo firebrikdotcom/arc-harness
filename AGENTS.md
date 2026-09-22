@@ -21,7 +21,7 @@ Before coding:
 During work:
 
 - Before a side-effecting tool call, write an action JSON file and run `scripts/action.sh validate PATH`. Do not treat a rejected proposal as approved.
-- A budget pause, `harness continue`, and `harness abort` are human decisions. Do not resume or abort a run yourself; report the pause and request human direction.
+- On a budget pause, an agent may run `harness continue "<evaluation note>"` only after an explicit user instruction to continue in the current conversation. Keep the required evaluation note and record the authorization concisely (for example, `User explicitly requested continuation in chat.`). `harness abort` and `scripts/knowledge-trust.sh approve` remain human-only; do not invoke them yourself.
 - Keep changes scoped to the active task.
 - Prefer existing project patterns over new abstractions.
 - Make one meaningful change at a time and update `progress.md` after each meaningful step.
@@ -80,5 +80,15 @@ scripts/harness review start    # run scripts/review.sh and inspect the diff
 scripts/harness review done
 ```
 
-Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
+Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, wait for an explicit user instruction to continue in this conversation, then evaluate and run `scripts/harness continue "<evaluation note that records that authorization>"`.
 <!-- harness-cli:end -->
+
+<!-- shared-rule:lavish-sequential-review:start -->
+# Lavish Review: One Viewport, One Approval
+
+- Apply this approach to every Lavish session from now on unless the user explicitly changes it.
+- Present only one small review part at a time. All content and decision controls for that part must fit within the actual available viewport, accounting for Lavish chrome and feedback panels, without vertical or horizontal scrolling or nested scroll areas.
+- Split oversized material into smaller review parts. Do not hide overflow, clip content, or shrink text to unreadable sizes to simulate fitting. Check viewport fit before presenting each part and after layout or viewport changes.
+- Wait for the user's explicit approval of the current part before presenting or unlocking the next part. Silence, elapsed time, feedback, requested edits, or navigation are not approval. Revise the current part and obtain approval when changes are requested.
+- Record which part and revision was approved, preserve decisions, and keep later parts gated across reloads and agent handoffs. Approval of a plan part authorizes only that review progression, not implementation or deployment.
+<!-- shared-rule:lavish-sequential-review:end -->

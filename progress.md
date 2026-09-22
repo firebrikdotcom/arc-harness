@@ -1,5 +1,57 @@
 # Progress
 
+## Cross-machine Harness Reconciliation (2026-09-22)
+
+- Goal: make this Mac and `resende-1` use one tested harness revision while preserving both machines' unfinished work.
+- Harness root and target root: `/Users/savior/Code/harness-template` locally and `/home/savior/Code/harness-template` on Resende; both started at commit `20867ed` on `master`.
+- Non-goals: do not sync credentials, live Codex sessions, harness databases, or other machine-local state; do not claim direct terminal Codex interruption works.
+- Source inspection: the graph generation is from 2026-09-04 and reports the changed/new paths as stale or missing, so current source was read directly after the required coverage check.
+- Plan: keep the Mac's safer offline-tested App Server budget controller and continuation policy; add Resende's auditability-planning wizard while completing its promised JSON export and focused checks; preserve the shared Lavish rule; verify, review, commit, push, then update both checkouts to the same commit.
+- Acceptance: both checkouts have the same clean Git commit; the budget controller uses both thread and turn identifiers and refuses unenforceable direct-CLI caps; the offline wizard exports Markdown and JSON without network dependencies; full verification and review pass.
+- Backups: `/tmp/harness-cross-machine-sync-backup-local` and `/tmp/harness-cross-machine-sync-backup-resende`.
+- Verification plan: focused budget, routing, and wizard checks; `git diff --check`; then isolated full `scripts/verify.sh` and `scripts/review.sh` runs.
+- Build: retained the Mac's bounded App Server controller because it preserves goal usage, times out, filters for loaded `appServer` threads, and interrupts with both required IDs; rejected Resende's detached 60,000-token default because it cannot safely control an independent terminal CLI thread.
+- Build: imported Resende's offline auditability planner and completed its promised JSON export, required-answer feedback, keyboard focus treatment, network-request guard, and decision coverage for projections, delivery, and operations.
+- Focused verification: `sh tests/auditability-wizard.sh`, `sh tests/codex-budget.sh` (10 tests), and `sh tests/task-routing.sh` (11 routing tests and 4 advice tests) all passed.
+- Full verification: `HARNESS_DB_ROOT=/tmp/harness-cross-machine-sync-state scripts/verify.sh` passed with ran=3, skipped=3, failures=0; the credentialed live TypeSafe suite remained opt-in and was skipped.
+- Protocol review: current official Codex App Server documentation confirms that `turn/interrupt` requires `threadId` and `turnId`, `thread/list` supports `sourceKinds: ["appServer"]`, and omitting a goal objective preserves existing usage.
+- Review: `HARNESS_DB_ROOT=/tmp/harness-cross-machine-sync-state scripts/review.sh` reran the full suite successfully and inspected every tracked and untracked change; no unresolved correctness, privacy, or scope issue was found. A final review rerun follows this progress update.
+
+## Continuation Policy Sync (2026-09-22)
+
+- Goal: sync resende-1’s September 21 chat-authorized continuation update into this Mac’s harness. Preserve local Codex budget changes and unrelated remote work.
+- Plan: merge the hook, hook tests, and four policy guides; run full verification and a separate review. Acceptance: an agent can issue continue after explicit chat authorization; abort and knowledge approval remain human-only.
+- State: use `/tmp/harness-continuation-sync-state` for this separate maintenance task; leave the previously exhausted default run untouched. Knowledge content is unapproved and is not used as instructions.
+- Build: merged continuation policy; the first full verification failed ShellCheck because the scanner included cached foreign repositories under `.harness-db`. Fix: prune that database from shell discovery, lint, and syntax scans; add an invalid cached-shell regression fixture. Rerun the same full gate.
+- Verification and review: `HARNESS_DB_ROOT=/tmp/harness-continuation-sync-state scripts/verify.sh` and the same-prefixed `scripts/review.sh` passed, each with ran=3, skipped=3, failures=0. Optional live TypeSafe tests were skipped. Remote hook, tests, README, and CLAUDE match byte-for-byte; AGENTS/setup policy matches while preserving local additions. `git diff --check` passed. No commit or push.
+- Source: remote and local HEAD both `20867ed`; remote policy files changed September 21 at 20:51 -0500. Backup: `/tmp/harness-continuation-sync-backup`; patch: `/tmp/harness-continuation-sync.patch`.
+
+## Future-Session Readiness (2026-09-21)
+
+- Goal: make the already approved harness and TypeSafe/JEV changes visible after a fresh Codex or Claude session starts, without claiming that an independent terminal Codex run can be interrupted.
+- Plan: verify new-shell PATH, model pin, skill link, and global guidance; correct the App Server thread-discovery filter for a future managed run; rerun the complete harness gates.
+- Initial check: a fresh login shell resolves `harness` through `~/.local/bin` and reads `TYPESAFE_MODEL=jev-1.13.0`; the Codex TypeSafe skill link points to the shared installed skill.
+- Human-owned blocker: the default harness database's current run is paused on its loop budget with all three continuations used. Do not bypass or abort it as an agent; a human must decide whether to abort that old run before default-state phases work normally.
+- Build: limited new-thread discovery to loaded `appServer` source threads, avoiding a terminal-owned thread that the controller cannot interrupt; the offline fixture now asserts that filter.
+- Verification: `HARNESS_DB_ROOT=/tmp/harness-codex-future-state scripts/verify.sh` and `scripts/review.sh` passed (ran=3, skipped=3, failures=0). The optional live TypeSafe suite was skipped. No live App Server daemon was installed or exercised, and no new token cap was chosen.
+
+## Codex Token-Budget Meter (2026-09-21)
+
+- Goal: measure a launched Codex thread's token use through App Server, mirror each increment into the harness run, and interrupt the active turn at the chosen cap.
+- Plan: add a small App Server client with exact thread discovery and active-turn lookup, expose it as `harness budget`, and cover the protocol and launcher behavior offline.
+- Safety decisions: do not invent a default token limit; preserve existing goal usage when attaching; require both thread and turn IDs for interruption; time out discovery instead of watching forever. Refuse a direct Codex CLI launch with an unenforceable explicit cap.
+- Verification plan: run focused Python and shell tests, then the full harness verification and separate review gates.
+- Build: added the App Server monitor, CLI command, offline protocol tests, and documentation. Ten focused tests and the existing routing tests pass after fixing a buffered-stream framing bug found by the first focused run.
+- Integration blocker: `codex app-server proxy` cannot connect because this machine has no App Server daemon; `codex app-server daemon start` fails because the managed standalone Codex installation is absent. A separate direct App Server reports the current terminal thread as `notLoaded`, so it cannot interrupt CLI-owned turns. Automatic launch was removed; the remaining manual meter applies only to App Server-owned threads and is not live-verified here.
+- Review: `HARNESS_DB_ROOT=/tmp/harness-codex-budget-state scripts/verify.sh` and `scripts/review.sh` passed (lint, offline tests, shell syntax; ran=3, skipped=3, failures=0). The credentialed TypeSafe suite was skipped by design. The live App Server connection failure remains unresolved and prevents claiming end-to-end token enforcement on this machine; no commit or push was made.
+
+## Mac JEV Harness Parity (2026-09-21)
+
+- Goal: bring the committed TypeSafe/JEV routing, launcher, and dynamic-advice advancement from `origin/master` onto this Mac without importing the remote machine's uncommitted experiments.
+- Update: fast-forwarded `master` from `28c09ef` to `20867ed` and preserved the committed task-routing tests and documentation.
+- Portability repair: isolated `tests/harness-cli.sh` from an ambient machine-wide `HARNESS_ROOT`; the first full verification exposed the issue and the identical verification command then passed.
+- Verification: `HARNESS_DB_ROOT=/tmp/harness-jev-update-state scripts/verify.sh` passed with lint, all non-live harness tests, and shell syntax green; the credentialed live TypeSafe suite remains opt-in.
+
 ## Current Documentation Task (2026-09-19)
 
 - Goal: reconcile the portable harness documentation with the executable scripts and add the requested machine-wide commit-message guidance.

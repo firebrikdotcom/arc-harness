@@ -59,6 +59,7 @@ Optional harness variables:
 - `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
 - `HARNESS_DB_ROOT`: harness state directory for `scripts/harness`. Defaults to `HARNESS_ROOT/.harness-db`.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
+- `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
 - `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
@@ -175,6 +176,7 @@ scripts/harness status --json
 scripts/harness route --state /path/to/task-metadata.json --project /path/to/project
 scripts/harness launch --state /path/to/task-metadata.json --project /path/to/project --agent codex
 scripts/harness advise --context /path/to/decision-context.json
+scripts/harness budget --thread THREAD_ID --tokens 40000 --watch
 scripts/harness continue "<evaluation note>"
 scripts/harness abort "<reason>"
 ```
@@ -214,6 +216,26 @@ Deterministic conditions bypass TypeSafe: required checks, known failures, expli
 The default mode is `shadow`: TypeSafe answers and logs its judgment while `launch` keeps the existing default command. Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`). The TypeSafe skill records its own calls under `~/.typesafe-routing/logs/`. Record each real outcome using the skill's `route.py record --call-id ...` command and inspect `route.py report` for accuracy, token usage, and latency. The harness cannot measure avoided reasoning tokens itself.
 
 Active mode requires `--mode active`, `HARNESS_TYPESAFE_ACTIVE=1`, at least 30 distinct correct shadow outcomes (including five correct `proceed` routes), and zero `under_escalated` outcomes. The route and outcome logs are joined by call ID; model checks and fabricated unpaired outcomes do not count. Review the report before opting in. Until then, the launcher keeps the existing agent command; this integration does not yet claim token savings. Required verification and permission gates are unchanged.
+
+### Codex token-budget meter
+
+`harness budget` uses the local Codex App Server goal APIs to read the persisted `tokensUsed` counter. With `--watch`, each increase is recorded through `harness step --tokens`; when usage reaches the chosen cap, the controller looks up the active turn and calls `turn/interrupt` with both its thread and turn IDs. The command exits `3` when the cap is reached, matching the harness budget-pause exit code.
+
+Pass an existing thread directly:
+
+```sh
+scripts/harness budget --thread THREAD_ID --tokens 40000 --watch
+```
+
+This command requires a running Codex App Server daemon and a thread owned by that server; it cannot interrupt a thread running inside an independent `codex` terminal process. On this machine, `codex app-server proxy` currently has no daemon to connect to, and `codex app-server daemon start` requires a managed standalone Codex installation that is not present. Until that dependency and an App Server-owned launch path are available, use the command only with an already managed thread. `harness launch --agent codex` refuses an explicit token cap instead of silently running without enforcement.
+
+Attaching to a thread with an active goal updates its cap without replacing its objective or resetting its usage. A terminal goal is rejected so the caller must deliberately create a new goal instead of losing the old accounting.
+
+### Auditability planning wizard
+
+Open `tools/auditability-planning-wizard.html` directly in a browser. The standalone page asks ten required questions covering the first pilot, Arc event design, prompt privacy, JEV shadow routing, review projections, cross-machine delivery, operations, and the evidence required before rollout. It has no network dependency or build step.
+
+Draft answers stay in browser `localStorage` until cleared. Do not enter raw prompts, source, credentials, or personal data. After generating the brief, download either the human-readable Markdown plan or the structured JSON answers.
 
 ### Dynamic advice during work
 
@@ -278,9 +300,9 @@ Session budgets are counted per run and are agent-visible rules:
 
 Set caps with `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, and `HARNESS_BUDGET_TOKENS`. They are read when the run is created. The CLI cannot count tokens itself, so the token budget stays `unknown` unless the agent reports counts. A token cap is therefore enforced only when the agent launcher or runtime reports its measured token use through `harness step --tokens N`; the current Claude hook records tool steps but receives no token-usage field.
 
-When a cap is reached the CLI writes a pause record, refuses further phase and step commands, and exits non-zero. `harness continue` requires an evaluation note, stores it in the pause record, and extends the tripped budget by one more window. There is no way to resume without that evaluation. Once the `continues` cap is reached, `continue` is refused and the only way forward is `harness abort "<reason>"` followed by `harness plan start`.
+When a cap is reached the CLI writes a pause record, refuses further phase and step commands, and exits non-zero. `harness continue` requires an evaluation note, stores it in the pause record, and extends the tripped budget by one more window. There is no way to resume without that evaluation. An agent may invoke it only after the user explicitly instructs continuation in the current conversation; the note must record that authorization concisely, such as `User explicitly requested continuation in chat.` Once the `continues` cap is reached, `continue` is refused and the only way forward is `harness abort "<reason>"` followed by `harness plan start`.
 
-A `continue` on the time budget restarts the clock as well as adding a window, so a run left overnight resumes cleanly. `continue` and `abort` are human decisions. The phase guard hook refuses them when the agent issues them through the Bash tool; a person runs them in a terminal or with the `!` prefix in the Claude Code prompt. Set `HARNESS_BUDGET_CONTINUES` to change the cap.
+A `continue` on the time budget restarts the clock as well as adding a window, so a run left overnight resumes cleanly. The phase guard hook allows `continue`; it cannot inspect chat authorization, so agents must follow the current-conversation policy above. `abort` and `scripts/knowledge-trust.sh approve` remain human-only and the hook refuses them when an agent issues them through the Bash tool. Set `HARNESS_BUDGET_CONTINUES` to change the cap.
 
 Exit codes:
 
@@ -318,7 +340,7 @@ The `Makefile` deliberately has no `format`, `lint`, `typecheck`, `test`, or `bu
 
 ## Phase Guard Hook
 
-`.claude/settings.json` registers `scripts/hooks/require-phase.sh` as a Claude Code `PreToolUse` hook for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. The hook asks `scripts/harness status` for the run state and blocks the tool call (exit 2) unless a phase is active and the run is not paused, complete, or aborted. Bash calls whose whole command is `scripts/harness ...` or `scripts/action.sh validate ...` are allowed so the agent can open a phase; a chained command such as `scripts/harness plan start; rm -rf build` is not, and `scripts/harness continue` or `abort` from the agent is always refused.
+`.claude/settings.json` registers `scripts/hooks/require-phase.sh` as a Claude Code `PreToolUse` hook for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. The hook asks `scripts/harness status` for the run state and blocks the tool call (exit 2) unless a phase is active and the run is not paused, complete, or aborted. Bash calls whose whole command is `scripts/harness ...` or `scripts/action.sh validate ...` are allowed so the agent can open a phase; a chained command such as `scripts/harness plan start; rm -rf build` is not. The hook permits `scripts/harness continue` because it cannot inspect chat context; agents may use it only after an explicit current-conversation user instruction and must retain the required evaluation note. It continues to refuse agent-issued `scripts/harness abort` and `scripts/knowledge-trust.sh approve`.
 
 Before the phase check, the hook applies the denylist to the actual command or write path and refuses to work while a `knowledge/` folder is unapproved. Every allowed call is then recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. Use `HARNESS_BUDGET_TIME_MIN=<n>` only for a deliberately time-boxed run. Tokens stay `unknown` because the hook payload carries no token counts.
 

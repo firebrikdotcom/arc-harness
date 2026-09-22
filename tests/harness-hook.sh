@@ -96,9 +96,10 @@ hook 0 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}'
 [ "$(steps_used)" -eq 3 ] || fail "expected 3 steps after two tool calls, got $(steps_used)"
 
-# Budget decisions are reserved for humans even while a phase is active.
-hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness continue \"looks fine\""}}'
-expect_output "human decisions"
+# The hook permits continue so an agent can resume after an explicit user
+# instruction in the current conversation; the required evaluation note remains
+# enforced by scripts/harness itself.
+hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness continue \"User explicitly requested continuation in chat.\""}}'
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"cd /x && /abs/scripts/harness abort \"restart\""}}'
 expect_output "human decisions"
 
@@ -113,7 +114,7 @@ record review 0
 hook 2 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"}}'
 expect_output "run is complete"
 
-# Paused run: blocked until a human continues; then counting resumes.
+# Paused run: blocked until an explicit user-authorized continuation; then counting resumes.
 rm -rf "$HARNESS_DB_ROOT"
 HARNESS_BUDGET_STEPS=2 "$CLI" plan start >/dev/null
 "$CLI" step --note "hit the cap" >/dev/null 2>&1 || true

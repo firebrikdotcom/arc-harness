@@ -53,6 +53,8 @@ usage() {
   info "  launch --state PATH --default-command PATH"
   info "                       Select and start an argv command profile."
   info "  advise --context PATH  Request a non-executing, context-specific TypeSafe choice."
+  info "  budget --thread ID --tokens N [--watch]"
+  info "                       Measure a Codex thread and interrupt its active turn at the cap."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
   info "  abort \"REASON\"       Abort the current run so a new one can start. The reason is required."
   info ""
@@ -910,7 +912,7 @@ case "$COMMAND" in
   status)
     cmd_status "$@"
     ;;
-  route|launch|advise)
+  route|launch|advise|budget)
     if ! has_cmd python3; then
       info "FAIL: python3 is required for task-entry routing."
       exit "$EXIT_USAGE"
@@ -920,6 +922,9 @@ case "$COMMAND" in
     fi
     if [ "$COMMAND" = "advise" ]; then
       exec python3 "$SCRIPT_DIR/context_advice.py" --db-root "$DB_ROOT" "$@"
+    fi
+    if [ "$COMMAND" = "budget" ]; then
+      exec python3 "$SCRIPT_DIR/codex_budget.py" --harness "$SCRIPT_HARNESS_ROOT/scripts/harness" --db-root "$DB_ROOT" "$@"
     fi
     exec python3 "$SCRIPT_DIR/agent_launch.py" --db-root "$DB_ROOT" "$@"
     ;;

@@ -10,6 +10,10 @@ printf '#!/bin/sh\nexit 0\n' > "$project/scripts/harness"
 printf 'def valid_python():\n    return True\n' > "$project/scripts/helper.py"
 printf '\001\002\003' > "$project/scripts/__pycache__/helper.pyc"
 
+# Cached project snapshots are data, not source belonging to this project.
+mkdir -p "$project/.harness-db/snapshots"
+printf '#!/bin/sh\nif then\n' > "$project/.harness-db/snapshots/invalid.sh"
+
 HARNESS_DB_ROOT="$tmpdir/db" "$ROOT/scripts/verify.sh" --project "$project" > "$tmpdir/output" 2>&1 || {
   cat "$tmpdir/output"
   exit 1
@@ -18,4 +22,4 @@ grep -q 'PASS: bash:syntax' "$tmpdir/output"
 if command -v shellcheck >/dev/null 2>&1; then
   grep -q 'PASS: bash:shellcheck' "$tmpdir/output"
 fi
-printf '%s\n' 'PASS: shell verification ignores Python and bytecode under scripts/'
+printf '%s\n' 'PASS: shell verification ignores Python, bytecode, and local database snapshots'

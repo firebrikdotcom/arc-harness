@@ -49,7 +49,7 @@ You cannot build before plan is done. You cannot review before build is done.
 
 `build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start`.
 
-If it stops you: `scripts/harness status`. A budget pause requires a human to run `scripts/harness continue "why it is ok to go on"`; only a human may also abort a run. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
+If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
 
 The phase guard is a Claude Code hook only. It checks the denylist and knowledge-trust state before requiring an active phase, then counts an allowed tool call as a harness step. Other agents must follow the written workflow themselves.
 
@@ -83,6 +83,7 @@ scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
 scripts/task_route.py       Structured task-entry route with deterministic gates and optional TypeSafe call
 scripts/agent_launch.py     Launches an argv command profile selected by the task-entry route
+scripts/codex_budget.py     App Server-owned Codex goal-token meter and active-turn interrupter
 scripts/context_advice.py   Makes a non-executing, context-specific TypeSafe choice during agent work
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 .claude/settings.json       Registers the phase guard hook
@@ -94,7 +95,9 @@ schemas/denylist.default    Default denylist; a project replaces it with .harnes
 scripts/verify.sh           Local verification sensor (check-only, never rewrites)
 scripts/review.sh           Review helper: full patch, continues after a failing verify
 tasks/task-template.md      Reusable task template
+tasks/auditability-wizard.md  Scope and acceptance criteria for the offline auditability planner
 tests/*.sh                  Regression tests; scripts/verify.sh runs them all on the harness root
+tools/auditability-planning-wizard.html  Offline ten-decision planner with Markdown and JSON exports
 ```
 
 Ignored local database content:
@@ -137,6 +140,8 @@ Projects can make a category mandatory with `.harness-required-checks` (or `HARN
 For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Shadow mode always preserves the default command; active mode additionally requires an explicit switch and sufficient recorded shadow outcomes.
 
 `scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option.
+
+Open `tools/auditability-planning-wizard.html` directly in a browser to plan the first Arc/JEV auditability slice. It stores answers in that browser, warns against raw prompts and secrets, and exports a Markdown brief plus structured JSON without network requests or a build step.
 
 ## CI
 
