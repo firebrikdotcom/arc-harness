@@ -215,7 +215,7 @@ Deterministic conditions bypass TypeSafe: required checks, known failures, expli
 
 The default mode is `shadow`: TypeSafe answers and logs its judgment while `launch` keeps the existing default command. Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`). The TypeSafe skill records its own calls under `~/.typesafe-routing/logs/`. Record each real outcome using the skill's `route.py record --call-id ...` command and inspect `route.py report` for accuracy, token usage, and latency. The harness cannot measure avoided reasoning tokens itself.
 
-Active mode requires `--mode active`, `HARNESS_TYPESAFE_ACTIVE=1`, at least 30 distinct correct shadow outcomes (including five correct `proceed` routes), and zero `under_escalated` outcomes. The route and outcome logs are joined by call ID; model checks and fabricated unpaired outcomes do not count. Review the report before opting in. Until then, the launcher keeps the existing agent command; this integration does not yet claim token savings. Required verification and permission gates are unchanged.
+Active mode requires an exact `TYPESAFE_MODEL` pin and current-cohort evidence (matching requested/returned model and the fingerprint of the router plus task adapter). Unversioned records, model probes, advice, and other policy/model cohorts do not qualify. Active mode requires `--mode active`, `HARNESS_TYPESAFE_ACTIVE=1`, at least 30 distinct correct shadow outcomes (including five correct `proceed` routes), and zero `under_escalated` outcomes. The route and outcome logs are joined by call ID; model checks and fabricated unpaired outcomes do not count. Review the report before opting in. Until then, the launcher keeps the existing agent command; this integration does not yet claim token savings. Required verification and permission gates are unchanged.
 
 ### Codex token-budget meter
 
@@ -270,13 +270,13 @@ scripts/harness advise --context /path/to/decision-context.json
 
 The output contains `choice`, `confidence`, `call_id`, and `record_path`. Treat `choice` as evidence for the ongoing judgment, not an instruction to bypass a rule or automatically change code.
 
-Five unrelated live fixtures exercise this path (banking ledger, clinic appointments, offline field work, storefront search, and staff authentication). They are opt-in because they require the local TypeSafe credential and network access:
+Five unrelated v1 fixtures and one v2 Choice/Score/Boolean batch exercise this path (banking ledger, clinic appointments, offline field work, storefront search, and staff authentication). They are opt-in because they require the local TypeSafe credential and network access:
 
 ```sh
 HARNESS_TYPESAFE_LIVE=1 sh tests/live-context-advice.sh
 ```
 
-The ordinary harness test run invokes the wrapper without that variable and reports a skip, so CI never requires the credential. The fixtures are test-only; `scripts/context_advice.py` has no domain-specific options or terms.
+The ordinary harness test run invokes the wrapper without that variable and reports a skip, so CI never requires the credential. The fixtures are test-only; their database and TypeSafe logs are isolated so they cannot count as pilot evidence. `scripts/context_advice.py` has no domain-specific options or terms.
 
 Phase rules:
 
@@ -393,3 +393,7 @@ sh -n scripts/*.sh
 ```
 
 Replace these placeholders with exact project commands when tooling is added.
+
+### Broad Jev checkpoints
+
+See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, baseline capture, deterministic bypasses, outcome recording, and cohort reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `scripts/harness advise --report` without credentials; use `--record OUTCOME.json` to attach independent labels. New families are shadow-only.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -33,6 +34,7 @@ observed = os.environ.get('FAKE_RECOMMENDATION', 'proceed')
 recommendation = 'reasoning_model' if '--shadow' in sys.argv else observed
 print(json.dumps({'call_id': 'fixture-call', 'policy': {'recommendation': recommendation,
       'observed_recommendation': observed, 'reason': 'fixture'},
+      'model': {'requested': 'fixture', 'returned': os.environ.get('FAKE_MODEL', 'fixture'), 'drift': False},
       'usage': {'input_tokens': 12, 'output_tokens': 2}, 'latency_ms': 5}))
 '''
 
@@ -49,7 +51,7 @@ class TaskRoutingTests(unittest.TestCase):
         self.state_capture = self.root / "sent-state.json"
         self.db = self.root / "db"
         self.env = os.environ.copy()
-        self.env.update({"FAKE_STATE_PATH": str(self.state_capture), "HARNESS_DB_ROOT": str(self.db)})
+        self.env.update({"FAKE_STATE_PATH": str(self.state_capture), "HARNESS_DB_ROOT": str(self.db), "TYPESAFE_MODEL": "fixture"})
 
     def run_cli(self, *args: str, expected: int = 0, env: dict | None = None) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
@@ -70,6 +72,8 @@ class TaskRoutingTests(unittest.TestCase):
         logs.mkdir()
         (logs / "2026-09-19.jsonl").write_text(
             "".join(json.dumps({"call_id": f"call-{i}", "shadow": True, "exit_code": 0,
+                                "kind": "task_entry", "model_requested": "fixture", "model_returned": "fixture",
+                                "policy_version": hashlib.sha256(self.router.read_bytes() + (ROOT / "scripts/task_route.py").read_bytes()).hexdigest(),
                                 "policy": {"observed_recommendation": "proceed"}}) + "\n"
                     for i in range(30))
         )
@@ -180,6 +184,36 @@ class TaskRoutingTests(unittest.TestCase):
             "--agent", "codex", "--project", str(self.root), expected=2, env=environment,
         )
         self.assertIn("cannot be interrupted through a separate App Server", result.stderr)
+
+
+    def test_wrong_cohort_and_unversioned_evidence_cannot_activate(self):
+        environment = self.eligible_env()
+        calls = Path(environment["TYPESAFE_LOG_DIR"]) / "2026-09-19.jsonl"
+        original = calls.read_text()
+        for field, value in [("kind", "dynamic_advice"), ("model_returned", "old-model"),
+                             ("model_requested", "old-model"), ("policy_version", "old-policy")]:
+            rows = [json.loads(line) for line in original.splitlines()]
+            for row in rows:
+                row[field] = value
+            calls.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            self.assertIn("active routing is gated", self.route(mode="active", env=environment, expected=2).stderr)
+        calls.write_text(original)
+        environment["FAKE_MODEL"] = "unexpected-model"
+        record = json.loads(self.route(mode="active", env=environment).stdout)
+        self.assertEqual(record["source"], "fallback")
+        self.assertEqual(record["recommendation"], "default")
+
+    def test_malformed_outcome_log_refuses_activation(self):
+        environment = self.eligible_env()
+        calls = Path(environment["TYPESAFE_LOG_DIR"]) / "2026-09-19.jsonl"
+        calls.write_text("[]\n")
+        result = self.route(mode="active", env=environment, expected=2)
+        self.assertIn("cannot inspect outcome log", result.stderr)
+
+    def test_explicit_choice_bypasses_jev(self):
+        self.metadata.write_text(json.dumps({**METADATA, "user_choice_explicit": True}))
+        self.assertEqual(json.loads(self.route().stdout)["source"], "deterministic")
+        self.assertFalse(self.state_capture.exists())
 
 
 if __name__ == "__main__":

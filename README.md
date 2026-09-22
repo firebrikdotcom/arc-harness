@@ -170,3 +170,7 @@ When source code, runtime commands, dependencies, or architecture are added:
 Do not commit local runtime state such as `.venv/`, `.codex/`, `.agents/`, `.harness-db/`, caches, real `.env` files, or private keys. Regenerate local agent tooling per workstation.
 
 Project-related documents are local database records for the harness. Keep project registries, task notes, run progress, generated indexes, and project-specific notes in `.harness-db/` or another ignored database directory instead of tracking them in this template repository.
+
+## Jev decision checkpoints
+
+Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices and v2 shadow batches, `--record` links outcomes, and `--report` compares versioned cohorts without API access.

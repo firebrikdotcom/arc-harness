@@ -1,3 +1,15 @@
+# Jev checkpoint implementation — 2026-09-22
+
+- Harness and target: `/Users/savior/Code/harness-template`.
+- Approved goal: consider Jev at every meaningful decision, with explicit shadow checkpoints and measurable outcomes.
+- Plan: retain v1 advice; add v2 batched typed questions, deterministic bypasses, baseline capture, versioned records, outcomes/reporting; isolate task activation cohorts; update installed guidance.
+- Acceptance: no gate override or automatic promotion; invalid/unavailable evaluations fall back; probes and unknown measurements are separated; backward-compatible CLI and offline regression coverage.
+- Verification: targeted Python suites, shared skill tests, full `scripts/verify.sh`, then `scripts/review.sh`.
+- Context: required harness docs and current source read. Knowledge directory has no README/AGENTS/CLAUDE or skills; unapproved contents were not followed. Graph coverage is stale for changed modules; source used.
+- Build: implemented backward-compatible v1 advice and v2 shadow batches, baseline persistence, typed validation, bypass/fallback records, linked outcomes and cohort reports. Updated shared skill and installable guidance; isolated task activation by current model and router/adapter fingerprint.
+- Targeted checks: 13 task-route and 11 advice tests passed; install-guides tests passed. Shared skill suite initially failed its portable-path assertion; replaced the absolute path and reran the same 64-test suite successfully.
+- Verification: first full `scripts/verify.sh` passed (ran=3, skipped=3, failures=0). Follow-up robustness edits passed 14 routing and 11 advice tests. `HARNESS_TYPESAFE_LIVE=1 sh tests/live-context-advice.sh` passed all five v1 fixtures and the v2 mixed batch against the pinned model, with synthetic logs isolated. Final `scripts/verify.sh` and `scripts/review.sh` both passed (ran=3, skipped=3, failures=0); required lint and test categories passed. Formatter, typecheck and build categories have no configured targets. The optional live checks were run separately and passed. Shared skill tests passed all 64 cases. Review inspected the harness and shared-skill diffs, including fallback, outcome joins, privacy, cohort isolation and guide installation; no unresolved findings. Pilot labels must come from future real decisions, not fabricated fixtures.
+
 # Progress
 
 ## Cross-machine Harness Reconciliation (2026-09-22)

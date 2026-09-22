@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -110,9 +111,21 @@ def api_state(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def active_eligible() -> tuple[bool, str]:
+def policy_version(router: Path) -> str:
+    # Covers native questions/thresholds and this task-state adapter together.
+    return hashlib.sha256(router.read_bytes() + Path(__file__).read_bytes()).hexdigest()
+
+
+def active_eligible(router: Path) -> tuple[bool, str]:
     if os.environ.get("HARNESS_TYPESAFE_ACTIVE") != "1":
         return False, "set HARNESS_TYPESAFE_ACTIVE=1 after reviewing the outcome report"
+    model = os.environ.get("TYPESAFE_MODEL", "jev-latest")
+    if model.endswith("-latest"):
+        return False, "active routing requires an exact model pin"
+    try:
+        version = policy_version(router)
+    except OSError as error:
+        return False, f"cannot fingerprint router: {error}"
     log_root = Path(os.environ.get("TYPESAFE_LOG_DIR") or (Path(os.environ.get("TYPESAFE_HOME", str(Path.home() / ".typesafe-routing"))) / "logs"))
     outcomes = log_root / "outcomes.jsonl"
     valid_calls: dict[str, str] = {}
@@ -127,7 +140,11 @@ def active_eligible() -> tuple[bool, str]:
                 call_id = row.get("call_id")
                 policy = row.get("policy") or {}
                 observed = policy.get("observed_recommendation")
-                if row.get("shadow") is True and row.get("exit_code") == 0 and call_id and observed in RECOMMENDATIONS:
+                if (row.get("shadow") is True and row.get("exit_code") == 0 and call_id and observed in RECOMMENDATIONS
+                        and row.get("kind") == "task_entry" and row.get("policy_version") == version
+                        and row.get("model_requested") == model and row.get("model_returned") == model):
+                    if call_id in valid_calls:
+                        return False, f"duplicate call {call_id}"
                     valid_calls[call_id] = observed
         for line in outcomes.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
@@ -137,7 +154,7 @@ def active_eligible() -> tuple[bool, str]:
             if call_id:
                 outcomes_by_call[call_id] = row.get("outcome", "")
             under += row.get("outcome") == "under_escalated"
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, TypeError, AttributeError) as error:
         return False, f"cannot inspect outcome log: {error}"
     correct = sum(outcomes_by_call.get(call_id) == "correct" for call_id in valid_calls)
     routine_correct = sum(
@@ -155,7 +172,7 @@ def active_eligible() -> tuple[bool, str]:
 def invoke_router(state: dict[str, Any], router: Path, mode: str) -> tuple[dict[str, Any] | None, str | None]:
     if not router.is_file():
         return None, f"router missing: {router}"
-    command = [sys.executable, str(router), "route", "--strict"]
+    command = [sys.executable, str(router), "route", "--strict", "--decision-family", "task_entry", "--policy-version", policy_version(router)]
     if mode == "shadow":
         command.append("--shadow")
     try:
@@ -197,7 +214,7 @@ def write_record(record: dict[str, Any], db_root: Path) -> Path:
 def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str) -> dict[str, Any]:
     data = load_metadata(metadata)
     if mode == "active":
-        eligible, reason = active_eligible()
+        eligible, reason = active_eligible(router)
         if not eligible:
             raise InputError(f"active routing is gated: {reason}")
     fixed = deterministic_route(data)
@@ -214,6 +231,11 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
             recommendation = "default" if mode == "shadow" else policy["recommendation"]
             reason = policy.get("reason", "")
             source = "typesafe"
+            model = answer.get("model")
+            if not isinstance(model, dict):
+                model = {}
+            if mode == "active" and (model.get("returned") != os.environ.get("TYPESAFE_MODEL", "jev-latest") or model.get("drift")):
+                recommendation, reason, source = "default", "model drift or missing returned model", "fallback"
     record: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "at": datetime.now(timezone.utc).isoformat(),
@@ -227,6 +249,9 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
     if answer:
         record["observed_recommendation"] = answer["policy"].get("observed_recommendation")
         record["call_id"] = answer.get("call_id")
+        record["kind"] = "task_entry"
+        record["policy_version"] = policy_version(router)
+        record["model"] = answer.get("model")
         record["usage"] = answer.get("usage")
         record["latency_ms"] = answer.get("latency_ms")
     record["record_path"] = str(write_record(record, db_root))

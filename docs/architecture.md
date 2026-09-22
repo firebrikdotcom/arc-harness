@@ -54,7 +54,7 @@ Until application code exists, use these boundaries:
 - `scripts/task_route.py`: accepts only bounded, enum-based task metadata. It applies hard rules before optional TypeSafe routing and writes private route records under `.harness-db/routes/`. No prompt, source file, or diff is sent to the API.
 - `scripts/agent_launch.py`: selects an exact argv command profile from the route. It runs no shell interpreter and leaves existing agent launches unchanged unless the launcher is used.
 - `scripts/codex_budget.py`: talks only to a connected Codex App Server, mirrors its persisted goal-token counter into harness state, and interrupts the exact active turn at an explicitly chosen cap. A direct CLI-owned thread cannot be interrupted by this separate connection.
-- `scripts/context_advice.py`: accepts a curated decision context and dynamically supplied options during agent work, asks TypeSafe for one advisory choice, and saves a private record under `.harness-db/advice/`. It cannot execute the chosen option.
+- `scripts/context_advice.py`: accepts a curated decision context and dynamically supplied options during agent work, supports legacy choices and versioned shadow batches with baseline capture, typed validation, deterministic bypasses, outcome joins and cohort reporting, and saves a private record under `.harness-db/advice/`. It cannot execute the chosen option.
 - `scripts/init.sh`: discovers project-owned dependency setup, previews it, and executes it only after confirmation or explicit non-interactive opt-in.
 - `scripts/verify.sh` and `scripts/review.sh`: non-mutating verification and review sensors. They write the records used by the build and review gates.
 - `scripts/install-guides.sh`: idempotently refreshes the marked harness block in a target's agent guides without changing its surrounding instructions.
@@ -93,3 +93,5 @@ Add dated decisions here as the system takes shape.
 - 2026-09-19: Added dynamic TypeSafe advice as a separate, non-executing path. It takes a small redacted context and per-situation choices instead of a fixed global template; the existing deterministic gates remain authoritative.
 - 2026-09-21: Added opt-in Codex goal-token metering for App Server-owned threads. Existing active goal usage is preserved, direct CLI launches refuse unenforceable caps, and active-turn interruption uses the App Server protocol's required thread and turn identifiers.
 - 2026-09-22: Added an offline auditability-planning wizard for choosing the first Arc/JEV event-sourcing slice without collecting raw prompts or making network requests.
+
+- 2026-09-22: Broad Jev consideration uses guidance and explicit shadow checkpoints, not runtime interception. Baselines are persisted before evaluation; outcomes are local exclusive records. Task activation evidence is scoped to exact model and router/adapter fingerprint. No automatic promotion is introduced.

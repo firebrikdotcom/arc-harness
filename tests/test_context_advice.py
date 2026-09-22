@@ -6,6 +6,9 @@ import importlib.util
 import json
 import tempfile
 import unittest
+import copy
+import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -127,8 +130,153 @@ class ContextAdviceTests(unittest.TestCase):
     def test_unknown_choice_is_rejected(self) -> None:
         self.write(CONTEXT)
         router = FakeRouter(choice="outside_options")
-        with self.assertRaisesRegex(ADVICE.InputError, "outside the supplied options"):
-            ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db")
+        result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db")
+        self.assertEqual(result["status"], "fallback")
+        self.assertNotIn("choice", result)
+
+
+    def checkpoint(self):
+        return {
+            "version": 2,
+            "checkpoint": {"family": "tool_selection", "question_version": "1", "policy_version": "shadow-1",
+                           "baseline_action": "inspect", "bypass_reason": "none", "state_build_ms": 12},
+            "context": {"goal": "Choose the next bounded investigation step.", "facts": ["Evidence is incomplete."]},
+            "questions": {
+                "recommendation": {"type": "choice", "instructions": "Which next step resolves the missing evidence?",
+                                   "criteria": {"inspect": "Inspect the current evidence", "trace": "Trace a related call"}},
+                "impact": {"type": "score", "instructions": "Assess impact", "criteria": ["Local", "Broad"]},
+                "sufficient": {"type": "boolean", "instructions": "The evidence is sufficient"},
+            },
+        }
+
+    def batch_router(self, response=None):
+        router = FakeRouter()
+        expected = response or {"model": "fixture", "usage": {"input_tokens": 10, "output_tokens": 3}, "answers": {
+            "recommendation": {"choice": "trace", "confidence": .8, "probabilities": {"inspect": .1, "trace": .9}},
+            "impact": {"score": .4, "confidence": .2, "probabilities": {"0": .6, "1": .4}},
+            "sufficient": {"noul": .05},
+        }}
+        def post(url, payload, key, timeout):
+            router.calls.append(payload)
+            records = list((self.root / "db" / "advice").glob("*.json"))
+            self.assertTrue(any(json.loads(p.read_text())["status"] == "pending" for p in records))
+            self.assertNotIn("checkpoint", payload["state"])
+            self.assertNotIn("baseline_action", payload["state"])
+            self.assertEqual(payload["questions"]["sufficient"]["type"], "noul")
+            return copy.deepcopy(expected), {"latency_ms": 4, "http_status": 200}
+        router.post_json = post
+        return router
+
+    def evaluate(self, context=None, router=None):
+        self.write(context or self.checkpoint())
+        router = router or self.batch_router()
+        return ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db")
+
+    def test_batch_shadow_preserves_baseline_and_distinct_measures(self):
+        router = self.batch_router()
+        result = self.evaluate(router=router)
+        self.assertEqual(len(router.calls), 1)
+        self.assertEqual(result["action"], "inspect")
+        self.assertEqual(result["answers"]["recommendation"]["choice"], "trace")
+        self.assertEqual(result["answers"]["sufficient"]["probability"], .05)
+        self.assertEqual(result["answers"]["impact"]["score"], .4)
+        self.assertEqual(result["status"], "evaluated")
+        record = json.loads(Path(result["record_path"]).read_text())
+        self.assertEqual(record["model_returned"], "fixture")
+        self.assertEqual(record["usage"]["input_tokens"], 10)
+
+    def test_all_deterministic_bypasses_avoid_network(self):
+        for reason in ADVICE.BYPASSES - {"none"}:
+            context = self.checkpoint()
+            context["checkpoint"]["bypass_reason"] = reason
+            context["questions"] = {}
+            router = FakeRouter()
+            result = self.evaluate(context, router)
+            self.assertEqual(result["status"], "bypassed")
+            self.assertEqual(result["action"], "inspect")
+            self.assertEqual(router.calls, [])
+
+    def test_missing_distributions_remain_unknown(self):
+        response = {"model": "fixture", "answers": {
+            "recommendation": {"choice": "trace", "confidence": .8},
+            "impact": {"score": .4, "confidence": .2}, "sufficient": {"noul": .05}}}
+        result = self.evaluate(router=self.batch_router(response))
+        self.assertEqual(result["status"], "evaluated")
+        self.assertIsNone(result["answers"]["impact"]["probabilities"])
+        self.assertIsNone(json.loads(Path(result["record_path"]).read_text())["usage"])
+
+    def test_invalid_answers_drift_and_transport_use_fallback(self):
+        valid = {"model": "fixture", "answers": {
+            "recommendation": {"choice": "trace", "confidence": .8},
+            "impact": {"score": .4, "confidence": .2}, "sufficient": {"noul": .05}}}
+        cases = []
+        for field, value in [("confidence", float("nan")), ("choice", "unknown"),
+                             ("probabilities", {"trace": 1}), ("confidence", True)]:
+            response = copy.deepcopy(valid)
+            response["answers"]["recommendation"][field] = value
+            cases.append(response)
+        response = copy.deepcopy(valid); response["answers"]["sufficient"]["noul"] = 2; cases.append(response)
+        response = copy.deepcopy(valid); response["answers"]["impact"]["score"] = 2; cases.append(response)
+        response = copy.deepcopy(valid); del response["answers"]["impact"]; cases.append(response)
+        response = copy.deepcopy(valid); response["model"] = "different"; cases.append(response)
+        for response in cases:
+            with self.subTest(response=response):
+                result = self.evaluate(router=self.batch_router(response))
+                self.assertEqual(result["status"], "fallback")
+                self.assertEqual(result["action"], "inspect")
+        router = self.batch_router()
+        def fail(*args):
+            raise TimeoutError("forbidden-token")
+        router.post_json = fail
+        result = self.evaluate(router=router)
+        self.assertEqual(result["status"], "fallback")
+        self.assertNotIn("forbidden-token", Path(result["record_path"]).read_text())
+
+    def test_input_size_versions_and_secret_rejected(self):
+        for mutate in [lambda c: c.update(version=True),
+                       lambda c: c["checkpoint"].update(baseline_action=""),
+                       lambda c: c["context"].update(goal="forbidden-token"),
+                       lambda c: c.update(questions={})]:
+            c = self.checkpoint(); mutate(c); self.write(c)
+            with self.assertRaises(ADVICE.InputError):
+                ADVICE.load_context(self.path, FakeRouter())
+        self.path.write_text(" " * (ADVICE.MAX_BYTES + 1))
+        with self.assertRaisesRegex(ADVICE.InputError, "exceeds"):
+            ADVICE.load_context(self.path, FakeRouter())
+
+    def test_outcomes_are_linked_once_and_reported_by_cohort(self):
+        first = self.evaluate()
+        context = self.checkpoint(); context["checkpoint"]["policy_version"] = "shadow-2"
+        self.evaluate(context)
+        outcome = {"call_id": first["call_id"], "action_taken": "inspect", "outcome": "incorrect",
+                   "evidence": "Independent inspection established that the original step resolved the question.",
+                   "total_decision_ms": 30, "baseline_ms": 20, "rework_ms": 0}
+        p = self.root / "outcome.json"; p.write_text(json.dumps(outcome))
+        ADVICE.record_outcome(p, FakeRouter(), self.root / "db")
+        with self.assertRaisesRegex(ADVICE.InputError, "already recorded"):
+            ADVICE.record_outcome(p, FakeRouter(), self.root / "db")
+        report = ADVICE.report(self.root / "db")
+        self.assertFalse(report["automatic_promotion"])
+        self.assertEqual(len(report["cohorts"]), 2)
+        group = next(g for g in report["cohorts"] if g["labeled"])
+        self.assertEqual(group["accuracy"], 0)
+        self.assertEqual(group["disagreements"], 1)
+        self.assertEqual(group["paired_delta_ms"], 10)
+        self.assertEqual(group["tokens"], 13)
+        unlabeled = next(g for g in report["cohorts"] if not g["labeled"])
+        self.assertIsNone(unlabeled["accuracy"])
+        self.assertIsNone(unlabeled["paired_delta_ms"])
+        output = subprocess.run([sys.executable, str(ROOT / "scripts/context_advice.py"), "--report",
+                                 "--router", "/missing", "--db-root", str(self.root / "db")],
+                                check=True, capture_output=True, text=True)
+        self.assertEqual(len(json.loads(output.stdout)["cohorts"]), 2)
+
+    def test_fallback_cannot_be_labeled_correct(self):
+        context = self.checkpoint(); context["checkpoint"]["bypass_reason"] = "user_choice"
+        result = self.evaluate(context)
+        self.write({"call_id": result["call_id"], "action_taken": "inspect", "outcome": "correct", "evidence": "Checked"})
+        with self.assertRaisesRegex(ADVICE.InputError, "no usable"):
+            ADVICE.record_outcome(self.path, FakeRouter(), self.root / "db")
 
 
 if __name__ == "__main__":

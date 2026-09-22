@@ -52,7 +52,7 @@ usage() {
   info "  route --state PATH   Route compact task metadata before an agent starts."
   info "  launch --state PATH --default-command PATH"
   info "                       Select and start an argv command profile."
-  info "  advise --context PATH  Request a non-executing, context-specific TypeSafe choice."
+  info "  advise --context PATH | --record PATH | --report  Shadow advice and outcomes."
   info "  budget --thread ID --tokens N [--watch]"
   info "                       Measure a Codex thread and interrupt its active turn at the cap."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
