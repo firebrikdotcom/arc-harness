@@ -173,6 +173,14 @@ class TaskRoutingTests(unittest.TestCase):
         self.assertEqual(output["command"], ["codex"])
         self.assertFalse(output["launched"])
 
+    def test_codex_launch_refuses_explicit_unenforceable_token_cap(self) -> None:
+        environment = {**self.env, "HARNESS_BUDGET_TOKENS": "40000"}
+        result = self.run_cli(
+            "launch", "--state", str(self.metadata), "--router", str(self.router),
+            "--agent", "codex", "--project", str(self.root), expected=2, env=environment,
+        )
+        self.assertIn("cannot be interrupted through a separate App Server", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

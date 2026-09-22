@@ -9,7 +9,7 @@ This template is prepared for AI-assisted development using a harness of guides,
 - Follow existing patterns first. If no pattern exists, choose the smallest clear implementation and document the decision.
 - Keep task scope narrow. Split large requests into small steps before editing.
 - Before a side-effecting tool call, write an action JSON file and run `scripts/action.sh validate PATH`. Do not treat a rejected proposal as approved.
-- Treat a budget pause, `harness continue`, and `harness abort` as human-only decisions. Report the state instead of attempting to resume or abort the run.
+- On a budget pause, invoke `harness continue "<evaluation note>"` only after an explicit user instruction to continue in the current conversation. Preserve the required evaluation note and record that authorization concisely (for example, `User explicitly requested continuation in chat.`). `harness abort` and `scripts/knowledge-trust.sh approve` are human-only; do not invoke them.
 - Update `progress.md` after every meaningful step: planning, implementation, verification, review, blockers, and decisions.
 - Do not claim success without running `scripts/verify.sh`.
 - Cite exact commands run and their results in the final response.
@@ -104,5 +104,5 @@ scripts/harness review start    # run scripts/review.sh and inspect the diff
 scripts/harness review done
 ```
 
-Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
+Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, wait for an explicit user instruction to continue in this conversation, then evaluate and run `scripts/harness continue "<evaluation note that records that authorization>"`.
 <!-- harness-cli:end -->

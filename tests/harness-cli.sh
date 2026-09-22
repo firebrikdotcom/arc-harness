@@ -4,6 +4,8 @@ set -eu
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT_UNDER_TEST=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
+# Root-discovery cases must not inherit a machine-wide explicit override.
+unset HARNESS_ROOT
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-cli.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 # The CLI reports physical paths, so compare against the resolved temp root.

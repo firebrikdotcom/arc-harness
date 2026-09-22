@@ -4,8 +4,10 @@ set -eu
 # Claude Code PreToolUse hook for Write, Edit, MultiEdit, NotebookEdit, and Bash.
 # In order, it:
 #   1. lets pure harness commands through (scripts/harness ..., scripts/action.sh
-#      validate ...), except the human-only ones: continue, abort, and
-#      knowledge-trust approve;
+#      validate ...), except the human-only ones: abort and knowledge-trust approve.
+#      An agent may invoke continue only after an explicit user instruction in the
+#      current conversation; that conversation-level authorization is enforced by
+#      the agent instructions, not inspectable from this hook payload;
 #   2. applies the denylist (scripts/permit.sh) to the real command or write path;
 #   3. refuses to work while a knowledge/ folder is present but not approved;
 #   4. requires an active, unpaused harness phase;
@@ -78,17 +80,17 @@ if [ -z "$tool_name" ]; then
   block "hook payload could not be read; refusing to guess."
 fi
 
-# 1. Pure harness commands, with the human-only ones refused.
+# 1. Pure harness commands, with human-only commands refused. continue is allowed
+# only when the agent has an explicit current-conversation user instruction.
 if [ "$tool_name" = "Bash" ]; then
   stripped=$(printf '%s' "$command" | sed -E 's/^[[:space:]]*cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')
   case "$stripped" in
     *';'*|*'&'*|*'|'*|*'`'*|*"\$("*|*'>'*|*'<'*) stripped="" ;;
   esac
   case "$stripped" in
-    harness\ continue*|*/scripts/harness\ continue*|scripts/harness\ continue*|\
     harness\ abort*|*/scripts/harness\ abort*|scripts/harness\ abort*|\
     *knowledge-trust.sh\ approve*)
-      block "continue, abort, and knowledge-trust approve are human decisions. Ask the user to run it, e.g. with the ! prefix: ! scripts/harness continue \"<evaluation note>\"."
+      block "abort and knowledge-trust approve are human decisions. Ask the user to run them, e.g. with the ! prefix."
       ;;
     harness\ *|harness|*/scripts/harness\ *|*/scripts/harness|scripts/harness\ *|scripts/harness)
       exit 0
@@ -130,7 +132,7 @@ run_status=$(printf '%s\n' "$status_out" | sed -n 's/^Run:[[:space:]]*.*(\([a-z]
 phase=$(printf '%s\n' "$status_out" | sed -n 's/^Phase:[[:space:]]*//p' | head -n 1)
 case "$run_status" in
   active) ;;
-  paused) block "the harness run is paused on a budget; a human evaluates and runs: scripts/harness continue \"<evaluation note>\"." ;;
+  paused) block "the harness run is paused on a budget; wait for an explicit user instruction in this conversation, then run: scripts/harness continue \"<evaluation note>\"." ;;
   complete) block "the harness run is complete; start a new one with: scripts/harness plan start." ;;
   aborted) block "the harness run was aborted; start a new one with: scripts/harness plan start." ;;
   *) block "no harness run exists for $tool_name. Open a phase first: scripts/harness plan start." ;;

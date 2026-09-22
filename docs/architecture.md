@@ -53,10 +53,12 @@ Until application code exists, use these boundaries:
 - `.harness-db/`: ignored local database state; never required for a clean template checkout.
 - `scripts/task_route.py`: accepts only bounded, enum-based task metadata. It applies hard rules before optional TypeSafe routing and writes private route records under `.harness-db/routes/`. No prompt, source file, or diff is sent to the API.
 - `scripts/agent_launch.py`: selects an exact argv command profile from the route. It runs no shell interpreter and leaves existing agent launches unchanged unless the launcher is used.
+- `scripts/codex_budget.py`: talks only to a connected Codex App Server, mirrors its persisted goal-token counter into harness state, and interrupts the exact active turn at an explicitly chosen cap. A direct CLI-owned thread cannot be interrupted by this separate connection.
 - `scripts/context_advice.py`: accepts a curated decision context and dynamically supplied options during agent work, asks TypeSafe for one advisory choice, and saves a private record under `.harness-db/advice/`. It cannot execute the chosen option.
 - `scripts/init.sh`: discovers project-owned dependency setup, previews it, and executes it only after confirmation or explicit non-interactive opt-in.
 - `scripts/verify.sh` and `scripts/review.sh`: non-mutating verification and review sensors. They write the records used by the build and review gates.
 - `scripts/install-guides.sh`: idempotently refreshes the marked harness block in a target's agent guides without changing its surrounding instructions.
+- `tools/auditability-planning-wizard.html`: dependency-free browser planner for the first Arc/JEV auditability slice. It keeps draft answers in browser-local storage and exports only the answers the operator supplies; it does not route tasks or call an external service.
 - `.claude/settings.json` and `scripts/hooks/require-phase.sh`: Claude Code-only enforcement for denylist, knowledge trust, active phase, and tool-step accounting.
 
 When application code is added, document each module with:
@@ -76,6 +78,7 @@ When application code is added, document each module with:
 - Keep harness scripts explicit about whether they operate on the harness root or a target project root.
 - Keep task routing separate from permission and verification gates. Shadow mode preserves the default command; active routing requires observed outcomes and explicit opt-in.
 - Dynamic TypeSafe advice may inform contextual judgment, but it cannot authorize work, waive required checks, or become an arbitrary command executor.
+- Codex token enforcement is opt-in for App Server-owned threads through an explicit numeric cap; direct CLI launches refuse a cap they cannot enforce, and interruption requires both identifiers returned by App Server.
 - Do not introduce new runtime dependencies without a clear reason and setup documentation.
 - Do not require secrets for local verification or CI.
 
@@ -88,3 +91,5 @@ Add dated decisions here as the system takes shape.
 - 2026-05-25: Defined the harness as a cross-project orchestrator. Project-specific documents and run state are local database content under ignored harness database directories, not tracked template files.
 - 2026-09-01: Added a proposed-action schema and validator. The model proposes `run_command` or `write_file` JSON. The harness validates the shape. Permission checks and execution are not in this slice.
 - 2026-09-19: Added dynamic TypeSafe advice as a separate, non-executing path. It takes a small redacted context and per-situation choices instead of a fixed global template; the existing deterministic gates remain authoritative.
+- 2026-09-21: Added opt-in Codex goal-token metering for App Server-owned threads. Existing active goal usage is preserved, direct CLI launches refuse unenforceable caps, and active-turn interruption uses the App Server protocol's required thread and turn identifiers.
+- 2026-09-22: Added an offline auditability-planning wizard for choosing the first Arc/JEV event-sourcing slice without collecting raw prompts or making network requests.

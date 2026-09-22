@@ -12,6 +12,19 @@ from pathlib import Path
 from task_route import InputError, ROOT, route_task
 
 
+def configured_token_budget(environment: dict[str, str]) -> int | None:
+    value = environment.get("HARNESS_BUDGET_TOKENS", "").strip()
+    if value in {"", "unknown"}:
+        return None
+    if not value.isdigit():
+        raise InputError("HARNESS_BUDGET_TOKENS must be a non-negative integer or 'unknown'")
+    return int(value)
+
+
+def command_runs_codex(command: list[str]) -> bool:
+    return Path(command[0]).name == "codex"
+
+
 def read_command(path: Path | None) -> list[str] | None:
     if path is None:
         return None
@@ -79,6 +92,15 @@ def main(argv: list[str] | None = None) -> int:
     environment["HARNESS_ROUTE_RECORD"] = route["record_path"]
     if route.get("call_id"):
         environment["HARNESS_ROUTE_CALL_ID"] = route["call_id"]
+    try:
+        token_budget = configured_token_budget(environment)
+    except InputError as error:
+        parser.error(str(error))
+    if command_runs_codex(command) and token_budget is not None:
+        parser.error(
+            "a direct codex CLI launch cannot be interrupted through a separate App Server; "
+            "start an App Server-owned thread and use 'harness budget --thread ID --tokens N --watch'"
+        )
     os.chdir(args.project)
     try:
         os.execvpe(command[0], command, environment)
