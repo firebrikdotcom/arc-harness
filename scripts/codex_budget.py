@@ -249,6 +249,13 @@ def report_tokens(harness: Path, db_root: Path, delta: int) -> bool:
     if result.returncode not in {0, EXIT_BUDGET}:
         detail = (result.stderr or result.stdout).strip()
         raise BudgetError(f"harness rejected a {delta}-token update: {detail or result.returncode}")
+    if delta > 0 and os.environ.get("HARNESS_AUDIT_ENABLED") == "1":
+        emitter = harness.parent / "audit_emit.py"
+        route_record = os.environ.get("HARNESS_ROUTE_RECORD")
+        command = [sys.executable, str(emitter), "token", "--delta", str(delta)]
+        if route_record:
+            command.extend(["--record", route_record])
+        subprocess.run(command, env=environment, capture_output=True, check=False)
     return result.returncode == EXIT_BUDGET
 
 

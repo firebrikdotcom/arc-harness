@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,6 +24,36 @@ def configured_token_budget(environment: dict[str, str]) -> int | None:
 
 def command_runs_codex(command: list[str]) -> bool:
     return Path(command[0]).name == "codex"
+
+
+def audit_agent_completion(route: dict, profile: str, exit_code: int, environment: dict[str, str]) -> None:
+    if environment.get("HARNESS_AUDIT_ENABLED") != "1":
+        return
+    emitter = ROOT / "scripts" / "audit_emit.py"
+    command = [
+        sys.executable,
+        str(emitter),
+        "agent",
+        "--record",
+        route["record_path"],
+        "--profile",
+        profile,
+        "--exit-code",
+        str(exit_code),
+    ]
+    for name, option in (
+        ("HARNESS_AGENT_INPUT_TOKENS", "--input-tokens"),
+        ("HARNESS_AGENT_OUTPUT_TOKENS", "--output-tokens"),
+        ("HARNESS_AGENT_TOTAL_TOKENS", "--total-tokens"),
+    ):
+        if environment.get(name, "").isdigit():
+            command.extend([option, environment[name]])
+    try:
+        result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
 
 
 def read_command(path: Path | None) -> list[str] | None:
@@ -103,10 +134,32 @@ def main(argv: list[str] | None = None) -> int:
         )
     os.chdir(args.project)
     try:
-        os.execvpe(command[0], command, environment)
+        result = subprocess.run(command, env=environment, check=False)
     except OSError as error:
         parser.error(f"cannot launch {command[0]}: {error}")
-    return 0  # pragma: no cover: exec replaces this process
+    audit_agent_completion(route, output["profile"], result.returncode, environment)
+    if route.get("source") == "typesafe" and route.get("call_id"):
+        emitter = ROOT / "scripts" / "audit_emit.py"
+        subprocess.run(
+            [
+                sys.executable,
+                str(emitter),
+                "outcome",
+                "--record",
+                route["record_path"],
+                "--outcome",
+                "unknown",
+                "--route-taken",
+                output["profile"],
+                "--evidence",
+                "Agent completion is observable; route correctness still requires independent review.",
+                "--avoided",
+                "normal reasoning path",
+            ],
+            env=environment,
+            check=False,
+        )
+    return result.returncode
 
 
 if __name__ == "__main__":

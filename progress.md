@@ -1,5 +1,18 @@
 # Jev checkpoint implementation — 2026-09-22
 
+## Arc Audit and Full JEV Activation (2026-09-23)
+
+- Goal: make JEV route outcomes and agent/token measurements durable in the prepared Arc audit service, then enable full eligible-task delegation with an explicit operator activation path.
+- Finding: `/home/savior/Code/harness-audit` is an unversioned Arc-generated skeleton with only the base `events` table and `/health`; it has no audit aggregate, ingestion endpoint, token fields, running service, or remote Mac copy.
+- Plan: add a versioned Arc audit service under `services/harness-audit`, add best-effort harness emission for route, outcome, and agent-token events, add a full-rollout operator acknowledgement, and document startup/activation/sync commands.
+- Non-goals: do not send prompts, source, diffs, credentials, or raw outcome evidence; do not weaken deterministic authorization, required-check, known-failure, or irreversible-work gates; do not treat unknown outcomes as correct.
+- Acceptance: Arc records route/outcome/token events; the harness preserves task execution when audit is unavailable; active 100% rollout requires an explicit activation acknowledgement; focused tests, full verification, review, and cross-machine synchronization pass.
+- Verification plan: Arc service tests and health/ingest smoke checks, harness routing/emitter tests, isolated `scripts/verify.sh`, separate `scripts/review.sh`, then commit and push the versioned source.
+- Build: added `services/harness-audit`, an Arc `AuditEvent` aggregate with an immutable event log and `audit_events_view` projection, plus `/api/audit/events` and `/api/audit/summary`.
+- Build: added `scripts/audit_emit.py`, launcher completion/outcome emission, and Codex App Server token-delta emission. Telemetry is best-effort and preserves execution when the service is unavailable.
+- Build: added explicit `HARNESS_TYPESAFE_OPERATOR_ACTIVATION=1` full-rollout acknowledgement. It bypasses only the evidence-count gate; model pinning and deterministic safety gates remain enforced.
+- Focused verification: 18 task-routing tests, 1 audit-emitter test, and 3 Arc service tests passed. The live Arc smoke test returned healthy, accepted a measured event, projected it, and reported token totals.
+
 ## Staged JEV Delegation Rollout (2026-09-22)
 
 - Goal: move eligible task-entry routing from shadow comparison toward measured active delegation while preserving deterministic safety gates and a fast rollback switch.

@@ -1,0 +1,15 @@
+[Unit]
+Description=Harness Arc audit service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Code/harness-template/services/harness-audit
+ExecStart=%h/Code/harness-template/scripts/audit-service.sh serve
+Restart=on-failure
+RestartSec=5
+Environment=HARNESS_AUDIT_ENABLED=1
+Environment=HARNESS_AUDIT_URL=http://127.0.0.1:18080
+
+[Install]
+WantedBy=default.target

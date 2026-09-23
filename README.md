@@ -84,6 +84,9 @@ scripts/harness             Harness CLI: harness root, session budgets, plan/bui
 scripts/task_route.py       Structured task-entry route with deterministic gates and optional TypeSafe call
 scripts/agent_launch.py     Launches an argv command profile selected by the task-entry route
 scripts/codex_budget.py     App Server-owned Codex goal-token meter and active-turn interrupter
+scripts/audit_emit.py       Best-effort route, outcome, and token telemetry bridge
+scripts/audit-service.sh    Runs the versioned Arc audit service
+scripts/jev-enable.sh       Enables pinned JEV full rollout and Arc telemetry for a shell
 scripts/context_advice.py   Makes a non-executing, context-specific TypeSafe choice during agent work
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 .claude/settings.json       Registers the phase guard hook
@@ -142,6 +145,8 @@ For scripted starts, `scripts/harness route --state TASK.json --project PATH` ac
 `scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option.
 
 Open `tools/auditability-planning-wizard.html` directly in a browser to plan the first Arc/JEV auditability slice. It stores answers in that browser, warns against raw prompts and secrets, and exports a Markdown brief plus structured JSON without network requests or a build step.
+
+The implemented Arc audit service lives in `services/harness-audit/`. Start it with `scripts/audit-service.sh setup` once, install its per-user supervisor with `scripts/audit-service.sh install`, and source `scripts/jev-enable.sh` in agent-launching shells to enable the explicit full-rollout operator acknowledgement and best-effort telemetry.
 
 ## CI
 

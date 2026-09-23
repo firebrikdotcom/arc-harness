@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lotharthesavior.harness-audit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__HOME__/Code/harness-template/scripts/audit-service.sh</string>
+    <string>serve</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__HOME__/Code/harness-template/services/harness-audit</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HARNESS_AUDIT_ENABLED</key>
+    <string>1</string>
+    <key>HARNESS_AUDIT_URL</key>
+    <string>http://127.0.0.1:18080</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/harness-audit.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/harness-audit.log</string>
+</dict>
+</plist>
