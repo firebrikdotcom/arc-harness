@@ -53,6 +53,8 @@ Until application code exists, use these boundaries:
 - `.harness-db/`: ignored local database state; never required for a clean template checkout.
 - `scripts/task_route.py`: accepts only bounded, enum-based task metadata. It applies hard rules before optional TypeSafe routing, supports stable percentage-based active cohorts with a shadow holdback, and writes private route records under `.harness-db/routes/`. No prompt, source file, or diff is sent to the API.
 - `scripts/agent_launch.py`: selects an exact argv command profile from the route. It runs no shell interpreter and leaves existing agent launches unchanged unless the launcher is used.
+- `scripts/audit_emit.py`: emits redacted route, outcome, agent-completion, and token-measurement facts to the local Arc service; telemetry failure never blocks the task.
+- `services/harness-audit/`: versioned Arc event-sourced audit sink and projection. It stores only compact measurements and hashed evidence, not prompts, source, diffs, credentials, or raw evidence text.
 - `scripts/codex_budget.py`: talks only to a connected Codex App Server, mirrors its persisted goal-token counter into harness state, and interrupts the exact active turn at an explicitly chosen cap. A direct CLI-owned thread cannot be interrupted by this separate connection.
 - `scripts/context_advice.py`: accepts a curated decision context and dynamically supplied options during agent work, supports legacy choices and versioned shadow batches with baseline capture, typed validation, deterministic bypasses, outcome joins and cohort reporting, and saves a private record under `.harness-db/advice/`. It cannot execute the chosen option.
 - `scripts/init.sh`: discovers project-owned dependency setup, previews it, and executes it only after confirmation or explicit non-interactive opt-in.
@@ -96,3 +98,4 @@ Add dated decisions here as the system takes shape.
 
 - 2026-09-22: Broad Jev consideration uses guidance and explicit shadow checkpoints, not runtime interception. Baselines are persisted before evaluation; outcomes are local exclusive records. Task activation evidence is scoped to exact model and router/adapter fingerprint. No automatic promotion is introduced.
 - 2026-09-22: Active task-entry delegation uses operator-controlled stable rollout percentages after the existing evidence gate. Holdback tasks remain shadow comparisons; no automatic percentage promotion is introduced.
+- 2026-09-23: Added the Arc audit aggregate/projection and harness telemetry bridge. Full active rollout is available only through the explicit operator acknowledgement `HARNESS_TYPESAFE_OPERATOR_ACTIVATION=1`; deterministic safety gates remain authoritative, and automatic outcome labels remain `unknown` until independently reviewed.

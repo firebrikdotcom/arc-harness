@@ -65,6 +65,8 @@ Optional harness variables:
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
 - `HARNESS_TYPESAFE_ACTIVE`: set to `1` only after the active-routing outcome gate is satisfied and reviewed.
 - `HARNESS_TYPESAFE_ROLLOUT_PERCENT`: optional integer from `0` to `100`; in active mode, only that percentage of eligible tasks follows JEV's live recommendation. The cohort is stable as the percentage increases; default `100`.
+- `HARNESS_TYPESAFE_OPERATOR_ACTIVATION`: set to `1` only when the operator explicitly accepts unvalidated full activation. It bypasses the 30-outcome evidence gate but never bypasses deterministic safety gates; every route record marks `operator_activation=true`.
+- `HARNESS_AUDIT_ENABLED`, `HARNESS_AUDIT_URL`: enable best-effort Arc audit emission and select its local URL; audit failure never blocks routing or agent execution.
 - `TYPESAFE_HOME` or `TYPESAFE_LOG_DIR`: optional TypeSafe outcome-log location used when checking eligibility for active routing.
 
 When environment variables are introduced, document each one here:
@@ -229,6 +231,27 @@ scripts/harness launch --mode active --state TASK.json --agent codex \
 ```
 
 Increase the percentage only after the route report shows no under-escalation and paired measurements show that JEV plus the selected agent costs less than the normal path. Set the percentage to `0` for an immediate active-mode holdback, or unset `HARNESS_TYPESAFE_ACTIVE` to disable active mode entirely.
+
+### Arc audit and full operator activation
+
+The prepared Arc project is now implemented and versioned at `services/harness-audit/`. It records immutable `jev.route`, `jev.outcome`, `agent.completed`, and `agent.token_usage` events and exposes a projection-backed summary:
+
+```sh
+scripts/audit-service.sh setup       # first time only
+scripts/audit-service.sh install     # systemd user service or macOS launchd
+curl http://127.0.0.1:18080/health
+curl http://127.0.0.1:18080/api/audit/summary
+```
+
+In another shell, activate the user's requested full eligible-task rollout:
+
+```sh
+. scripts/jev-enable.sh
+scripts/harness launch --mode active --state TASK.json --agent codex \
+  --routine-command routine.json --targeted-command targeted.json --deep-command deep.json
+```
+
+The explicit operator flag is an activation acknowledgement, not accuracy evidence. The launcher automatically records an `unknown` outcome after completion; review can later replace that unresolved label with `correct`, `over_escalated`, or `under_escalated` using the TypeSafe recorder. Agent token counts are emitted when supplied by `HARNESS_AGENT_*_TOKENS` or by the App Server `harness budget --watch` meter; missing measurements remain explicitly marked `missing`.
 
 ### Codex token-budget meter
 

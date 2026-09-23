@@ -36,6 +36,7 @@ ALLOWED = {
 REQUIRED = {"version", "task_kind", "area", "proposed_action", "reversibility", "uncertainty_reason"}
 RECOMMENDATIONS = {"proceed", "targeted_check", "reasoning_model", "ask_user", "deterministic_rule"}
 ROLLOUT_ENV = "HARNESS_TYPESAFE_ROLLOUT_PERCENT"
+ACTIVATION_ENV = "HARNESS_TYPESAFE_OPERATOR_ACTIVATION"
 DEFAULT_ROLLOUT_PERCENT = 100
 ROLLOUT_SALT = "jev-task-entry-v1"
 
@@ -140,6 +141,8 @@ def active_eligible(router: Path) -> tuple[bool, str]:
     model = os.environ.get("TYPESAFE_MODEL", "jev-latest")
     if model.endswith("-latest"):
         return False, "active routing requires an exact model pin"
+    if os.environ.get(ACTIVATION_ENV) == "1":
+        return True, ""
     try:
         version = policy_version(router)
     except OSError as error:
@@ -229,6 +232,24 @@ def write_record(record: dict[str, Any], db_root: Path) -> Path:
     return record_path
 
 
+def audit_route_record(record_path: Path) -> None:
+    if os.environ.get("HARNESS_AUDIT_ENABLED") != "1":
+        return
+    emitter = ROOT / "scripts" / "audit_emit.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(emitter), "route", "--record", str(record_path)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+
+
 def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str) -> dict[str, Any]:
     data = load_metadata(metadata)
     fixed = deterministic_route(data)
@@ -237,6 +258,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
     # Hard deterministic gates do not depend on rollout configuration.
     percentage = DEFAULT_ROLLOUT_PERCENT if fixed else rollout_percent()
     bucket = None
+    operator_activation = False
     if fixed:
         recommendation, reason = fixed
         source = "deterministic"
@@ -245,6 +267,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
             eligible, gate_reason = active_eligible(router)
             if not eligible:
                 raise InputError(f"active routing is gated: {gate_reason}")
+            operator_activation = os.environ.get(ACTIVATION_ENV) == "1"
             bucket = rollout_bucket(data)
             if bucket >= percentage:
                 routing_mode = "shadow"
@@ -272,6 +295,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         "reason": reason,
         "metadata": data,
         "rollout_percent": percentage,
+        "operator_activation": operator_activation,
     }
     if bucket is not None:
         record["rollout_bucket"] = bucket
@@ -285,6 +309,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         record["usage"] = answer.get("usage")
         record["latency_ms"] = answer.get("latency_ms")
     record["record_path"] = str(write_record(record, db_root))
+    audit_route_record(Path(record["record_path"]))
     return record
 
 

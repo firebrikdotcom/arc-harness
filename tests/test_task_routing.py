@@ -52,6 +52,8 @@ class TaskRoutingTests(unittest.TestCase):
         self.db = self.root / "db"
         self.env = os.environ.copy()
         self.env.update({"FAKE_STATE_PATH": str(self.state_capture), "HARNESS_DB_ROOT": str(self.db), "TYPESAFE_MODEL": "fixture"})
+        for key in ("HARNESS_TYPESAFE_ACTIVE", "HARNESS_TYPESAFE_OPERATOR_ACTIVATION", "HARNESS_TYPESAFE_ROLLOUT_PERCENT", "HARNESS_AUDIT_ENABLED", "HARNESS_AUDIT_URL"):
+            self.env.pop(key, None)
 
     def run_cli(self, *args: str, expected: int = 0, env: dict | None = None) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
@@ -137,6 +139,12 @@ class TaskRoutingTests(unittest.TestCase):
         with (Path(environment["TYPESAFE_LOG_DIR"]) / "outcomes.jsonl").open("a") as stream:
             stream.write(json.dumps({"outcome": "under_escalated"}) + "\n")
         self.assertIn("active routing is gated", self.route(mode="active", env=environment, expected=2).stderr)
+
+    def test_operator_activation_allows_full_rollout_with_explicit_acknowledgement(self) -> None:
+        environment = {**self.env, "HARNESS_TYPESAFE_ACTIVE": "1", "HARNESS_TYPESAFE_OPERATOR_ACTIVATION": "1"}
+        record = json.loads(self.route(mode="active", env=environment).stdout)
+        self.assertEqual((record["routing_mode"], record["rollout_percent"], record["rollout_selected"]), ("active", 100, True))
+        self.assertTrue(record["operator_activation"])
 
     def test_active_rollout_holdback_keeps_normal_path_and_records_cohort(self) -> None:
         environment = self.eligible_env()
