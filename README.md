@@ -137,7 +137,7 @@ Projects can make a category mandatory with `.harness-required-checks` (or `HARN
 
 `make install-guides PROJECT=/path/to/project` refreshes the marked Harness Phases block in a target's `AGENTS.md` and `CLAUDE.md`, preserving the rest of each file. For an external target, that block uses this harness's absolute CLI path.
 
-For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Shadow mode always preserves the default command; active mode additionally requires an explicit switch and sufficient recorded shadow outcomes.
+For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Shadow mode always preserves the default command; active mode additionally requires an explicit switch and sufficient recorded shadow outcomes. `HARNESS_TYPESAFE_ROLLOUT_PERCENT=10`, then `25`, `50`, and `100`, provides stable staged delegation after activation.
 
 `scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option.
 

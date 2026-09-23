@@ -132,10 +132,24 @@ class TaskRoutingTests(unittest.TestCase):
         environment = self.eligible_env()
         record = json.loads(self.route(mode="active", env=environment).stdout)
         self.assertEqual((record["source"], record["recommendation"]), ("typesafe", "proceed"))
+        self.assertEqual((record["routing_mode"], record["rollout_percent"], record["rollout_selected"]), ("active", 100, True))
         self.assertNotIn("--shadow", json.loads(self.state_capture.read_text())["args"])
         with (Path(environment["TYPESAFE_LOG_DIR"]) / "outcomes.jsonl").open("a") as stream:
             stream.write(json.dumps({"outcome": "under_escalated"}) + "\n")
         self.assertIn("active routing is gated", self.route(mode="active", env=environment, expected=2).stderr)
+
+    def test_active_rollout_holdback_keeps_normal_path_and_records_cohort(self) -> None:
+        environment = self.eligible_env()
+        environment["HARNESS_TYPESAFE_ROLLOUT_PERCENT"] = "0"
+        record = json.loads(self.route(mode="active", env=environment).stdout)
+        self.assertEqual((record["source"], record["recommendation"]), ("typesafe", "default"))
+        self.assertEqual((record["routing_mode"], record["rollout_percent"], record["rollout_selected"]), ("shadow", 0, False))
+        self.assertIn("--shadow", json.loads(self.state_capture.read_text())["args"])
+
+    def test_invalid_rollout_percentage_is_rejected(self) -> None:
+        environment = {**self.env, "HARNESS_TYPESAFE_ROLLOUT_PERCENT": "101"}
+        result = self.route(env=environment, expected=2)
+        self.assertIn("HARNESS_TYPESAFE_ROLLOUT_PERCENT", result.stderr)
 
     def test_launcher_keeps_default_in_shadow_then_selects_routine_in_active(self) -> None:
         default = self.command_file("default.json", "DEFAULT")
@@ -147,6 +161,18 @@ class TaskRoutingTests(unittest.TestCase):
         )
         self.assertEqual(self.run_cli(*common).stdout.strip(), "DEFAULT")
         self.assertEqual(self.run_cli(*common, "--mode", "active", env=self.eligible_env()).stdout.strip(), "ROUTINE")
+
+    def test_launcher_active_rollout_holdback_keeps_default(self) -> None:
+        default = self.command_file("default.json", "DEFAULT")
+        routine = self.command_file("routine.json", "ROUTINE")
+        common = (
+            "launch", "--state", str(self.metadata), "--project", str(self.root),
+            "--router", str(self.router), "--default-command", str(default),
+            "--routine-command", str(routine), "--mode", "active",
+        )
+        environment = self.eligible_env()
+        environment["HARNESS_TYPESAFE_ROLLOUT_PERCENT"] = "0"
+        self.assertEqual(self.run_cli(*common, env=environment).stdout.strip(), "DEFAULT")
 
     def test_launcher_never_uses_shell_interpolation(self) -> None:
         marker = self.root / "would-have-run"

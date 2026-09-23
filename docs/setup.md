@@ -64,6 +64,7 @@ Optional harness variables:
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
 - `HARNESS_TYPESAFE_ACTIVE`: set to `1` only after the active-routing outcome gate is satisfied and reviewed.
+- `HARNESS_TYPESAFE_ROLLOUT_PERCENT`: optional integer from `0` to `100`; in active mode, only that percentage of eligible tasks follows JEV's live recommendation. The cohort is stable as the percentage increases; default `100`.
 - `TYPESAFE_HOME` or `TYPESAFE_LOG_DIR`: optional TypeSafe outcome-log location used when checking eligibility for active routing.
 
 When environment variables are introduced, document each one here:
@@ -215,7 +216,19 @@ Deterministic conditions bypass TypeSafe: required checks, known failures, expli
 
 The default mode is `shadow`: TypeSafe answers and logs its judgment while `launch` keeps the existing default command. Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`). The TypeSafe skill records its own calls under `~/.typesafe-routing/logs/`. Record each real outcome using the skill's `route.py record --call-id ...` command and inspect `route.py report` for accuracy, token usage, and latency. The harness cannot measure avoided reasoning tokens itself.
 
-Active mode requires an exact `TYPESAFE_MODEL` pin and current-cohort evidence (matching requested/returned model and the fingerprint of the router plus task adapter). Unversioned records, model probes, advice, and other policy/model cohorts do not qualify. Active mode requires `--mode active`, `HARNESS_TYPESAFE_ACTIVE=1`, at least 30 distinct correct shadow outcomes (including five correct `proceed` routes), and zero `under_escalated` outcomes. The route and outcome logs are joined by call ID; model checks and fabricated unpaired outcomes do not count. Review the report before opting in. Until then, the launcher keeps the existing agent command; this integration does not yet claim token savings. Required verification and permission gates are unchanged.
+Active mode requires an exact `TYPESAFE_MODEL` pin and current-cohort evidence (matching requested/returned model and the fingerprint of the router plus task adapter). Unversioned records, model probes, advice, and other policy/model cohorts do not qualify. Active mode requires `--mode active`, `HARNESS_TYPESAFE_ACTIVE=1`, at least 30 distinct correct shadow outcomes (including five correct `proceed` routes), and zero `under_escalated` outcomes. The route and outcome logs are joined by call ID; model checks and fabricated unpaired outcomes do not count. After activation, raise `HARNESS_TYPESAFE_ROLLOUT_PERCENT` in deliberate stages such as `10`, `25`, `50`, and `100`; a stable metadata hash keeps tasks in the same holdback or delegated cohort as the percentage rises. Holdback tasks still call JEV in shadow mode and keep the normal command, so each route record exposes `routing_mode`, `rollout_percent`, `rollout_bucket`, and `rollout_selected` for comparison. Review correctness and paired agent-token measurements before each increase. Required verification and permission gates are unchanged.
+
+Recommended staged activation:
+
+```sh
+export TYPESAFE_MODEL=jev-1.13.0
+export HARNESS_TYPESAFE_ACTIVE=1
+export HARNESS_TYPESAFE_ROLLOUT_PERCENT=10
+scripts/harness launch --mode active --state TASK.json --agent codex \
+  --routine-command routine.json --targeted-command targeted.json --deep-command deep.json
+```
+
+Increase the percentage only after the route report shows no under-escalation and paired measurements show that JEV plus the selected agent costs less than the normal path. Set the percentage to `0` for an immediate active-mode holdback, or unset `HARNESS_TYPESAFE_ACTIVE` to disable active mode entirely.
 
 ### Codex token-budget meter
 

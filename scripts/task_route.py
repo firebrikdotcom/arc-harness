@@ -35,6 +35,9 @@ ALLOWED = {
 }
 REQUIRED = {"version", "task_kind", "area", "proposed_action", "reversibility", "uncertainty_reason"}
 RECOMMENDATIONS = {"proceed", "targeted_check", "reasoning_model", "ask_user", "deterministic_rule"}
+ROLLOUT_ENV = "HARNESS_TYPESAFE_ROLLOUT_PERCENT"
+DEFAULT_ROLLOUT_PERCENT = 100
+ROLLOUT_SALT = "jev-task-entry-v1"
 
 
 class InputError(ValueError):
@@ -114,6 +117,21 @@ def api_state(data: dict[str, Any]) -> dict[str, Any]:
 def policy_version(router: Path) -> str:
     # Covers native questions/thresholds and this task-state adapter together.
     return hashlib.sha256(router.read_bytes() + Path(__file__).read_bytes()).hexdigest()
+
+
+def rollout_percent() -> int:
+    raw = os.environ.get(ROLLOUT_ENV, str(DEFAULT_ROLLOUT_PERCENT)).strip()
+    if not raw.isdigit() or not 0 <= int(raw) <= 100:
+        raise InputError(f"{ROLLOUT_ENV} must be an integer from 0 to 100")
+    return int(raw)
+
+
+def rollout_bucket(data: dict[str, Any]) -> int:
+    # The cohort is stable as the operator raises the percentage. Do not add
+    # project paths or task text: the same compact metadata must be sufficient
+    # on every machine, and nothing beyond that metadata belongs in the route.
+    canonical = json.dumps({"salt": ROLLOUT_SALT, "metadata": data}, sort_keys=True, separators=(",", ":"))
+    return int.from_bytes(hashlib.sha256(canonical.encode("utf-8")).digest()[:4], "big") % 100
 
 
 def active_eligible(router: Path) -> tuple[bool, str]:
@@ -213,39 +231,51 @@ def write_record(record: dict[str, Any], db_root: Path) -> Path:
 
 def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str) -> dict[str, Any]:
     data = load_metadata(metadata)
-    if mode == "active":
-        eligible, reason = active_eligible(router)
-        if not eligible:
-            raise InputError(f"active routing is gated: {reason}")
     fixed = deterministic_route(data)
     answer = error = None
+    routing_mode = mode
+    # Hard deterministic gates do not depend on rollout configuration.
+    percentage = DEFAULT_ROLLOUT_PERCENT if fixed else rollout_percent()
+    bucket = None
     if fixed:
         recommendation, reason = fixed
         source = "deterministic"
     else:
-        answer, error = invoke_router(api_state(data), router, mode)
+        if mode == "active":
+            eligible, gate_reason = active_eligible(router)
+            if not eligible:
+                raise InputError(f"active routing is gated: {gate_reason}")
+            bucket = rollout_bucket(data)
+            if bucket >= percentage:
+                routing_mode = "shadow"
+        answer, error = invoke_router(api_state(data), router, routing_mode)
         if answer is None:
             recommendation, reason, source = "default", error or "router unavailable", "fallback"
         else:
             policy = answer["policy"]
-            recommendation = "default" if mode == "shadow" else policy["recommendation"]
+            recommendation = "default" if routing_mode == "shadow" else policy["recommendation"]
             reason = policy.get("reason", "")
             source = "typesafe"
             model = answer.get("model")
             if not isinstance(model, dict):
                 model = {}
-            if mode == "active" and (model.get("returned") != os.environ.get("TYPESAFE_MODEL", "jev-latest") or model.get("drift")):
+            if routing_mode == "active" and (model.get("returned") != os.environ.get("TYPESAFE_MODEL", "jev-latest") or model.get("drift")):
                 recommendation, reason, source = "default", "model drift or missing returned model", "fallback"
     record: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "at": datetime.now(timezone.utc).isoformat(),
         "project": str(project.resolve()),
         "mode": mode,
+        "routing_mode": routing_mode,
         "source": source,
         "recommendation": recommendation,
         "reason": reason,
         "metadata": data,
+        "rollout_percent": percentage,
     }
+    if bucket is not None:
+        record["rollout_bucket"] = bucket
+        record["rollout_selected"] = routing_mode == "active"
     if answer:
         record["observed_recommendation"] = answer["policy"].get("observed_recommendation")
         record["call_id"] = answer.get("call_id")
