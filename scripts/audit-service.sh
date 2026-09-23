@@ -3,6 +3,16 @@ set -eu
 
 ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 SERVICE_ROOT=${HARNESS_AUDIT_ROOT:-$ROOT/services/harness-audit}
+CARGO_BIN=${CARGO:-"$HOME/.cargo/bin/cargo"}
+
+if [ ! -x "$CARGO_BIN" ]; then
+  CARGO_BIN=$(command -v cargo || true)
+fi
+
+if [ -z "$CARGO_BIN" ]; then
+  printf '%s\n' 'FAIL: cargo is required to run the Arc audit service.' >&2
+  exit 2
+fi
 
 if [ ! -f "$SERVICE_ROOT/Cargo.toml" ]; then
   printf '%s\n' "FAIL: Arc audit service is missing at $SERVICE_ROOT" >&2
@@ -12,11 +22,11 @@ fi
 cd "$SERVICE_ROOT"
 
 case "${1:-serve}" in
-  setup|migrate|serve)
-    exec cargo run -- "$1"
+setup|migrate|serve)
+    exec "$CARGO_BIN" run -- "$1"
     ;;
   check|test)
-    exec cargo "$1"
+    exec "$CARGO_BIN" "$1"
     ;;
   install)
     case "$(uname -s)" in
