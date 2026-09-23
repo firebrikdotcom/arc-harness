@@ -1,5 +1,16 @@
 # Jev checkpoint implementation — 2026-09-22
 
+## Staged JEV Delegation Rollout (2026-09-22)
+
+- Goal: move eligible task-entry routing from shadow comparison toward measured active delegation while preserving deterministic safety gates and a fast rollback switch.
+- Plan: add a validated rollout percentage with stable cohorts, keep shadow holdback traffic for comparison, expose selected mode/cohort metadata in private route records, document the activation procedure, and add offline coverage for staged selection and invalid configuration.
+- Non-goals: do not weaken authorization, known-failure, required-check, explicit-choice, or irreversible-work gates; do not send prompts, source, diffs, or credentials to JEV; do not claim savings without paired token/outcome evidence.
+- Verification plan: focused routing tests, full `scripts/verify.sh`, separate `scripts/review.sh`, then commit and push the versioned change for MacBook sync.
+- Build: added `HARNESS_TYPESAFE_ROLLOUT_PERCENT` with stable metadata cohorts. Active mode now delegates only selected cohorts to JEV recommendations while holdback cohorts remain shadow comparisons; route records expose the selected mode and cohort fields. Deterministic gates remain independent of rollout configuration.
+- Focused verification: `python3 -m unittest discover -s tests -p test_task_routing.py -q` passed 17 tests.
+- Full verification: `HARNESS_DB_ROOT=/tmp/jev-rollout-verify-state scripts/verify.sh --project /home/savior/Code/harness-template` passed with ran=3, skipped=3, failures=0.
+- Review: `HARNESS_DB_ROOT=/tmp/jev-rollout-harness-state scripts/review.sh --project /home/savior/Code/harness-template` passed; the review reran verification with ran=3, skipped=3, failures=0 and found no unresolved routing, safety, privacy, or documentation issue.
+
 - Harness and target: `/Users/savior/Code/harness-template`.
 - Approved goal: consider Jev at every meaningful decision, with explicit shadow checkpoints and measurable outcomes.
 - Plan: retain v1 advice; add v2 batched typed questions, deterministic bypasses, baseline capture, versioned records, outcomes/reporting; isolate task activation cohorts; update installed guidance.

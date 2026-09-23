@@ -41,7 +41,7 @@ def read_command(path: Path | None) -> list[str] | None:
 
 def selected_profile(route: dict, mode: str) -> str | None:
     recommendation = route["recommendation"]
-    if route["source"] == "typesafe" and mode == "shadow":
+    if route["source"] == "typesafe" and route.get("routing_mode", mode) == "shadow":
         return "default"
     return {
         "ask_user": None,
