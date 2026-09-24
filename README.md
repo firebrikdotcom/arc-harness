@@ -86,9 +86,13 @@ scripts/agent_launch.py     Launches an argv command profile selected by the tas
 scripts/codex_budget.py     App Server-owned Codex goal-token meter and active-turn interrupter
 scripts/audit_emit.py       Best-effort route, outcome, and token telemetry bridge
 scripts/audit-service.sh    Runs the versioned Arc audit service
-scripts/jev-enable.sh       Enables pinned JEV full rollout and Arc telemetry for a shell
-scripts/context_advice.py   Makes a non-executing, context-specific TypeSafe choice during agent work
+scripts/jev-enable.sh       Enables shadow JEV checkpoints, the model pin, and Arc telemetry for a shell
+scripts/context_advice.py   Shadow checkpoints (file or flag form), outcome labels, pending list, and cohort/pilot reports
+scripts/phase_checkpoint.py Automatic shadow checkpoints and mechanical labels at phase gates, verify, review, and hooks
+scripts/install-hooks.sh    Installs the observation-only Jev hooks into Claude Code and Codex user settings
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
+scripts/hooks/session-route.sh  SessionStart hook: one shadow task-entry route per interactive session in a harness target
+scripts/hooks/jev-observe.sh    PreToolUse hook: progress checkpoint on the third identical shell command; never blocks
 .claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Bootstrap: previews project-owned commands, runs them after confirmation
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
@@ -178,4 +182,4 @@ Project-related documents are local database records for the harness. Keep proje
 
 ## Jev decision checkpoints
 
-Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices and v2 shadow batches, `--record` links outcomes, and `--report` compares versioned cohorts without API access.
+Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices, v2 shadow batches from a file or from flags (`--family ...`), `--record`/`--label` for outcomes, `--pending` for unlabeled checkpoints, and `--report` for versioned cohorts plus the pilot counter, all without executing anything. With `HARNESS_JEV_CHECKPOINTS=1` the phase gates, `verify.sh`, `review.sh`, and the installed hooks emit and label shadow checkpoints automatically; see `docs/setup.md`.

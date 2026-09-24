@@ -191,11 +191,25 @@ run_harness_tests() {
   status=0
   for test_file in tests/*.sh; do
     info "--> $test_file"
-    if ! sh "$test_file"; then
+    # Nested harness runs inside tests must not emit real Jev checkpoints.
+    if ! HARNESS_JEV_CHECKPOINTS=0 sh "$test_file"; then
       status=1
     fi
   done
   return "$status"
+}
+
+# Shadow Jev checkpoint around verification: predicts the result before the
+# checks run and labels that prediction from the real exit code afterwards.
+# Enabled only by HARNESS_JEV_CHECKPOINTS=1; it never changes the exit code.
+jev_checkpoint() {
+  [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ] || return 0
+  has_cmd python3 || return 0
+  [ -f "$SCRIPT_DIR/phase_checkpoint.py" ] || return 0
+  python3 "$SCRIPT_DIR/phase_checkpoint.py" "$@" --project "$PROJECT_ROOT" --db-root "$HARNESS_DB_ROOT" 2>/dev/null | while IFS= read -r jev_line; do
+    info "Jev: $jev_line"
+  done
+  return 0
 }
 
 # Write a KEY=VALUE run record that `scripts/harness build done` requires.
@@ -486,6 +500,8 @@ else
   info "Required checks: none declared"
 fi
 
+jev_checkpoint verify-start
+
 run_category format verify_format
 run_category lint verify_lint
 run_category typecheck verify_typecheck
@@ -497,9 +513,11 @@ info "Verification summary: ran=$ran skipped=$skipped failures=$failures"
 
 if [ "$failures" -ne 0 ]; then
   write_run_record 1
+  jev_checkpoint verify-result --exit 1
   info "Verification failed."
   exit 1
 fi
 
 write_run_record 0
+jev_checkpoint verify-result --exit 0
 info "Verification passed."

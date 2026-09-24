@@ -16,6 +16,7 @@ import statistics
 import time
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -35,6 +36,8 @@ BYPASSES = {"none", "explicit_rule", "user_choice", "required_check", "known_fai
             "authorization", "irreversible", "unchanged_state", "not_bounded"}
 OUTCOMES = {"correct", "incorrect", "over_escalated", "under_escalated", "unknown"}
 CONTEXT_KEYS = {"goal", "facts", "constraints", "risks"}
+PILOT_TARGET = 30
+DEFAULT_POLICY_VERSION = "shadow-1"
 
 
 class InputError(ValueError):
@@ -165,10 +168,19 @@ def text_field(value: Any, name: str, limit: int = 2000) -> None:
 
 def load_context(path: Path, router: Any) -> dict[str, Any]:
     raw = read_json(path)
+    if isinstance(raw, dict) and raw.get("version") == 1:
+        return load_legacy_context(path, router)
+    return validate_context(raw, router)
+
+
+def validate_context(raw: Any, router: Any) -> dict[str, Any]:
+    """Validate an in-memory v2 checkpoint exactly like a file-based one."""
     if not isinstance(raw, dict) or type(raw.get("version")) is not int:
         raise InputError("version must be 1 or 2")
     if raw["version"] == 1:
-        return load_legacy_context(path, router)
+        raise InputError("v1 contexts must be supplied as a file")
+    if len(json.dumps(raw, separators=(",", ":")).encode()) > MAX_BYTES:
+        raise InputError(f"input exceeds {MAX_BYTES} bytes")
     if raw["version"] != 2 or set(raw) != {"version", "checkpoint", "context", "questions"}:
         raise InputError("v2 requires exactly version, checkpoint, context, and questions")
     checkpoint = raw["checkpoint"]
@@ -213,6 +225,52 @@ def load_context(path: Path, router: Any) -> dict[str, Any]:
     return raw
 
 
+def pair(value: str, name: str) -> tuple[str, str]:
+    key, separator, text = value.partition("=")
+    if not separator or not key or not text:
+        raise InputError(f"{name} must look like id=text")
+    return key, text
+
+
+def quick_context(args: argparse.Namespace) -> dict[str, Any]:
+    """Build a v2 checkpoint from flags so no JSON file is needed mid-task."""
+    questions: dict[str, Any] = {}
+    if args.choice:
+        criteria = dict(pair(item, "--choice") for item in args.choice)
+        questions["recommendation"] = {
+            "type": "choice",
+            "instructions": args.question or "Which option best fits the supplied context?",
+            "criteria": criteria,
+        }
+    for item in args.boolean or []:
+        key, text = pair(item, "--boolean")
+        questions[key] = {"type": "boolean", "instructions": text}
+    for item in args.score or []:
+        key, text = pair(item, "--score")
+        instructions, separator, levels = text.partition(":")
+        if not separator:
+            raise InputError("--score must look like id=instructions:level one|level two")
+        questions[key] = {"type": "score", "instructions": instructions, "criteria": levels.split("|")}
+    context: dict[str, Any] = {"goal": args.goal or ""}
+    for name in ("facts", "constraints", "risks"):
+        values = getattr(args, name[:-1] if name != "facts" else "fact") or []
+        if values:
+            context[name] = values
+    return {
+        "version": 2,
+        "checkpoint": {
+            "family": args.family,
+            "question_version": args.question_version,
+            "policy_version": args.policy_version,
+            "baseline_action": args.baseline or "",
+            "bypass_reason": args.bypass,
+            "state_build_ms": None,
+        },
+        "context": context,
+        "questions": questions,
+    }
+
+
 def validated_answers(batch: dict, response: Any) -> dict:
     if not isinstance(response, dict) or not isinstance(response.get("answers"), dict):
         raise InputError("invalid answers object")
@@ -253,6 +311,41 @@ def validated_answers(batch: dict, response: Any) -> dict:
     return clean
 
 
+def request_timeout(router: Any) -> float:
+    """Per-attempt timeout; hooks and phase gates bound it with HARNESS_JEV_TIMEOUT."""
+    raw = os.environ.get("HARNESS_JEV_TIMEOUT", "").strip()
+    try:
+        value = float(raw) if raw else float(router.DEFAULT_TIMEOUT)
+    except ValueError as error:
+        raise InputError("HARNESS_JEV_TIMEOUT must be a positive number of seconds") from error
+    if not math.isfinite(value) or value <= 0:
+        raise InputError("HARNESS_JEV_TIMEOUT must be a positive number of seconds")
+    return value
+
+
+def request_options() -> dict[str, Any]:
+    raw = os.environ.get("HARNESS_JEV_ATTEMPTS", "").strip()
+    if not raw:
+        return {}
+    if not raw.isdigit() or not 1 <= int(raw) <= 5:
+        raise InputError("HARNESS_JEV_ATTEMPTS must be an integer from 1 to 5")
+    return {"attempts": int(raw)}
+
+
+def audit_emit(*arguments: str) -> None:
+    """Best-effort Arc telemetry; never affects the checkpoint result."""
+    if os.environ.get("HARNESS_AUDIT_ENABLED") != "1":
+        return
+    emitter = ROOT / "scripts" / "audit_emit.py"
+    try:
+        result = subprocess.run([sys.executable, str(emitter), *arguments], capture_output=True,
+                                text=True, timeout=3, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+
+
 def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any]:
     request_id = str(uuid.uuid4())
     started = datetime.now(timezone.utc)
@@ -281,7 +374,7 @@ def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any
             response, meta = router.post_json(
                 router.api_url(), {"state": context["context"] if record["shadow"] else context,
                                    "model": model, "questions": batch},
-                router.resolve_api_key()[0], router.DEFAULT_TIMEOUT)
+                router.resolve_api_key()[0], request_timeout(router), **request_options())
             if isinstance(response, dict):
                 returned = response.get("model")
                 record["model_returned"] = returned if isinstance(returned, str) else None
@@ -302,6 +395,7 @@ def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any
     record_path = write_record(record, db_root)
     if bypass == "none":
         router.append_jsonl(router.requests_log_path(started), {k: v for k, v in record.items() if k != "context"})
+        audit_emit("checkpoint", "--record", str(record_path))
     result = {k: record[k] for k in ("call_id", "status", "fallback_reason", "latency_ms", "answers", "shadow")}
     result.update(advisory=True, action=record["baseline_action"] if record["shadow"] else "normal_reasoning",
                   record_path=str(record_path))
@@ -313,7 +407,10 @@ def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any
 
 
 def record_outcome(path: Path, router: Any, db_root: Path) -> dict:
-    raw = read_json(path)
+    return label_outcome(read_json(path), router, db_root)
+
+
+def label_outcome(raw: Any, router: Any, db_root: Path) -> dict:
     required = {"call_id", "action_taken", "outcome", "evidence"}
     metrics = {"total_decision_ms", "rework_ms", "baseline_ms"}
     if not isinstance(raw, dict) or not required <= set(raw) or set(raw) - required - metrics:
@@ -348,7 +445,50 @@ def record_outcome(path: Path, router: Any, db_root: Path) -> dict:
     with os.fdopen(fd, "w") as stream:
         json.dump(outcome, stream, sort_keys=True, allow_nan=False)
         stream.write("\n")
+    audit_emit("checkpoint-outcome", "--record", str(db_root / "advice" / f"{identifier}.json"),
+               "--outcome-record", str(target))
     return {"recorded": identifier, "record_path": str(target)}
+
+
+def pending(db_root: Path, limit: int = 50) -> dict:
+    """Evaluated checkpoints that still have no independently supported label."""
+    rows = []
+    for path in sorted((db_root / "advice").glob("*.json"), reverse=True):
+        row = json.loads(path.read_text())
+        if row.get("status") != "evaluated" or (db_root / "advice-outcomes" / path.name).is_file():
+            continue
+        recommendation = (row.get("answers") or {}).get("recommendation", {}).get("choice")
+        rows.append({"call_id": row.get("call_id"), "at": row.get("at"), "family": row.get("family"),
+                     "question_version": row.get("question_version"),
+                     "baseline_action": row.get("baseline_action"), "recommendation": recommendation})
+    return {"unlabeled": rows[:limit], "unlabeled_total": len(rows)}
+
+
+def pilot(db_root: Path) -> dict:
+    """Progress toward the first 30 independently labeled shadow decisions."""
+    summary: dict[str, Any] = {"target": PILOT_TARGET, "labeled": 0, "correct": 0, "unlabeled_evaluated": 0,
+                               "fallback": 0, "bypassed": 0, "by_family": {}}
+    for path in sorted((db_root / "advice").glob("*.json")):
+        row = json.loads(path.read_text())
+        family = summary["by_family"].setdefault(row.get("family") or "unknown", {"labeled": 0, "unlabeled": 0})
+        status = row.get("status")
+        if status in {"fallback", "bypassed"}:
+            summary[status] += 1
+            continue
+        if status != "evaluated":
+            continue
+        outcome_path = db_root / "advice-outcomes" / path.name
+        outcome = json.loads(outcome_path.read_text()) if outcome_path.is_file() else {}
+        if outcome.get("outcome") in OUTCOMES - {"unknown"}:
+            summary["labeled"] += 1
+            family["labeled"] += 1
+            summary["correct"] += outcome["outcome"] == "correct"
+        else:
+            summary["unlabeled_evaluated"] += 1
+            family["unlabeled"] += 1
+    summary["remaining"] = max(0, PILOT_TARGET - summary["labeled"])
+    summary["review_batch_ready"] = summary["labeled"] >= PILOT_TARGET
+    return summary
 
 
 def report(db_root: Path) -> dict:
@@ -403,7 +543,7 @@ def report(db_root: Path) -> dict:
             group["tokens"] = None
         if not group["paired_baselines"]:
             group["paired_delta_ms"] = None
-    return {"cohorts": list(groups.values()), "automatic_promotion": False,
+    return {"cohorts": list(groups.values()), "pilot": pilot(db_root), "automatic_promotion": False,
             "note": "Shadow comparisons measure disagreement, not causal savings. Null means unknown."}
 
 
@@ -411,17 +551,49 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--context", type=Path, help="curated v1 advice or v2 shadow checkpoint JSON")
+    mode.add_argument("--family", choices=sorted(FAMILIES), help="build a v2 shadow checkpoint from flags")
     mode.add_argument("--record", type=Path, help="record a labeled outcome JSON")
+    mode.add_argument("--label", metavar="CALL_ID", help="record a labeled outcome from flags")
+    mode.add_argument("--pending", action="store_true", help="list evaluated checkpoints without a label")
     mode.add_argument("--report", action="store_true", help="report local advice cohorts without API access")
+    quick = parser.add_argument_group("flag-form checkpoint (with --family)")
+    quick.add_argument("--baseline", help="the action you intend to take before asking")
+    quick.add_argument("--goal", help="concise redacted goal")
+    quick.add_argument("--question", help="instructions for the recommendation choice")
+    quick.add_argument("--choice", action="append", metavar="ID=DESCRIPTION", help="one recommendation option; repeatable")
+    quick.add_argument("--boolean", action="append", metavar="ID=STATEMENT", help="one Boolean question; repeatable")
+    quick.add_argument("--score", action="append", metavar="ID=INSTRUCTIONS:LEVEL|LEVEL", help="one rubric score; repeatable")
+    quick.add_argument("--fact", action="append", help="one redacted fact; repeatable")
+    quick.add_argument("--constraint", action="append", help="one constraint; repeatable")
+    quick.add_argument("--risk", action="append", help="one risk; repeatable")
+    quick.add_argument("--bypass", choices=sorted(BYPASSES), default="none")
+    quick.add_argument("--question-version", default="quick-1")
+    quick.add_argument("--policy-version", default=DEFAULT_POLICY_VERSION)
+    label = parser.add_argument_group("flag-form outcome (with --label)")
+    label.add_argument("--outcome", choices=sorted(OUTCOMES))
+    label.add_argument("--action-taken", help="what actually happened")
+    label.add_argument("--evidence", help="one sentence of independent support")
     parser.add_argument("--router", type=Path, default=Path(os.environ.get("HARNESS_TYPESAFE_ROUTER", str(Path.home() / ".agents/skills/typesafe-routing/scripts/route.py"))))
     parser.add_argument("--db-root", type=Path, default=Path(os.environ.get("HARNESS_DB_ROOT", str(ROOT / ".harness-db"))))
     args = parser.parse_args(argv)
     try:
         if args.report:
             result = report(args.db_root)
+        elif args.pending:
+            result = pending(args.db_root)
         else:
             router = load_router(args.router)
-            result = record_outcome(args.record, router, args.db_root) if args.record else advise(load_context(args.context, router), router, args.db_root)
+            if args.record:
+                result = record_outcome(args.record, router, args.db_root)
+            elif args.label:
+                if not (args.outcome and args.action_taken and args.evidence):
+                    raise InputError("--label requires --outcome, --action-taken, and --evidence")
+                result = label_outcome({"call_id": args.label, "outcome": args.outcome, "action_taken": args.action_taken,
+                                        "evidence": args.evidence}, router, args.db_root)
+            elif args.family:
+                result = advise(validate_context(quick_context(args), router), router, args.db_root)
+            else:
+                result = advise(load_context(args.context, router), router, args.db_root)
     except (InputError, OSError, ValueError, TypeError) as error:
         parser.error(str(error))
     print(json.dumps(result, sort_keys=True, allow_nan=False))

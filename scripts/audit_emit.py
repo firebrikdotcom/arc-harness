@@ -147,6 +147,63 @@ def outcome_event(args: argparse.Namespace) -> int:
     return 0
 
 
+def checkpoint_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """Compact facts about one shadow checkpoint; no context text leaves the machine."""
+    usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
+    answers = record.get("answers") if isinstance(record.get("answers"), dict) else {}
+    recommendation = answers.get("recommendation") if isinstance(answers.get("recommendation"), dict) else {}
+    return {
+        "call_id": scalar(record.get("call_id")),
+        "family": scalar(record.get("family")),
+        "question_version": scalar(record.get("question_version")),
+        "policy_version": scalar(record.get("policy_version")),
+        "question_hash": scalar(record.get("question_hash")),
+        "status": scalar(record.get("status")),
+        "fallback_reason": scalar(record.get("fallback_reason")),
+        "bypass_reason": scalar(record.get("bypass_reason")),
+        "shadow": scalar(record.get("shadow")),
+        "baseline_action": scalar(record.get("baseline_action")),
+        "recommendation": scalar(recommendation.get("choice")),
+        "recommendation_confidence": scalar(recommendation.get("confidence")),
+        "question_count": len(record.get("questions") or {}),
+        "model_requested": scalar(record.get("model_requested")),
+        "model_returned": scalar(record.get("model_returned")),
+        "jev_input_tokens": scalar(usage.get("input_tokens")),
+        "jev_output_tokens": scalar(usage.get("output_tokens")),
+        "jev_total_tokens": scalar(usage.get("total_tokens")),
+        "jev_latency_ms": scalar(record.get("latency_ms")),
+        "state_build_ms": scalar(record.get("state_build_ms")),
+    }
+
+
+def checkpoint_event(args: argparse.Namespace) -> int:
+    record = read_record(args.record)
+    emit("jev.checkpoint", checkpoint_payload(record))
+    return 0
+
+
+def checkpoint_outcome_event(args: argparse.Namespace) -> int:
+    record = read_record(args.record)
+    outcome = read_record(args.outcome_record)
+    emit(
+        "jev.checkpoint_outcome",
+        {
+            "call_id": scalar(record.get("call_id")),
+            "family": scalar(record.get("family")),
+            "question_version": scalar(record.get("question_version")),
+            "policy_version": scalar(record.get("policy_version")),
+            "baseline_action": scalar(record.get("baseline_action")),
+            "outcome": scalar(outcome.get("outcome")),
+            "action_taken": scalar(outcome.get("action_taken")),
+            "evidence_sha256": hashlib.sha256(str(outcome.get("evidence", "")).encode()).hexdigest(),
+            "total_decision_ms": scalar(outcome.get("total_decision_ms")),
+            "rework_ms": scalar(outcome.get("rework_ms")),
+            "baseline_ms": scalar(outcome.get("baseline_ms")),
+        },
+    )
+    return 0
+
+
 def token_values(args: argparse.Namespace) -> dict[str, int | None]:
     values: dict[str, int | None] = {
         "agent_input_tokens": args.input_tokens,
@@ -219,6 +276,15 @@ def main(argv: list[str] | None = None) -> int:
     agent.add_argument("--output-tokens", type=int)
     agent.add_argument("--total-tokens", type=int)
     agent.set_defaults(handler=agent_event)
+
+    checkpoint = subparsers.add_parser("checkpoint")
+    checkpoint.add_argument("--record", type=Path, required=True)
+    checkpoint.set_defaults(handler=checkpoint_event)
+
+    checkpoint_outcome = subparsers.add_parser("checkpoint-outcome")
+    checkpoint_outcome.add_argument("--record", type=Path, required=True)
+    checkpoint_outcome.add_argument("--outcome-record", type=Path, required=True)
+    checkpoint_outcome.set_defaults(handler=checkpoint_outcome_event)
 
     token = subparsers.add_parser("token")
     token.add_argument("--record", type=Path)

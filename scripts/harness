@@ -52,7 +52,8 @@ usage() {
   info "  route --state PATH   Route compact task metadata before an agent starts."
   info "  launch --state PATH --default-command PATH"
   info "                       Select and start an argv command profile."
-  info "  advise --context PATH | --record PATH | --report  Shadow advice and outcomes."
+  info "  advise --context PATH | --family F ... | --record PATH | --label ID ... | --pending | --report"
+  info "                       Shadow advice, flag-form checkpoints, outcomes, and reports."
   info "  budget --thread ID --tokens N [--watch]"
   info "                       Measure a Codex thread and interrupt its active turn at the cap."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
@@ -545,6 +546,20 @@ require_gate_record() {
   log_event "$1 gate: $_kind record at $(record_get "$_file" RECORD_AT) head=$(record_get "$_file" GIT_HEAD)"
 }
 
+# --- Jev shadow checkpoints --------------------------------------------------
+# Phase gates emit shadow checkpoints only when HARNESS_JEV_CHECKPOINTS=1.
+# They observe; they never change a gate result or block a phase.
+
+jev_checkpoint() {
+  [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ] || return 0
+  has_cmd python3 || return 0
+  [ -f "$SCRIPT_DIR/phase_checkpoint.py" ] || return 0
+  python3 "$SCRIPT_DIR/phase_checkpoint.py" "$@" --project "$ROOT" --db-root "$DB_ROOT" 2>/dev/null | while IFS= read -r _line; do
+    info "Jev: $_line"
+  done
+  return 0
+}
+
 # --- phases -----------------------------------------------------------------
 
 phase_key() {
@@ -625,6 +640,9 @@ cmd_phase_start() {
   log_event "$_phase start"
 
   info "OK: $_phase started in run $(state_get RUN_ID)."
+  if [ "$_phase" = "build" ]; then
+    jev_checkpoint build-start
+  fi
   check_budgets
 }
 
@@ -647,6 +665,8 @@ cmd_phase_done() {
   count_step
 
   if [ "$_phase" = "review" ]; then
+    # Resolve pending shadow oracles while the run is still active.
+    jev_checkpoint run-complete
     state_set RUN_STATUS complete
   fi
 
@@ -655,7 +675,10 @@ cmd_phase_done() {
 
   info "OK: $_phase marked done in run $(state_get RUN_ID)."
   case "$_phase" in
-    plan) info "Next: harness build start" ;;
+    plan)
+      jev_checkpoint plan-done
+      info "Next: harness build start"
+      ;;
     build) info "Next: harness review start" ;;
     review) info "Run complete. Next: harness plan start opens a new run." ;;
   esac
