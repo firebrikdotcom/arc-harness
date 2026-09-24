@@ -67,6 +67,9 @@ Optional harness variables:
 - `HARNESS_TYPESAFE_ROLLOUT_PERCENT`: optional integer from `0` to `100`; in active mode, only that percentage of eligible tasks follows JEV's live recommendation. The cohort is stable as the percentage increases; default `100`.
 - `HARNESS_TYPESAFE_OPERATOR_ACTIVATION`: set to `1` only when the operator explicitly accepts unvalidated full activation. It bypasses the 30-outcome evidence gate but never bypasses deterministic safety gates; every route record marks `operator_activation=true`.
 - `HARNESS_AUDIT_ENABLED`, `HARNESS_AUDIT_URL`: enable best-effort Arc audit emission and select its local URL; audit failure never blocks routing or agent execution.
+- `HARNESS_JEV_CHECKPOINTS`: set to `1` to let phase gates, `verify.sh`, `review.sh`, and the Jev hooks emit automatic shadow checkpoints and labels. Unset or `0` makes every automatic checkpoint a silent no-op; `verify.sh` forces `0` for nested harness tests.
+- `HARNESS_JEV_TIMEOUT`, `HARNESS_JEV_ATTEMPTS`: per-attempt timeout in seconds and attempt count for `advise` calls; automatic checkpoints default to `10` and `1` so gates and hooks stay bounded.
+- `HARNESS_JEV_REPEAT_THRESHOLD`: how many identical shell commands in one run trigger the hook's `progress_assessment` checkpoint; default `3`.
 - `TYPESAFE_HOME` or `TYPESAFE_LOG_DIR`: optional TypeSafe outcome-log location used when checking eligibility for active routing.
 
 When environment variables are introduced, document each one here:
@@ -243,12 +246,11 @@ curl http://127.0.0.1:18080/health
 curl http://127.0.0.1:18080/api/audit/summary
 ```
 
-In another shell, activate the user's requested full eligible-task rollout:
+`scripts/jev-enable.sh` is sourced from the login shell and now enables **shadow** collection only: the model pin, `HARNESS_JEV_CHECKPOINTS=1`, and Arc telemetry. It deliberately unsets `HARNESS_TYPESAFE_ACTIVE` and `HARNESS_TYPESAFE_OPERATOR_ACTIVATION` left over from earlier sessions (`JEV_KEEP_ACTIVATION=1` preserves them for a deliberate active run). Activation is earned: export those variables by hand only after `scripts/harness advise --report` shows the labeled pilot batch and the task-entry gate above is satisfied.
 
 ```sh
 . scripts/jev-enable.sh
-scripts/harness launch --mode active --state TASK.json --agent codex \
-  --routine-command routine.json --targeted-command targeted.json --deep-command deep.json
+scripts/harness advise --report | python3 -m json.tool | sed -n '/"pilot"/,/}/p'
 ```
 
 The explicit operator flag is an activation acknowledgement, not accuracy evidence. The launcher automatically records an `unknown` outcome after completion; review can later replace that unresolved label with `correct`, `over_escalated`, or `under_escalated` using the TypeSafe recorder. Agent token counts are emitted when supplied by `HARNESS_AGENT_*_TOKENS` or by the App Server `harness budget --watch` meter; missing measurements remain explicitly marked `missing`.
@@ -432,4 +434,18 @@ Replace these placeholders with exact project commands when tooling is added.
 
 ### Broad Jev checkpoints
 
-See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, baseline capture, deterministic bypasses, outcome recording, and cohort reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `scripts/harness advise --report` without credentials; use `--record OUTCOME.json` to attach independent labels. New families are shadow-only.
+See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, baseline capture, deterministic bypasses, outcome recording, and cohort reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `scripts/harness advise --report` without credentials; use `--record OUTCOME.json` or `--label CALL_ID ...` to attach independent labels, `--pending` to list what still needs one, and `--family ...` for the flag form. New families are shadow-only.
+
+With `HARNESS_JEV_CHECKPOINTS=1`, `harness plan done`, `harness build start`, `scripts/verify.sh`, and `scripts/review.sh` emit their own shadow checkpoints and label them from the verification exit code and the run's loop count; `harness review done` prints the pilot counter. The checkpoints add one bounded API call per seam and never change a gate result.
+
+### Jev hooks for interactive sessions
+
+Interactive Claude Code and Codex sessions bypass `harness launch`, so two additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/hooks/jev-observe.sh` (PreToolUse for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. Install or remove both entries with:
+
+```sh
+scripts/install-hooks.sh            # ~/.claude/settings.json and ~/.codex/hooks.json, with backups
+scripts/install-hooks.sh --dry-run
+scripts/install-hooks.sh --uninstall
+```
+
+The installer only touches hook groups whose command points at these two scripts. Neither hook replaces `scripts/hooks/require-phase.sh`, which remains the only enforcement hook.

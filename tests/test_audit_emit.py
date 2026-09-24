@@ -85,6 +85,32 @@ class AuditEmitterTests(unittest.TestCase):
         self.assertEqual(agent["token_measurement_status"], "provided")
         self.assertNotIn("evidence", json.dumps(CaptureHandler.events))
 
+    def test_checkpoint_events_carry_facts_but_no_context(self) -> None:
+        advice = Path(self.temp.name) / "advice.json"
+        advice.write_text(json.dumps({
+            "call_id": "11111111-1111-4111-8111-111111111111", "family": "evidence_assessment",
+            "question_version": "verify-predict-1", "policy_version": "shadow-1", "question_hash": "abc",
+            "status": "evaluated", "fallback_reason": None, "shadow": True, "baseline_action": "run_full_verification",
+            "context": {"goal": "PRIVATE GOAL TEXT", "facts": ["PRIVATE FACT"]},
+            "questions": {"recommendation": {}, "will_pass": {}},
+            "answers": {"recommendation": {"type": "choice", "choice": "run_full_verification", "confidence": 0.9}},
+            "usage": {"input_tokens": 30, "output_tokens": 5}, "latency_ms": 40, "model_requested": "jev-1.13.0", "model_returned": "jev-1.13.0",
+        }))
+        outcome = Path(self.temp.name) / "outcome.json"
+        outcome.write_text(json.dumps({"call_id": "11111111-1111-4111-8111-111111111111", "outcome": "correct",
+                                       "action_taken": "run_full_verification", "evidence": "Verification exited 0."}))
+        self.run_emitter("checkpoint", "--record", str(advice))
+        self.run_emitter("checkpoint-outcome", "--record", str(advice), "--outcome-record", str(outcome))
+        self.assertEqual([event["event_type"] for event in CaptureHandler.events], ["jev.checkpoint", "jev.checkpoint_outcome"])
+        checkpoint, labeled = (event["payload"] for event in CaptureHandler.events)
+        self.assertEqual((checkpoint["family"], checkpoint["recommendation"], checkpoint["question_count"], checkpoint["jev_input_tokens"]),
+                         ("evidence_assessment", "run_full_verification", 2, 30))
+        self.assertEqual((labeled["outcome"], labeled["action_taken"]), ("correct", "run_full_verification"))
+        self.assertEqual(len(labeled["evidence_sha256"]), 64)
+        serialized = json.dumps(CaptureHandler.events)
+        for private in ("PRIVATE", "Verification exited"):
+            self.assertNotIn(private, serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

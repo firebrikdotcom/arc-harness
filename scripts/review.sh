@@ -64,6 +64,13 @@ if [ "$verify_status" -ne 0 ]; then
   info "WARN: verification failed (exit $verify_status); continuing the review so the change can still be inspected."
 fi
 
+# Shadow Jev handoff checkpoint; observes only, enabled by HARNESS_JEV_CHECKPOINTS=1.
+if [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ] && command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/phase_checkpoint.py" ]; then
+  python3 "$SCRIPT_DIR/phase_checkpoint.py" review-handoff --verify-exit "$verify_status" --project "$PROJECT_ROOT" --db-root "$HARNESS_DB_ROOT" 2>/dev/null | while IFS= read -r jev_line; do
+    info "Jev: $jev_line"
+  done
+fi
+
 # show_patch ROOT LABEL  Prints status, the full staged and unstaged patch, and
 # every untracked file as a new-file diff.
 show_patch() {

@@ -72,6 +72,41 @@ The result includes `call_id`, `record_path`, `shadow`, `status`, `answers`, and
 
 The baseline is persisted before evaluation and is not sent to Jev, avoiding anchoring on the agent's intended action. A `recommendation` Choice whose keys match `baseline_action` enables disagreement counts. Other typed answers remain available for independent assessment.
 
+## Automatic checkpoints at harness seams
+
+Hand-authored checkpoints produced almost no evidence, so the harness now emits shadow checkpoints itself wherever it already has a deterministic oracle. `scripts/phase_checkpoint.py` derives enum-only signals from git and run state (dirty-file bucket, languages touched, whether tests, docs, or `progress.md` changed, steps and loops used, the last verification result) and never includes paths, prompts, diffs, or command text. Everything is gated by `HARNESS_JEV_CHECKPOINTS=1` (exported by `scripts/jev-enable.sh`); without it every call is a silent no-op, and nested harness tests always run with it off.
+
+| Seam | Family / question version | Baseline | Oracle that labels it |
+| --- | --- | --- | --- |
+| `harness plan done` | `handoff_assessment` / `phase-plan-1` | `proceed_to_build` | `review done`: did the run re-enter an earlier phase? |
+| `harness build start` | `reasoning_allocation` / `phase-build-1` | `routine` | the first `verify.sh` exit after build start |
+| `verify.sh` before checks | `evidence_assessment` / `verify-predict-1` | `run_full_verification` | that verification's exit code |
+| `review.sh` after verification | `handoff_assessment` / `review-handoff-1` | `ready_for_handoff` or `needs_more_work` | `review done`: loop count since the checkpoint |
+| third identical shell command (hook) | `progress_assessment` / `tool-repeat-1` | `retry_same_command` | none; label it with `advise --label` |
+| session start in a harness target (hook) | task-entry route (`scripts/harness route`, shadow) | existing command | none automatic |
+
+Labels are mechanical and documented so they stay comparable: a pass prediction (`will_pass` probability at or above 0.5) that fails is `under_escalated`, a fail prediction that passes is `over_escalated`, a match is `correct`; `routine` is correct only when the first verification passes and `deep_reasoning` only when it fails; a go recommendation (`proceed_to_build`, `ready_for_handoff`) is correct only when no later loop happened, and a hold recommendation only when one did. The verification inside `review.sh` produces its own prediction and label, so a clean run yields five labeled decisions. Pending oracles wait under `.harness-db/advice-pending/` and are removed once labeled.
+
+`harness review done` prints the pilot counter (labeled decisions out of 30) and any unlabeled evaluated checkpoints. `scripts/harness advise --pending` lists them at any time; `advise --report` includes the same `pilot` summary.
+
+## Flag form
+
+`scripts/harness advise --family FAMILY ...` builds and validates the same v2 payload without a JSON file:
+
+```sh
+scripts/harness advise --family tool_selection --baseline inspect \
+  --goal "Choose the next read-only step to locate a missing handler." \
+  --fact "The graph result is stale; the current source is available." \
+  --constraint "Existing graph coverage rules remain mandatory." \
+  --choice inspect="Read the current candidate source" --choice trace="Trace a related caller" \
+  --boolean sufficient="The supplied evidence establishes the handler location." \
+  --score impact="How much investigation would a wrong next step waste?:One short source read|Several additional investigation steps"
+scripts/harness advise --label CALL_ID --outcome correct --action-taken inspect \
+  --evidence "An independent source inspection established the relevant handler."
+```
+
+`--bypass REASON` records a deterministic bypass with no questions; `--question-version` and `--policy-version` name the cohort (defaults `quick-1` and `shadow-1`). Redaction, size limits, and shadow semantics are identical to the file form.
+
 ## Outcomes and reports
 
 Save this as `outcome.json`, substituting the returned call ID:
@@ -96,7 +131,7 @@ python3 ~/.agents/skills/typesafe-routing/scripts/route.py report
 
 Labels: `correct`, `incorrect`, `over_escalated`, `under_escalated`, `unknown`. Label the batch as correct only when every material answer is supported; preserve question-level details in the concise evidence. Bypassed or failed evaluations can only receive `unknown`. Each outcome must reference a completed local checkpoint; duplicate labels are rejected instead of silently overwriting evidence.
 
-Private checkpoint files live in `.harness-db/advice/`, outcomes in `.harness-db/advice-outcomes/` (directories 0700, files 0600). `--db-root` selects the database. API call summaries also use the existing private TypeSafe daily logs; deterministic bypasses are local only. The existing `route.py prune` covers daily API logs; local harness checkpoint retention is operator-managed, like other harness database records.
+Private checkpoint files live in `.harness-db/advice/`, outcomes in `.harness-db/advice-outcomes/`, and unresolved automatic oracles in `.harness-db/advice-pending/` (directories 0700, files 0600). When `HARNESS_AUDIT_ENABLED=1`, each evaluated checkpoint and each label is also mirrored to the Arc service as `jev.checkpoint` and `jev.checkpoint_outcome` with compact facts and a hashed evidence digest. `--db-root` selects the database. API call summaries also use the existing private TypeSafe daily logs; deterministic bypasses are local only. The existing `route.py prune` covers daily API logs; local harness checkpoint retention is operator-managed, like other harness database records.
 
 Reports separate family, declared question/policy versions, exact question hash, and requested/returned model. They show labeled accuracy with its denominator, recommendation disagreements, unresolved outcomes, fallback/bypass counts, known token totals, timing sample counts, and medians. Unknown means unmeasured. Total decision time should include context preparation and subsequent work; record rework separately. Only record `baseline_ms` for a comparable measured baseline. Paired timing differences are descriptive, not causal savings from a shadow run.
 
@@ -104,6 +139,6 @@ The shared report distinguishes routing calls, dynamic advice, model probes, and
 
 ## Pilot and acceptance
 
-Collect the first 30 independently labeled in-session decisions across these families, including ambiguous and missing-evidence cases. Review disagreements and total overhead before extending automatic use. Thirty cases are an initial review batch, not statistical proof or a promotion switch. Keep a separate held-out set for future threshold evaluation. Changing the model, questions, or policy requires fresh comparable evidence. There is no automatic promotion, model switch, or new runtime in this release.
+Collect the first 30 independently labeled in-session decisions across these families, including ambiguous and missing-evidence cases. The automatic seams supply most of them; `HARNESS_JEV_TIMEOUT` (default 10 seconds per attempt) and `HARNESS_JEV_ATTEMPTS` (default 1 for automatic checkpoints) bound the latency they add to phase gates, verification, review, and hooks. Review disagreements and total overhead before extending automatic use. Thirty cases are an initial review batch, not statistical proof or a promotion switch. Keep a separate held-out set for future threshold evaluation. Changing the model, questions, or policy requires fresh comparable evidence. There is no automatic promotion, model switch, or new runtime in this release.
 
 References: [use cases](https://vercel.com/i/jev-use-cases), [probabilities and thresholds](https://vercel.com/i/jev-probabilities-and-thresholds), [native primitives](https://docs.typesafe.ai/introduction).

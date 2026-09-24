@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
+import unittest.mock
 import copy
 import subprocess
 import sys
@@ -89,6 +91,10 @@ class ContextAdviceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="harness-context-advice-")
         self.addCleanup(self.temp.cleanup)
+        # Fixture checkpoints must never reach the machine's Arc audit service.
+        environment = unittest.mock.patch.dict(os.environ, {"HARNESS_AUDIT_ENABLED": "0"})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.root = Path(self.temp.name)
         self.path = self.root / "context.json"
 
@@ -270,6 +276,50 @@ class ContextAdviceTests(unittest.TestCase):
                                  "--router", "/missing", "--db-root", str(self.root / "db")],
                                 check=True, capture_output=True, text=True)
         self.assertEqual(len(json.loads(output.stdout)["cohorts"]), 2)
+
+    def test_flag_form_checkpoint_pending_and_label_round_trip(self):
+        router = ROOT / "tests" / "fake_router.py"
+        db = self.root / "db"
+        env = {**os.environ, "FAKE_ROUTER_LOG_DIR": str(self.root / "logs"), "HARNESS_AUDIT_ENABLED": "0"}
+        cli = [sys.executable, str(ROOT / "scripts/context_advice.py"), "--db-root", str(db), "--router", str(router)]
+        quick = subprocess.run(cli + ["--family", "tool_selection", "--baseline", "inspect",
+                                      "--goal", "Choose the next read-only step to locate a handler.",
+                                      "--fact", "The graph result is stale.", "--constraint", "Coverage rules remain mandatory.",
+                                      "--choice", "inspect=Read the current candidate source.", "--choice", "trace=Trace a related caller.",
+                                      "--boolean", "sufficient=The supplied evidence establishes the handler location.",
+                                      "--score", "impact=How much investigation would a wrong step waste?:One short read|Several steps"],
+                               env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(quick.returncode, 0, quick.stderr)
+        result = json.loads(quick.stdout)
+        self.assertEqual((result["status"], result["shadow"], result["action"]), ("evaluated", True, "inspect"))
+        self.assertEqual(set(result["answers"]), {"recommendation", "sufficient", "impact"})
+        record = json.loads(Path(result["record_path"]).read_text())
+        self.assertEqual((record["family"], record["question_version"], record["policy_version"]), ("tool_selection", "quick-1", "shadow-1"))
+        pending = json.loads(subprocess.run(cli + ["--pending"], env=env, capture_output=True, text=True, check=True).stdout)
+        self.assertEqual([row["call_id"] for row in pending["unlabeled"]], [result["call_id"]])
+        label = subprocess.run(cli + ["--label", result["call_id"], "--outcome", "correct", "--action-taken", "inspect",
+                                      "--evidence", "The source read located the handler."], env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(label.returncode, 0, label.stderr)
+        report = json.loads(subprocess.run(cli + ["--report"], env=env, capture_output=True, text=True, check=True).stdout)
+        self.assertEqual((report["pilot"]["labeled"], report["pilot"]["correct"], report["pilot"]["remaining"]), (1, 1, 29))
+        self.assertEqual(json.loads(subprocess.run(cli + ["--pending"], env=env, capture_output=True, text=True, check=True).stdout)["unlabeled_total"], 0)
+        incomplete = subprocess.run(cli + ["--label", result["call_id"], "--outcome", "correct"], env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(incomplete.returncode, 2)
+        self.assertIn("--label requires", incomplete.stderr)
+        malformed = subprocess.run(cli + ["--family", "tool_selection", "--baseline", "x", "--goal", "g", "--choice", "no-separator"],
+                                   env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(malformed.returncode, 2)
+
+    def test_timeout_and_attempts_environment_is_validated(self):
+        with unittest.mock.patch.dict(os.environ, {"HARNESS_JEV_TIMEOUT": "nope"}):
+            with self.assertRaises(ADVICE.InputError):
+                ADVICE.request_timeout(FakeRouter())
+        with unittest.mock.patch.dict(os.environ, {"HARNESS_JEV_TIMEOUT": "2.5", "HARNESS_JEV_ATTEMPTS": "1"}):
+            self.assertEqual(ADVICE.request_timeout(FakeRouter()), 2.5)
+            self.assertEqual(ADVICE.request_options(), {"attempts": 1})
+        with unittest.mock.patch.dict(os.environ, {"HARNESS_JEV_ATTEMPTS": "9"}):
+            with self.assertRaises(ADVICE.InputError):
+                ADVICE.request_options()
 
     def test_fallback_cannot_be_labeled_correct(self):
         context = self.checkpoint(); context["checkpoint"]["bypass_reason"] = "user_choice"
