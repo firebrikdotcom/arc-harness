@@ -45,6 +45,15 @@ fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
 
+# A registered target (scripts/harness-target.sh) owns its own database
+# beneath the database root.
+if [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
+  target_db=$(HARNESS_DB_ROOT=$HARNESS_DB_ROOT "$SCRIPT_DIR/harness-target.sh" db-root "$PROJECT_ROOT" 2>/dev/null || :)
+  if [ -n "$target_db" ]; then
+    HARNESS_DB_ROOT=$target_db
+  fi
+fi
+
 info "Review started"
 info "Harness root: $HARNESS_ROOT"
 info "Project root: $PROJECT_ROOT"

@@ -1,20 +1,27 @@
 #!/usr/bin/env sh
 set -eu
 
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
 ASSUME_YES="${HARNESS_INIT_YES:-0}"
+AUTO=0
 PLAN_FILE=""
+TARGET_DIR=""
 
 info() {
   printf '%s\n' "$*"
 }
 
 usage() {
-  info "Usage: scripts/init.sh [--project PATH] [--yes]"
+  info "Usage: scripts/init.sh [--project PATH] [--yes] [--auto]"
   info ""
-  info "Bootstraps dependencies in PATH. Defaults to the current directory."
-  info "Project-owned commands (make init, npm install, composer install, ...) are"
-  info "previewed first and only run after you confirm, or with --yes / HARNESS_INIT_YES=1."
+  info "Registers PATH as a harness target and bootstraps its dependencies."
+  info "Defaults to the current directory. Project-owned commands (make init,"
+  info "npm install, composer install, ...) are previewed first and only run after"
+  info "you confirm, or with --yes / HARNESS_INIT_YES=1."
+  info "--auto is the non-interactive session-start form: it runs the bootstrap"
+  info "only when the project's manifests or lockfiles changed since the last"
+  info "successful run, in the background unless HARNESS_AUTO_INIT_SYNC=1."
 }
 
 has_cmd() {
@@ -32,6 +39,11 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --yes|-y)
+      ASSUME_YES=1
+      shift
+      ;;
+    --auto)
+      AUTO=1
       ASSUME_YES=1
       shift
       ;;
@@ -53,7 +65,20 @@ if [ ! -d "$PROJECT_ROOT" ]; then
 fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
+
+# Automatic mode initialises the whole project a session starts in: the git
+# worktree or checkout root when PATH is inside one, otherwise PATH itself.
+if [ "$AUTO" = "1" ] && [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
+  PROJECT_ROOT=$("$SCRIPT_DIR/harness-target.sh" root "$PROJECT_ROOT" 2>/dev/null || printf '%s' "$PROJECT_ROOT")
+fi
 cd "$PROJECT_ROOT" || exit 2
+
+# Every initialisation registers the project as a harness target in the
+# machine-local database so the CLI, verify, review, and hooks use its own
+# state. The home directory, /, and the harness root itself are not targets.
+if [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
+  TARGET_DIR=$("$SCRIPT_DIR/harness-target.sh" register "$PROJECT_ROOT" 2>/dev/null || :)
+fi
 
 PLAN_FILE=$(mktemp "${TMPDIR:-/tmp}/harness-init-plan.XXXXXX")
 trap 'rm -f "$PLAN_FILE"' EXIT HUP INT TERM
@@ -66,12 +91,7 @@ run_if_available() {
   printf '%s\t%s\n' "$desc" "$*" >> "$PLAN_FILE"
 }
 
-confirm_and_run_plan() {
-  if [ ! -s "$PLAN_FILE" ]; then
-    info "No project-owned setup commands detected; nothing to run."
-    return 0
-  fi
-
+print_plan() {
   info ""
   info "Project-owned commands that would run in $PROJECT_ROOT:"
   while IFS="$(printf '\t')" read -r desc cmd; do
@@ -79,30 +99,159 @@ confirm_and_run_plan() {
   done < "$PLAN_FILE"
   info ""
   info "These come from the project's own files and run with your permissions."
+}
 
-  if [ "$ASSUME_YES" != "1" ]; then
-    if [ ! -t 0 ]; then
-      info "REFUSED: no terminal to confirm on. Re-run with --yes (or HARNESS_INIT_YES=1) to run them."
+confirm_plan() {
+  if [ "$ASSUME_YES" = "1" ]; then
+    return 0
+  fi
+  if [ ! -t 0 ]; then
+    info "REFUSED: no terminal to confirm on. Re-run with --yes (or HARNESS_INIT_YES=1) to run them."
+    exit 3
+  fi
+  printf 'Run them now? [y/N] '
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *)
+      info "REFUSED: nothing was run."
       exit 3
+      ;;
+  esac
+}
+
+# run_plan  Executes the queued commands in order; returns the first failing exit code.
+run_plan() {
+  while IFS="$(printf '\t')" read -r desc cmd; do
+    info "==> $desc"
+    sh -c "$cmd" </dev/null || {
+      _status=$?
+      info "FAIL: $desc (exit $_status)"
+      return "$_status"
+    }
+  done < "$PLAN_FILE"
+  return 0
+}
+
+confirm_and_run_plan() {
+  if [ ! -s "$PLAN_FILE" ]; then
+    info "No project-owned setup commands detected; nothing to run."
+    return 0
+  fi
+  print_plan
+  confirm_plan
+  run_plan || exit 1
+}
+
+# --- automatic mode ---------------------------------------------------------
+# Used by scripts/hooks/auto-init.sh at every session start. The bootstrap
+# state lives beside the target registration, never inside the project.
+
+auto_say() {
+  printf 'Harness auto-init: %s\n' "$*"
+}
+
+bootstrap_state_value() {
+  sed -n "s/^$1=//p" "$BOOTSTRAP_STATE" 2>/dev/null | head -n 1
+}
+
+# write_bootstrap_state STATUS EXIT PID
+write_bootstrap_state() {
+  {
+    printf 'STATUS=%s\n' "$1"
+    printf 'FINGERPRINT=%s\n' "$FINGERPRINT"
+    printf 'EXIT=%s\n' "$2"
+    printf 'PID=%s\n' "$3"
+    printf 'STARTED_AT=%s\n' "$STARTED_AT"
+    printf 'UPDATED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'LOG=%s\n' "$BOOTSTRAP_LOG"
+    printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
+  } > "$BOOTSTRAP_STATE.tmp.$$"
+  mv "$BOOTSTRAP_STATE.tmp.$$" "$BOOTSTRAP_STATE"
+}
+
+# run_bootstrap_worker  Runs the plan and records ok/failed; output goes to the caller's stdout.
+run_bootstrap_worker() {
+  STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  write_bootstrap_state running 0 "$$"
+  info "AI development harness bootstrap (automatic)"
+  info "Project root: $PROJECT_ROOT"
+  print_plan
+  _status=0
+  run_plan || _status=$?
+  if [ "$_status" -eq 0 ]; then
+    write_bootstrap_state ok 0 ""
+    info "Bootstrap completed."
+    return 0
+  fi
+  write_bootstrap_state failed "$_status" ""
+  info "Bootstrap failed (exit $_status)."
+  return "$_status"
+}
+
+auto_mode() {
+  if [ -z "$TARGET_DIR" ]; then
+    # The harness root is already a harness root; it needs no registration
+    # and no message on every session start.
+    if [ "$PROJECT_ROOT" != "$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)" ]; then
+      auto_say "$PROJECT_ROOT is not a registrable target (home directory or /); nothing to do."
     fi
-    printf 'Run them now? [y/N] '
-    read -r answer
-    case "$answer" in
-      y|Y|yes|YES) ;;
-      *)
-        info "REFUSED: nothing was run."
-        exit 3
+    return 0
+  fi
+  BOOTSTRAP_STATE=$TARGET_DIR/bootstrap.state
+  BOOTSTRAP_LOG=$TARGET_DIR/bootstrap.log
+  FINGERPRINT=$("$SCRIPT_DIR/harness-target.sh" fingerprint "$PROJECT_ROOT" 2>/dev/null || printf 'unknown')
+  STARTED_AT=$(bootstrap_state_value STARTED_AT)
+
+  if [ "${HARNESS_AUTO_INIT_WORKER:-0}" = "1" ]; then
+    run_bootstrap_worker
+    return $?
+  fi
+
+  _previous_status=$(bootstrap_state_value STATUS)
+  if [ "$(bootstrap_state_value FINGERPRINT)" = "$FINGERPRINT" ]; then
+    case "$_previous_status" in
+      ok)
+        auto_say "target $PROJECT_ROOT registered ($TARGET_DIR); bootstrap current."
+        return 0
+        ;;
+      running)
+        _pid=$(bootstrap_state_value PID)
+        if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+          auto_say "target $PROJECT_ROOT registered; bootstrap still running (pid $_pid, log $BOOTSTRAP_LOG); wait for it before running project commands."
+          return 0
+        fi
+        ;;
+      failed)
+        auto_say "target $PROJECT_ROOT registered; bootstrap failed earlier (exit $(bootstrap_state_value EXIT)); see $BOOTSTRAP_LOG or rerun scripts/init.sh --project $PROJECT_ROOT --yes."
+        return 0
         ;;
     esac
   fi
 
-  while IFS="$(printf '\t')" read -r desc cmd; do
-    info "==> $desc"
-    sh -c "$cmd" || {
-      info "FAIL: $desc (exit $?)"
-      exit 1
-    }
-  done < "$PLAN_FILE"
+  if [ ! -s "$PLAN_FILE" ]; then
+    STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    write_bootstrap_state ok 0 ""
+    auto_say "target $PROJECT_ROOT registered ($TARGET_DIR); no project-owned setup commands."
+    return 0
+  fi
+
+  if [ "${HARNESS_AUTO_INIT_SYNC:-0}" = "1" ]; then
+    _status=0
+    run_bootstrap_worker > "$BOOTSTRAP_LOG" 2>&1 || _status=$?
+    if [ "$_status" -eq 0 ]; then
+      auto_say "target $PROJECT_ROOT registered ($TARGET_DIR); bootstrap completed (log $BOOTSTRAP_LOG)."
+    else
+      auto_say "target $PROJECT_ROOT registered; bootstrap FAILED (exit $_status); see $BOOTSTRAP_LOG or rerun scripts/init.sh --project $PROJECT_ROOT --yes."
+    fi
+    return 0
+  fi
+
+  STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  write_bootstrap_state running 0 ""
+  HARNESS_AUTO_INIT_WORKER=1 nohup "$SCRIPT_DIR/init.sh" --project "$PROJECT_ROOT" --auto > "$BOOTSTRAP_LOG" 2>&1 < /dev/null &
+  auto_say "target $PROJECT_ROOT registered ($TARGET_DIR); bootstrap started in background (pid $!, log $BOOTSTRAP_LOG); wait for it before running project commands."
+  return 0
 }
 
 make_has_target() {
@@ -214,14 +363,19 @@ bootstrap_rust() {
   fi
 }
 
-info "AI development harness bootstrap"
-info "Project root: $PROJECT_ROOT"
-info ""
+if [ "$AUTO" != "1" ]; then
+  info "AI development harness bootstrap"
+  info "Project root: $PROJECT_ROOT"
+  if [ -n "$TARGET_DIR" ]; then
+    info "Registered harness target: $TARGET_DIR"
+  fi
+  info ""
+fi
 
 missing=0
 for tool in git sh; do
   if has_cmd "$tool"; then
-    info "found: $tool"
+    [ "$AUTO" = "1" ] || info "found: $tool"
   else
     info "missing required tool: $tool"
     missing=1
@@ -239,6 +393,12 @@ bootstrap_node
 bootstrap_php
 bootstrap_go
 bootstrap_rust
+
+if [ "$AUTO" = "1" ]; then
+  auto_mode
+  exit $?
+fi
+
 confirm_and_run_plan
 
 info ""

@@ -29,6 +29,10 @@ except Exception:
 is_target=0
 if [ "$cwd" = "$HARNESS_ROOT" ]; then
   is_target=1
+elif [ -x "$HARNESS_ROOT/scripts/harness-target.sh" ] \
+  && target_db=$(HARNESS_DB_ROOT=$DB_ROOT "$HARNESS_ROOT/scripts/harness-target.sh" db-root "$cwd" 2>/dev/null) && [ -n "$target_db" ]; then
+  is_target=1
+  DB_ROOT=$target_db
 else
   for guide in "$cwd/AGENTS.md" "$cwd/CLAUDE.md"; do
     if [ -f "$guide" ] && grep -q 'harness-cli:start' "$guide" 2>/dev/null; then

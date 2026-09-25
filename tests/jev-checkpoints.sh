@@ -118,10 +118,11 @@ claude = json.load(open(sys.argv[1])); codex = json.load(open(sys.argv[2]))
 assert claude["model"] == "x"
 commands = [h["command"] for g in claude["hooks"]["SessionStart"] for h in g["hooks"]]
 assert commands.count("other-tool") == 1, commands
-assert sum("session-route.sh" in c for c in commands) == 1, commands
+assert sum("auto-init.sh" in c for c in commands) == 1, commands
+assert not any("session-route.sh" in c for c in commands), commands
 assert sum("jev-observe.sh" in h["command"] for g in claude["hooks"]["PreToolUse"] for h in g["hooks"]) == 1
 assert claude["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
-assert sum("session-route.sh" in h["command"] for g in codex["hooks"]["SessionStart"] for h in g["hooks"]) == 1
+assert sum("auto-init.sh" in h["command"] for g in codex["hooks"]["SessionStart"] for h in g["hooks"]) == 1
 PY
 scripts/install-hooks.sh --claude "$CLAUDE" --codex "$CODEX" --uninstall >/dev/null
 python3 - "$CLAUDE" "$CODEX" <<'PY'
