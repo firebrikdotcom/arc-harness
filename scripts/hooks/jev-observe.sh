@@ -17,28 +17,43 @@ DB_ROOT=${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}
 REPEAT_THRESHOLD=${HARNESS_JEV_REPEAT_THRESHOLD:-3}
 
 command -v python3 >/dev/null 2>&1 || exit 0
-[ -f "$DB_ROOT/runs/current" ] || exit 0
-run_id=$(head -n 1 "$DB_ROOT/runs/current" 2>/dev/null)
-[ -n "$run_id" ] || exit 0
-run_dir="$DB_ROOT/runs/$run_id"
-[ -f "$run_dir/state" ] || exit 0
-grep -q '^RUN_STATUS=active$' "$run_dir/state" 2>/dev/null || exit 0
 
 payload=$(cat 2>/dev/null || :)
 parsed=$(printf '%s' "$payload" | python3 -c 'import json,sys
 try:
     data = json.load(sys.stdin)
 except Exception:
-    print("\t"); sys.exit(0)
+    print("\t\t"); sys.exit(0)
 tool = data.get("tool_name", "")
 tool_input = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-command = str(tool_input.get("command", "")).replace("\n", " ").strip()
-print(tool + "\t" + command)' 2>/dev/null)
+command = str(tool_input.get("command", "")).replace("\n", " ").replace("\t", " ").strip()
+cwd = str(data.get("cwd", "")).replace("\t", " ")
+print(tool + "\t" + cwd + "\t" + command)' 2>/dev/null)
 tab=$(printf '\t')
 tool_name=${parsed%%"$tab"*}
-command=${parsed#*"$tab"}
+rest=${parsed#*"$tab"}
+cwd=${rest%%"$tab"*}
+command=${rest#*"$tab"}
 [ "$tool_name" = "Bash" ] || exit 0
 [ -n "$command" ] || exit 0
+
+# A registered target owns its own run state (scripts/harness-target.sh).
+PROJECT_ROOT=$HARNESS_ROOT
+if [ -n "$cwd" ] && [ -x "$HARNESS_ROOT/scripts/harness-target.sh" ]; then
+  target_dir=$(HARNESS_DB_ROOT=$DB_ROOT "$HARNESS_ROOT/scripts/harness-target.sh" lookup "$cwd" 2>/dev/null || :)
+  if [ -n "$target_dir" ] && [ -f "$target_dir/target.state" ]; then
+    DB_ROOT=$target_dir/db
+    PROJECT_ROOT=$(sed -n 's/^TARGET_ROOT=//p' "$target_dir/target.state" | head -n 1)
+    [ -n "$PROJECT_ROOT" ] || PROJECT_ROOT=$HARNESS_ROOT
+  fi
+fi
+
+[ -f "$DB_ROOT/runs/current" ] || exit 0
+run_id=$(head -n 1 "$DB_ROOT/runs/current" 2>/dev/null)
+[ -n "$run_id" ] || exit 0
+run_dir="$DB_ROOT/runs/$run_id"
+[ -f "$run_dir/state" ] || exit 0
+grep -q '^RUN_STATUS=active$' "$run_dir/state" 2>/dev/null || exit 0
 
 # Harness bookkeeping commands repeat by design.
 case "$command" in
@@ -51,5 +66,5 @@ printf '%s\n' "$digest" >> "$history" 2>/dev/null || exit 0
 count=$(grep -c "^$digest\$" "$history" 2>/dev/null || printf '0')
 [ "$count" -eq "$REPEAT_THRESHOLD" ] || exit 0
 
-python3 "$HARNESS_ROOT/scripts/phase_checkpoint.py" tool-repeat --repeats "$count" --project "$HARNESS_ROOT" --db-root "$DB_ROOT" >/dev/null 2>&1 || :
+python3 "$HARNESS_ROOT/scripts/phase_checkpoint.py" tool-repeat --repeats "$count" --project "$PROJECT_ROOT" --db-root "$DB_ROOT" >/dev/null 2>&1 || :
 exit 0

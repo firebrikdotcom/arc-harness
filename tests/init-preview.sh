@@ -8,6 +8,9 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-init.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 OUT="$TMP_ROOT/out.txt"
 PROJECT="$TMP_ROOT/project"
+# Registration must land in an isolated database, never the machine registry.
+HARNESS_DB_ROOT="$TMP_ROOT/db"
+export HARNESS_DB_ROOT
 
 fail() {
   printf '%s\n' "FAIL: $*"

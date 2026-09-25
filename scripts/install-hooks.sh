@@ -1,7 +1,9 @@
 #!/usr/bin/env sh
-# Register the Jev shadow hooks in the user's Claude Code settings and Codex
-# hooks file. Idempotent: existing harness Jev entries are replaced, other
-# hooks are preserved, and each file is backed up before it is rewritten.
+# Register the harness hooks in the user's Claude Code settings and Codex
+# hooks file: automatic target initialisation plus the shadow Jev route at
+# SessionStart, and the repeated-command observer at PreToolUse. Idempotent:
+# existing harness entries are replaced, other hooks are preserved, and each
+# file is backed up before it is rewritten.
 #
 #   scripts/install-hooks.sh [--claude PATH] [--codex PATH] [--uninstall] [--dry-run]
 set -eu
@@ -20,7 +22,7 @@ while [ "$#" -gt 0 ]; do
     --uninstall) MODE=uninstall; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
-      sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) printf 'FAIL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -37,11 +39,11 @@ from pathlib import Path
 
 root, mode, dry_run, *targets = sys.argv[1:]
 dry_run = dry_run == "1"
-SESSION = str(Path(root) / "scripts/hooks/session-route.sh")
+SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
 OBSERVE = str(Path(root) / "scripts/hooks/jev-observe.sh")
-MARKERS = ("scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh")
+MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh")
 ENTRIES = {
-    "SessionStart": {"matcher": "startup|resume", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 15}]},
+    "SessionStart": {"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]},
     "PreToolUse": {"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]},
 }
 
