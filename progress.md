@@ -94,6 +94,28 @@
 
 # Progress
 
+## Cross-machine Harness Sync (2026-09-26)
+
+- Goal: use the remote MacBook Pro harness as the authority, update this Linux machine, and verify that both machines share the same versioned harness and equivalent installed integrations without copying secrets or machine-local databases.
+- Harness roots: `/Users/savior/Code/harness-template` on `savios-macbook-pro.tailc2733a.ts.net` and `/home/savior/Code/harness-template` on this machine.
+- Non-goals: do not synchronize credentials, `.harness-db`, logs, live sessions, unrelated hooks, or platform-specific service files; preserve the existing local `progress.md` addition.
+- Initial evidence: both repositories are on clean shared commit `ec8116e` except for this machine's existing `progress.md` addition; harness hook entries and launcher links are equivalent; both audit services are healthy; canonical TypeSafe skill files are byte-identical, but this machine's installed `~/.agents/skills/typesafe-routing` is an older physical copy while the Mac installs through a symlink to its vault source.
+- Plan: back up the old Linux installed skill and symlink it to the canonical vault copy; run the TypeSafe tests and complete harness verify/review gates locally; verify the same gates remotely; record and share only the progress documentation needed to leave both Git checkouts on one clean commit.
+- Acceptance: both Git checkouts are clean at the same commit; installed harness hook paths resolve; TypeSafe installed paths resolve to byte-identical canonical sources; both audit health endpoints pass; full harness verification and review pass on both machines.
+- Build: moved the older Linux-installed TypeSafe skill copy to `/home/savior/.agents/skills/typesafe-routing.pre-vault-sync-20260926` and linked `~/.agents/skills/typesafe-routing` to `/home/savior/Documents/resendes/agent-skills/typesafe-routing`; the existing Codex link now resolves through that canonical source. No credentials, databases, logs, or unrelated hook groups were changed.
+- Focused verification: all 64 TypeSafe routing tests pass on both machines; hook dry runs contain the expected `auto-init.sh` and `jev-observe.sh` entries with platform-correct roots; both audit health endpoints report version `0.1.0` healthy.
+- Full verification: Linux passed with `ran=3 skipped=3 failures=0`. The first MacBook SSH run lacked its login-shell PATH and correctly failed required lint plus the Node-based wizard test; rerunning through `zsh -lic` exposed Homebrew/NVM and passed with `ran=3 skipped=3 failures=0`. The optional credentialed live TypeSafe suite remained skipped on both.
+- Review: local and MacBook `scripts/review.sh` runs both passed, each rerunning the complete harness suite with `ran=3 skipped=3 failures=0`; the local review found only this progress documentation, and the pre-sync MacBook review found a clean tree.
+
+## Lothar Skill Namespace Sync (2026-09-24)
+
+- Goal: rename the remote vault's five `dw-*` skills to the `lothar-*` namespace, preserve them canonically in `~/Documents/resendes`, expose them to Claude, Codex, and OpenCode, commit only this scoped change, and synchronize this machine.
+- Scope: `lothar-env-run`, `lothar-herdr-dispatch`, `lothar-iterate`, `lothar-panel-review`, and `lothar-start-worktree`; preserve the existing Dollarwise workflow content and the remote user's unrelated vault changes.
+- Plan: rename tracked skill directories and internal skill references, create shared-agent, Codex, and explicit OpenCode symlinks, configure OpenCode's canonical vault path, validate skill frontmatter and discovery, commit on the Mac, then merge/pull the exact commit here without overwriting local vault work.
+- Risks: the two vault checkouts have diverged and both contain unrelated user changes; no broad reset, stash, clean, or force operation is authorized.
+- Result: committed and pushed `c8777f1e` on the Mac; this machine merged that commit as `bdd0ebdc` while preserving its local commits and unrelated dirty files. All five canonical skills and runtime links validate on both machines; the OpenCode configuration is valid and points at the canonical vault path.
+- Verification: five skill-creator quick validations and 11 `lothar-iterate` unit tests passed; namespace/link/config checks passed on both machines. The old local ignored copies were byte-identical duplicates and were removed by the merge or moved to recoverable `/tmp` backups.
+
 ## Cross-machine Harness Reconciliation (2026-09-22)
 
 - Goal: make this Mac and `resende-1` use one tested harness revision while preserving both machines' unfinished work.
