@@ -79,6 +79,22 @@ if "$INSTALL" --home "$HOME_DIR" --skip-global --no-upstream >/dev/null 2>&1; th
   fail "installer should fail when no skill can be written"
 fi
 
+# Without --source the upstream skill is found from the package that owns the
+# `jg` on PATH, and otherwise from an nvm root under the selected home.
+PKG="$TMP_ROOT/pkgroot/@dzhng/jevgrep"
+mkdir -p "$PKG/dist/bin" "$PKG/dist/skills/jevgrep" "$TMP_ROOT/bin"
+printf '%s\n' '---' 'name: jevgrep' 'description: found via jg binary' '---' > "$PKG/dist/skills/jevgrep/SKILL.md"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$PKG/dist/bin/index.js"
+chmod +x "$PKG/dist/bin/index.js"
+ln -s "$PKG/dist/bin/index.js" "$TMP_ROOT/bin/jg"
+PATH="$TMP_ROOT/bin:/usr/bin:/bin" "$INSTALL" --home "$HOME_DIR" --skip-global >/dev/null
+grep -q 'found via jg binary' "$CLAUDE_SKILL" || fail "upstream skill next to the jg binary was not used"
+NVM_PKG="$HOME_DIR/.config/nvm/versions/node/v1.0.0/lib/node_modules/@dzhng/jevgrep"
+mkdir -p "$NVM_PKG/skills/jevgrep"
+printf '%s\n' '---' 'name: jevgrep' 'description: found via nvm' '---' > "$NVM_PKG/skills/jevgrep/SKILL.md"
+PATH="$TMP_ROOT/emptybin:/usr/bin:/bin" NVM_DIR="$TMP_ROOT/no-nvm" "$INSTALL" --home "$HOME_DIR" --skip-global >/dev/null
+grep -q 'found via nvm' "$CODEX_SKILL" || fail "upstream skill under the home nvm root was not used"
+
 # Bad arguments fail clearly.
 if "$INSTALL" --home "$TMP_ROOT/missing" --source "$UPSTREAM" >/dev/null 2>&1; then
   fail "missing home directory should fail"
