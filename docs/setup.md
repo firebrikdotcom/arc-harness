@@ -393,7 +393,15 @@ scripts/jg.sh --project /path/to/project --report
 
 `scripts/jg.sh` resolves the target root (default: the current directory, or `--project`), searches it or the `--root SUBDIR` beneath it, streams `jg`'s output unchanged, and exits with `jg`'s status (`0` complete, `1` failed, `2` incomplete). It refuses, with exit `4`, the upload-widening options `--include-sensitive` and `--no-ignore` (the default denylist rejects them for a direct `jg` call as well) and any target whose root contains a `.harness-no-upload` marker. Exit `2` means usage or a missing `jg`. Every completed search writes `retrieval/<stamp>.state` under the target's private database with the time, run id, current phase, a sha256 of the question, duration, exit code, output size, and a completeness flag; the question text, paths, excerpts, and source are never stored. `--report` summarises those records, and `harness plan done` includes "semantic retrieval used in this run" among its checkpoint facts. Credentials live in `~/.config/jevgrep/credentials.json`; environment overrides are ignored by `jg`, and there is no per-search provider switch.
 
-The upstream agent skill (`skills/jevgrep/SKILL.md` in the package) is installed verbatim for Claude Code and Codex under `~/.claude/skills/jevgrep/` and `~/.agents/skills/jevgrep/`; `jg skill --global` refreshes it after an upgrade. The marked guide block tells agents to use the wrapper rather than `jg` directly.
+Interactive sessions learn about the wrapper from `scripts/install-jg-skill.sh`, which is what makes retrieval reachable outside a project that carries the guide block:
+
+```sh
+scripts/install-jg-skill.sh                 # refresh both skills and the two global guides
+scripts/install-jg-skill.sh --no-upstream   # refresh only the harness block in existing skills
+scripts/install-jg-skill.sh --home /tmp/h --source /path/to/SKILL.md --skip-global
+```
+
+It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to the installed `jg`, or `--source`) verbatim to `~/.claude/skills/jevgrep/SKILL.md` and `~/.agents/skills/jevgrep/SKILL.md` and appends a marked `harness-jg` block that tells the agent to search through `scripts/jg.sh` instead of a bare `jg` inside any harness target. When `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` carries the `global-harness` block, the same marked paragraph is inserted before that block's end marker, so the instruction reaches every session on the machine without editing project-owned guides. Reruns are idempotent; run it again after `jg skill --global` or a package upgrade, since those overwrite the skill files.
 
 ## Agent Guide Block
 
