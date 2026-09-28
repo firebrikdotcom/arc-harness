@@ -75,30 +75,51 @@ if [ -z "$HOME_DIR" ] || [ ! -d "$HOME_DIR" ]; then
 fi
 HOME_DIR=$(CDPATH='' cd "$HOME_DIR" && pwd -P)
 
-# Locate the upstream skill: explicit source, then the package next to `jg`.
+# Locate the upstream skill: explicit source, then the package that owns the
+# installed `jg` binary, then the usual global package roots (npm, Homebrew,
+# nvm under the selected home).
+skill_in_package() {
+  for candidate in "$1/dist/skills/jevgrep/SKILL.md" "$1/skills/jevgrep/SKILL.md"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 find_source() {
   if [ "$NO_UPSTREAM" -eq 1 ]; then
     return 1
   fi
   if [ -n "$SOURCE" ]; then
-    [ -f "$SOURCE" ] || { info "FAIL: --source file does not exist: $SOURCE"; exit 2; }
     printf '%s\n' "$SOURCE"
     return 0
   fi
-  for root in "$(npm root -g 2>/dev/null)" "$(brew --prefix 2>/dev/null)/lib/node_modules"; do
-    [ -n "$root" ] || continue
-    for candidate in \
-      "$root/@dzhng/jevgrep/dist/skills/jevgrep/SKILL.md" \
-      "$root/@dzhng/jevgrep/skills/jevgrep/SKILL.md"; do
-      if [ -f "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done
+  jg_bin=$(command -v jg 2>/dev/null || :)
+  if [ -n "$jg_bin" ]; then
+    resolved=$(readlink -f "$jg_bin" 2>/dev/null || printf '%s' "$jg_bin")
+    case "$resolved" in
+      */@dzhng/jevgrep/*)
+        skill_in_package "${resolved%%/@dzhng/jevgrep/*}/@dzhng/jevgrep" && return 0
+        ;;
+    esac
+  fi
+  for root in \
+    "$(npm root -g 2>/dev/null || :)" \
+    "$(brew --prefix 2>/dev/null || :)/lib/node_modules" \
+    "${NVM_DIR:-$HOME_DIR/.nvm}"/versions/node/*/lib/node_modules \
+    "$HOME_DIR/.config/nvm"/versions/node/*/lib/node_modules; do
+    [ -d "$root" ] || continue
+    skill_in_package "$root/@dzhng/jevgrep" && return 0
   done
   return 1
 }
 
+if [ -n "$SOURCE" ] && [ ! -f "$SOURCE" ]; then
+  info "FAIL: --source file does not exist: $SOURCE"
+  exit 2
+fi
 UPSTREAM=$(find_source) || UPSTREAM=""
 
 WRAPPER="$HARNESS_ROOT/scripts/jg.sh"
