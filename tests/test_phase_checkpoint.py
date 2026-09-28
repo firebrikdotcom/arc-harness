@@ -107,6 +107,24 @@ class PhaseCheckpointTests(unittest.TestCase):
         [pending] = self.pending()
         self.assertEqual((pending["resolver"], pending["loops_at"], pending["recommendation"]), ("run_complete", 0, "proceed_to_build"))
 
+    def test_plan_done_reports_retrieval_use_without_question_or_paths(self) -> None:
+        retrieval = self.db / "retrieval"
+        retrieval.mkdir()
+        (retrieval / "a.state").write_text("RECORD_KIND=jevgrep\nRUN_ID=run-1\nCOMPLETE=yes\nQUESTION_SHA256=abc\n")
+        (retrieval / "b.state").write_text("RECORD_KIND=jevgrep\nRUN_ID=run-1\nCOMPLETE=partial\n")
+        (retrieval / "other-run.state").write_text("RECORD_KIND=jevgrep\nRUN_ID=run-0\nCOMPLETE=yes\n")
+        self.assertEqual(self.run_event("plan-done").returncode, 0)
+        [record] = self.advice_records()
+        facts = json.dumps(record["context"])
+        self.assertIn("Semantic retrieval (jevgrep) used in this run: yes (small count, complete results: 1).", facts)
+        self.assertNotIn("abc", facts)
+        self.assertNotIn(str(self.project), facts)
+
+    def test_plan_done_reports_no_retrieval_when_no_records_exist(self) -> None:
+        self.assertEqual(self.run_event("plan-done").returncode, 0)
+        [record] = self.advice_records()
+        self.assertIn("Semantic retrieval (jevgrep) used in this run: no.", json.dumps(record["context"]))
+
     def test_verify_cycle_labels_prediction_and_allocation_from_exit_code(self) -> None:
         self.assertEqual(self.run_event("build-start").returncode, 0)
         self.assertEqual(self.run_event("verify-start").returncode, 0)

@@ -87,6 +87,8 @@ Hand-authored checkpoints produced almost no evidence, so the harness now emits 
 
 Labels are mechanical and documented so they stay comparable: a pass prediction (`will_pass` probability at or above 0.5) that fails is `under_escalated`, a fail prediction that passes is `over_escalated`, a match is `correct`; `routine` is correct only when the first verification passes and `deep_reasoning` only when it fails; a go recommendation (`proceed_to_build`, `ready_for_handoff`) is correct only when no later loop happened, and a hold recommendation only when one did. The verification inside `review.sh` produces its own prediction and label, so a clean run yields five labeled decisions. Pending oracles wait under `.harness-db/advice-pending/` and are removed once labeled.
 
+The `plan done` checkpoint also states whether semantic retrieval through `scripts/jg.sh` was used in the run (a count bucket and how many results were complete, from the `retrieval/` records of the same run id). It is a fact for the handoff question, not a separate decision family; the retrieval records themselves hold no question text, paths, or excerpts.
+
 `harness review done` prints the pilot counter (labeled decisions out of 30) and any unlabeled evaluated checkpoints. `scripts/harness advise --pending` lists them at any time; `advise --report` includes the same `pilot` summary.
 
 ## Flag form

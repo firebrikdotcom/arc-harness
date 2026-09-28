@@ -22,6 +22,9 @@ command \bgit\s+(reset\s+--hard|clean\s+-[A-Za-z]*[fFxX]|checkout\s+--\s+\.|rest
 command \bgit\s+(branch\s+-D|filter-branch|filter-repo|update-ref\s+-d)\b
 command \bgit\s+config\b.*\bcore\.hooksPath\b
 
+# Widening what jevgrep (jg) uploads to its retrieval provider; use scripts/jg.sh
+command \bjg\b.*\s--(include-sensitive|no-ignore)\b
+
 # Publishing to the outside world
 command \b(npm|pnpm|yarn)\s+publish\b
 command \b(cargo|gem)\s+(publish|push)\b

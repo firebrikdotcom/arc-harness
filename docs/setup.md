@@ -378,6 +378,23 @@ Gate records live under `.harness-db/records/` (or `targets/<id>/db/records/` fo
 
 Override the state directory with `HARNESS_DB_ROOT`, which is how the regression tests keep runs isolated.
 
+### Semantic retrieval with jevgrep
+
+[jevgrep](https://github.com/dzhng/jevgrep) (`jg`) answers a natural-language question about a repository with a summary, a ranked file list, and verbatim excerpts with line references, evaluated by Jev. It is Jev used for retrieval, where the rest of the harness uses Jev for bounded decisions. Unlike every other Jev path in the harness, `jg` uploads eligible source of the searched tree to the provider chosen with `jg auth` (Vercel AI Gateway, TypeSafe, OpenRouter, or OpenCode Zen), so it is opt-in per target and always goes through the wrapper:
+
+```sh
+npm install --global @dzhng/jevgrep@latest   # Node 22+
+jg auth                                       # interactive; the user runs this, never the agent
+jg doctor                                     # confirms the saved provider and connectivity
+scripts/jg.sh --project /path/to/project "Where is authentication checked before a request reaches a handler?"
+scripts/jg.sh --project /path/to/project --root src "Which tests cover retry behaviour?" --no-cache
+scripts/jg.sh --project /path/to/project --report
+```
+
+`scripts/jg.sh` resolves the target root (default: the current directory, or `--project`), searches it or the `--root SUBDIR` beneath it, streams `jg`'s output unchanged, and exits with `jg`'s status (`0` complete, `1` failed, `2` incomplete). It refuses, with exit `4`, the upload-widening options `--include-sensitive` and `--no-ignore` (the default denylist rejects them for a direct `jg` call as well) and any target whose root contains a `.harness-no-upload` marker. Exit `2` means usage or a missing `jg`. Every completed search writes `retrieval/<stamp>.state` under the target's private database with the time, run id, current phase, a sha256 of the question, duration, exit code, output size, and a completeness flag; the question text, paths, excerpts, and source are never stored. `--report` summarises those records, and `harness plan done` includes "semantic retrieval used in this run" among its checkpoint facts. Credentials live in `~/.config/jevgrep/credentials.json`; environment overrides are ignored by `jg`, and there is no per-search provider switch.
+
+The upstream agent skill (`skills/jevgrep/SKILL.md` in the package) is installed verbatim for Claude Code and Codex under `~/.claude/skills/jevgrep/` and `~/.agents/skills/jevgrep/`; `jg skill --global` refreshes it after an upgrade. The marked guide block tells agents to use the wrapper rather than `jg` directly.
+
 ## Agent Guide Block
 
 The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.

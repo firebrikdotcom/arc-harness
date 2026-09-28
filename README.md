@@ -100,6 +100,7 @@ scripts/hooks/jev-observe.sh    PreToolUse hook: progress checkpoint on the thir
 .claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Bootstrap: registers the target, previews project-owned commands, runs them after confirmation (or automatically with --auto)
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
+scripts/jg.sh               Semantic retrieval through jevgrep (jg) with refusals, per-target opt-out, and compact private records
 scripts/permit.sh           Denylist check for commands and write paths
 scripts/knowledge-trust.sh  Human approval gate for a project's knowledge/ folder
 schemas/denylist.default    Default denylist; a project replaces it with .harness-denylist
@@ -187,3 +188,7 @@ Project-related documents are local database records for the harness. Keep proje
 ## Jev decision checkpoints
 
 Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices, v2 shadow batches from a file or from flags (`--family ...`), `--record`/`--label` for outcomes, `--pending` for unlabeled checkpoints, and `--report` for versioned cohorts plus the pilot counter, all without executing anything. With `HARNESS_JEV_CHECKPOINTS=1` the phase gates, `verify.sh`, `review.sh`, and the installed hooks emit and label shadow checkpoints automatically; see `docs/setup.md`.
+
+## Semantic retrieval
+
+`scripts/jg.sh [--project PATH] [--root SUBDIR] "question"` asks [jevgrep](https://github.com/dzhng/jevgrep) for the files and excerpts relevant to a question about a target, which is the recommended first discovery step in an unfamiliar project. Because `jg` uploads eligible source to its configured provider, the wrapper refuses `--include-sensitive`, `--no-ignore`, and any target carrying a `.harness-no-upload` marker, and records only a question hash, timing, and exit status under the target database. `scripts/jg.sh --report` summarises past retrievals. Setup and limits are in `docs/setup.md`.
