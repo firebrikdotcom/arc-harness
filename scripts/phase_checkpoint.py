@@ -185,6 +185,24 @@ def verify_facts(db_root: Path, state: dict[str, str]) -> list[str]:
     return [f"The most recent verification in this run {outcome} (checks run: {record.get('RAN', 'unknown')}, failures: {record.get('FAILURES', 'unknown')})."]
 
 
+def retrieval_facts(db_root: Path, state: dict[str, str]) -> list[str]:
+    """Whether scripts/jg.sh ran a semantic retrieval in this run; counts only, never questions or paths."""
+    directory = db_root / "retrieval"
+    run_id = state.get("RUN_ID", "")
+    searches = 0
+    complete = 0
+    for path in sorted(directory.glob("*.state")) if directory.is_dir() else []:
+        record = read_kv(path)
+        if record.get("RECORD_KIND") != "jevgrep" or not run_id or record.get("RUN_ID") != run_id:
+            continue
+        searches += 1
+        if record.get("COMPLETE") == "yes":
+            complete += 1
+    if not searches:
+        return ["Semantic retrieval (jevgrep) used in this run: no."]
+    return [f"Semantic retrieval (jevgrep) used in this run: yes ({bucket(searches)} count, complete results: {complete})."]
+
+
 def base_facts(signals: dict[str, Any], state: dict[str, str]) -> list[str]:
     languages = ", ".join(signals["languages"]) or "none detected"
     return [
@@ -223,7 +241,7 @@ def build_plan_done(signals: dict[str, Any], state: dict[str, str], db_root: Pat
     return checkpoint(
         "handoff_assessment", "phase-plan-1", "proceed_to_build",
         "Assess whether the recorded plan is ready to hand to the build phase.",
-        base_facts(signals, state),
+        base_facts(signals, state) + retrieval_facts(db_root, state),
         {
             "recommendation": {"type": "choice", "instructions": "Should the run proceed to build now?",
                                "criteria": {"proceed_to_build": "Hand the recorded plan to the build phase now.",
