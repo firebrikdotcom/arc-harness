@@ -74,20 +74,45 @@ The baseline is persisted before evaluation and is not sent to Jev, avoiding anc
 
 ## Automatic checkpoints at harness seams
 
-Hand-authored checkpoints produced almost no evidence, so the harness now emits shadow checkpoints itself wherever it already has a deterministic oracle. `scripts/phase_checkpoint.py` derives enum-only signals from git and run state (dirty-file bucket, languages touched, whether tests, docs, or `progress.md` changed, steps and loops used, the last verification result) and never includes paths, prompts, diffs, or command text. Everything is gated by `HARNESS_JEV_CHECKPOINTS=1` (exported by `scripts/jev-enable.sh`); without it every call is a silent no-op, and nested harness tests always run with it off.
+Hand-authored checkpoints produced almost no evidence, so the harness now emits shadow checkpoints itself wherever it already has a deterministic oracle. `scripts/phase_checkpoint.py` derives enum-only signals and never includes paths, prompts, diffs, command text, run ids, or hashes. Everything is gated by `HARNESS_JEV_CHECKPOINTS=1` (exported by `scripts/jev-enable.sh`); without it every call is a silent no-op, and nested harness tests always run with it off.
 
 | Seam | Family / question version | Baseline | Oracle that labels it |
 | --- | --- | --- | --- |
-| `harness plan done` | `handoff_assessment` / `phase-plan-1` | `proceed_to_build` | `review done`: did the run re-enter an earlier phase? |
-| `harness build start` | `reasoning_allocation` / `phase-build-1` | `routine` | the first `verify.sh` exit after build start |
-| `verify.sh` before checks | `evidence_assessment` / `verify-predict-1` | `run_full_verification` | that verification's exit code |
-| `review.sh` after verification | `handoff_assessment` / `review-handoff-1` | `ready_for_handoff` or `needs_more_work` | `review done`: loop count since the checkpoint |
-| third identical shell command (hook) | `progress_assessment` / `tool-repeat-1` | `retry_same_command` | none; label it with `advise --label` |
+| `harness plan done` | `handoff_assessment` / `phase-plan-2` | `proceed_to_build` | `review done`: did the run re-enter an earlier phase? |
+| `harness build start` | `reasoning_allocation` / `phase-build-2` | `routine` | the first `verify.sh` exit after build start |
+| `verify.sh` before checks | `evidence_assessment` / `verify-predict-2` | `run_full_verification` | that verification's exit code |
+| `review.sh` after verification | `handoff_assessment` / `review-handoff-2` | `ready_for_handoff` or `needs_more_work` | `review done`: loop count since the checkpoint |
+| third identical shell command (hook) | `progress_assessment` / `tool-repeat-2` | `retry_same_command` | whether the command recurred, or the run looped, before its phase and run ended |
 | session start in a harness target (hook) | task-entry route (`scripts/harness route`, shadow) | existing command | none automatic |
 
-Labels are mechanical and documented so they stay comparable: a pass prediction (`will_pass` probability at or above 0.5) that fails is `under_escalated`, a fail prediction that passes is `over_escalated`, a match is `correct`; `routine` is correct only when the first verification passes and `deep_reasoning` only when it fails; a go recommendation (`proceed_to_build`, `ready_for_handoff`) is correct only when no later loop happened, and a hold recommendation only when one did. The verification inside `review.sh` produces its own prediction and label, so a clean run yields five labeled decisions. Pending oracles wait under `.harness-db/advice-pending/` and are removed once labeled.
+### Facts every automatic checkpoint receives
 
-The `plan done` checkpoint also states whether semantic retrieval through `scripts/jg.sh` was used in the run (a count bucket and how many results were complete, from the `retrieval/` records of the same run id). It is a fact for the handoff question, not a separate decision family; the retrieval records themselves hold no question text, paths, or excerpts.
+Every `-2` checkpoint shares one fact set of buckets, small counts (loops, windows of at most five, failed verifications in the run, complete retrievals), and yes/no values:
+
+- Working tree: dirty file bucket; changed-line bucket (`none`, `small` ≤50, `medium` ≤300, `large` ≤1500, `very_large`) from `git diff HEAD --numstat` plus the lines of untracked files up to 1 MB each; the top three languages; the change shape (`source_and_tests`, `source_only`, `tests_only`, `docs_or_config_only`, `none`), which says whether tests moved together with source rather than merely whether a test file changed (a test file is one under a `test`/`tests`/`spec`/`__tests__` directory or named like `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `conftest.py`, or `FooTest.*`); whether documentation changed; whether the project has a test directory; harness steps and loops used.
+- Verification history of the target: of the last five verifications, how many passed and failed, whether the most recent passed and how many in a row; verifications so far in this run and how many failed; and whether the working tree changed since the most recent verification (`yes`, `no`, or `unknown`).
+- Previous runs of the target: completed, aborted, and unfinished counts (bucketed), and how many of the last five completed runs re-entered an earlier phase.
+- Semantic retrieval through `scripts/jg.sh` in this run: a count bucket and how many results were complete, from the `retrieval/` records of the same run id; those records hold no question text, paths, or excerpts.
+
+The verification history is a private file, `records/verify-history.jsonl` (0600), to which the `verify-result` event appends one line per verification: epoch, exit code, failure and check counts, the run id (or none), and a local sha256 fingerprint of HEAD, the tracked diff, and the untracked files' contents. It keeps the last 100 lines and accumulates only while checkpoints are enabled. When `records/verify.state` is newer than the history's last line (a database from before the history existed, or a verification that ran with checkpoints disabled), it is counted as the most recent result, with an `unknown` tree comparison. The fingerprint and run id stay local; only the yes/no comparison is sent. The tool-repeat checkpoint also states how many shell commands the run has recorded and how many were distinct.
+
+### Why the handoff questions changed
+
+`phase-plan-1` asked whether the plan was recorded in `progress.md`, `review-handoff-1` whether documentation and `progress.md` were current, and both saw the fact "progress.md changed". Interactive targets never write `progress.md`, so Jev correctly answered no and recommended holding, and the loop oracle then labeled nearly every hold over-escalated. Having `plan done` write a run-scoped plan note was considered and rejected: the harness would be answering its own question, a constant "yes" that carries no information about the outcome the oracle measures. The `-2` handoff checkpoints drop the `progress.md` questions and fact and ask `loop_likely` next to the go/hold recommendation, the thing the oracle actually observes; `clarification_needed` is dropped because no enum fact can speak to a user-owned decision. The build-start, verify, and tool-repeat questions are unchanged, but their facts changed, so they move to `-2` as well: cohorts of different versions must not be pooled.
+
+### Mechanical labels
+
+Labels are mechanical and documented so they stay comparable: a pass prediction (`will_pass` probability at or above 0.5) that fails is `under_escalated`, a fail prediction that passes is `over_escalated`, a match is `correct`; `routine` is correct only when the first verification passes and `deep_reasoning` only when it fails; a go recommendation (`proceed_to_build`, `ready_for_handoff`) is correct only when no later loop happened, and a hold recommendation only when one did. The verification inside `review.sh` produces its own prediction and label, so a clean run yields five labeled decisions, six when a tool repeat occurred. Pending oracles wait under `.harness-db/advice-pending/` and are removed once labeled.
+
+Tool repeats: the observe hook appends a checksum of every non-harness shell command to the run's `command-digests` log and calls the checkpoint on the third identical one. The pending oracle records the checksum's position in that log (locally, never sent). Every later checkpoint event of any run resolves it:
+
+- stuck, when the same checksum appears again after the checkpoint, or the run's loop count has risen since it: `change_approach` and `gather_more_evidence` are `correct`, `retry_same_command` is `under_escalated`;
+- not stuck, when the run has ended (completed at `review done`, aborted, or superseded by a newer run) and the phase in which the command repeated had completed, with no recurrence and no loop: `retry_same_command` is `correct`, the two hold choices are `over_escalated`;
+- `unknown`, when the run ended before that phase completed; otherwise it keeps waiting.
+
+Repeats that are routine (running the same test command after each edit) therefore count as not stuck unless the checksum recurs again; the oracle cannot see edits between identical commands, so a recurrence is always read as stuck.
+
+Run scoping: an oracle is labeled only from the run that created it. Pending items left by a run that ended without reaching its oracle are labeled at the next checkpoint event from that run's own state: a handoff whose run completed or looped uses that run's loop count, and anything else is `unknown`. A later run's verification or loop count never labels another run's checkpoint. Existing pending items already carry the run id that created them, so `-1` items still waiting are run-scoped too; only an item with an empty run id keeps the unscoped behaviour. Malformed integer fields of a pending item (such as a hand-edited `loops_at`) read as zero, so the item is still labeled or keeps waiting. An item is dropped with a `could not label` line only when labeling it fails, for example because its advice record was removed by retention or its call id is missing or invalid; a pending file that is not a JSON object is dropped outright. A failure while resolving earlier oracles never suppresses the event's own checkpoint or another item's label. `unknown` labels do not count toward the pilot.
 
 `harness review done` prints the pilot counter (labeled decisions out of 30) and any unlabeled evaluated checkpoints. `scripts/harness advise --pending` lists them at any time; `advise --report` includes the same `pilot` summary.
 
