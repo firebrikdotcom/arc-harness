@@ -258,7 +258,10 @@ scripts/audit-service.sh setup       # first time only
 scripts/audit-service.sh install     # systemd user service or macOS launchd
 curl http://127.0.0.1:18080/health
 curl http://127.0.0.1:18080/api/audit/summary
+curl http://127.0.0.1:18080/api/audit/summary/checkpoints   # per family/version/model; add ?include_fixtures=true to keep test fixtures
 ```
+
+Each machine keeps its own SQLite database; to pool telemetry, point another host's `HARNESS_AUDIT_URL` at one service over the tailnet. See `services/harness-audit/README.md`.
 
 `scripts/jev-enable.sh` is sourced from the login shell and now enables **shadow** collection only: the model pin, `HARNESS_JEV_CHECKPOINTS=1`, and Arc telemetry. It deliberately unsets `HARNESS_TYPESAFE_ACTIVE` and `HARNESS_TYPESAFE_OPERATOR_ACTIVATION` left over from earlier sessions (`JEV_KEEP_ACTIVATION=1` preserves them for a deliberate active run). Activation is earned: export those variables by hand only after `scripts/harness advise --report` shows the labeled pilot batch and the task-entry gate above is satisfied.
 
