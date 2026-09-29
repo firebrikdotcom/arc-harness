@@ -450,89 +450,162 @@ def label_outcome(raw: Any, router: Any, db_root: Path) -> dict:
     return {"recorded": identifier, "record_path": str(target)}
 
 
-def pending(db_root: Path, limit: int = 50) -> dict:
-    """Evaluated checkpoints that still have no independently supported label."""
-    rows = []
-    for path in sorted((db_root / "advice").glob("*.json"), reverse=True):
-        row = json.loads(path.read_text())
-        if row.get("status") != "evaluated" or (db_root / "advice-outcomes" / path.name).is_file():
-            continue
-        recommendation = (row.get("answers") or {}).get("recommendation", {}).get("choice")
-        rows.append({"call_id": row.get("call_id"), "at": row.get("at"), "family": row.get("family"),
-                     "question_version": row.get("question_version"),
-                     "baseline_action": row.get("baseline_action"), "recommendation": recommendation})
-    return {"unlabeled": rows[:limit], "unlabeled_total": len(rows)}
+SCOPES = ("target", "machine")
 
 
-def pilot(db_root: Path) -> dict:
-    """Progress toward the first 30 independently labeled shadow decisions."""
-    summary: dict[str, Any] = {"target": PILOT_TARGET, "labeled": 0, "correct": 0, "unlabeled_evaluated": 0,
-                               "fallback": 0, "bypassed": 0, "by_family": {}}
+def registry_dir(db_root: Path) -> Path:
+    """Directory holding every registered target's private database."""
+    if db_root.parent.parent.name == "targets":
+        return db_root.parent.parent
+    return db_root / "targets"
+
+
+def scope_databases(db_root: Path, scope: str) -> list[tuple[str, Path]]:
+    """(name, database) pairs in scope; the current database always comes first."""
+    if scope not in SCOPES:
+        raise InputError(f"scope must be one of {', '.join(SCOPES)}")
+    current = db_root.parent.name if db_root.parent.parent.name == "targets" else "legacy"
+    found = [(current, db_root)]
+    if scope == "machine" and registry_dir(db_root).is_dir():
+        seen = {db_root.resolve()}
+        # The pre-registry shared database sits beside targets/; count it from every entry point.
+        legacy = registry_dir(db_root).parent
+        if legacy.resolve() not in seen and (legacy / "advice").is_dir():
+            seen.add(legacy.resolve())
+            found.append(("legacy", legacy))
+        for state in sorted(registry_dir(db_root).glob("*/target.state")):
+            database = state.parent / "db"
+            if database.resolve() not in seen and (database / "advice").is_dir():
+                seen.add(database.resolve())
+                found.append((state.parent.name, database))
+    return found
+
+
+def records(name: str, db_root: Path, current: bool, skipped: list[str]):
+    """(path, row, outcome) for one database. Other targets' unreadable files are skipped and counted."""
     for path in sorted((db_root / "advice").glob("*.json")):
-        row = json.loads(path.read_text())
-        family = summary["by_family"].setdefault(row.get("family") or "unknown", {"labeled": 0, "unlabeled": 0})
-        status = row.get("status")
-        if status in {"fallback", "bypassed"}:
-            summary[status] += 1
-            continue
-        if status != "evaluated":
-            continue
         outcome_path = db_root / "advice-outcomes" / path.name
-        outcome = json.loads(outcome_path.read_text()) if outcome_path.is_file() else {}
-        if outcome.get("outcome") in OUTCOMES - {"unknown"}:
-            summary["labeled"] += 1
-            family["labeled"] += 1
-            summary["correct"] += outcome["outcome"] == "correct"
+        try:
+            row = json.loads(path.read_text())
+            outcome = json.loads(outcome_path.read_text()) if outcome_path.is_file() else {}
+        except (OSError, ValueError):
+            if current:
+                raise
+            skipped.append(name)
+            continue
+        if isinstance(row, dict) and isinstance(outcome, dict):
+            yield path, row, outcome
+        elif current:
+            raise ValueError(f"malformed advice record: {path.name}")
         else:
-            summary["unlabeled_evaluated"] += 1
-            family["unlabeled"] += 1
+            skipped.append(name)
+
+
+def pending(db_root: Path, limit: int = 50, scope: str = "target") -> dict:
+    """Evaluated checkpoints that still have no independently supported label.
+
+    A label is recorded in the database that owns the checkpoint, so machine scope names each row's target.
+    """
+    rows = []
+    skipped: list[str] = []
+    for name, database in scope_databases(db_root, scope):
+        for _path, row, outcome in records(name, database, database == db_root, skipped):
+            if row.get("status") != "evaluated" or outcome:
+                continue
+            recommendation = (row.get("answers") or {}).get("recommendation", {}).get("choice")
+            rows.append({"call_id": row.get("call_id"), "at": row.get("at"), "family": row.get("family"),
+                         "question_version": row.get("question_version"),
+                         "baseline_action": row.get("baseline_action"), "recommendation": recommendation,
+                         "target": name})
+    rows.sort(key=lambda item: str(item.get("at")), reverse=True)
+    result = {"scope": scope, "unlabeled": rows[:limit], "unlabeled_total": len(rows)}
+    if scope == "target":
+        for row in result["unlabeled"]:
+            del row["target"]
+    return result
+
+
+def pilot(db_root: Path, scope: str = "machine") -> dict:
+    """Progress toward the first 30 independently labeled shadow decisions.
+
+    Machine scope sums every registered target's database; by_target keeps the breakdown.
+    """
+    summary: dict[str, Any] = {"target": PILOT_TARGET, "scope": scope, "labeled": 0, "correct": 0,
+                               "unlabeled_evaluated": 0, "fallback": 0, "bypassed": 0, "by_family": {},
+                               "by_target": {}, "unreadable_records": 0}
+    skipped: list[str] = []
+    for name, database in scope_databases(db_root, scope):
+        part = summary["by_target"].setdefault(name, {"labeled": 0, "correct": 0, "unlabeled_evaluated": 0,
+                                                       "fallback": 0, "bypassed": 0})
+        for _path, row, outcome in records(name, database, database == db_root, skipped):
+            family = summary["by_family"].setdefault(row.get("family") or "unknown", {"labeled": 0, "unlabeled": 0})
+            status = row.get("status")
+            if status in {"fallback", "bypassed"}:
+                summary[status] += 1
+                part[status] += 1
+                continue
+            if status != "evaluated":
+                continue
+            if outcome.get("outcome") in OUTCOMES - {"unknown"}:
+                for holder in (summary, part):
+                    holder["labeled"] += 1
+                    holder["correct"] += outcome["outcome"] == "correct"
+                family["labeled"] += 1
+            else:
+                summary["unlabeled_evaluated"] += 1
+                part["unlabeled_evaluated"] += 1
+                family["unlabeled"] += 1
+    summary["unreadable_records"] = len(skipped)
     summary["remaining"] = max(0, PILOT_TARGET - summary["labeled"])
     summary["review_batch_ready"] = summary["labeled"] >= PILOT_TARGET
     return summary
 
 
-def report(db_root: Path) -> dict:
+COHORT_FIELDS = ("family", "question_version", "question_hash", "policy_version", "model_requested", "model_returned")
+
+
+def report(db_root: Path, scope: str = "machine") -> dict:
+    """Cohort report. Cohorts are keyed by family, question/policy version, and model, so
+    machine scope pools identical cohorts across targets and never mixes versions."""
     groups: dict[tuple, dict] = {}
-    for path in sorted((db_root / "advice").glob("*.json")):
-        row = json.loads(path.read_text())
-        key = tuple(row.get(k) for k in ("family", "question_version", "question_hash", "policy_version", "model_requested", "model_returned"))
-        group = groups.setdefault(key, {"cohort": dict(zip(
-            ("family", "question_version", "question_hash", "policy_version", "model_requested", "model_returned"), key)),
-            "checkpoints": 0, "evaluated": 0, "fallback": 0, "bypassed": 0, "pending": 0,
-            "labeled": 0, "correct": 0, "disagreements": 0, "comparable_choices": 0,
-            "unresolved": 0, "latencies": [], "state_build": [], "total_times": [], "rework": [],
-            "usage_known": 0, "tokens": 0, "paired_baselines": 0, "paired_delta_ms": 0})
-        group["checkpoints"] += 1
-        status = row.get("status", "evaluated" if row.get("exit_code") == 0 else "fallback")
-        group[status] += 1
-        if finite(row.get("latency_ms")):
-            group["latencies"].append(row["latency_ms"])
-        if finite(row.get("state_build_ms")):
-            group["state_build"].append(row["state_build_ms"])
-        usage = row.get("usage") or {}
-        tokens = usage.get("total_tokens")
-        if tokens is None and all(type(usage.get(k)) is int for k in ("input_tokens", "output_tokens")):
-            tokens = usage["input_tokens"] + usage["output_tokens"]
-        if type(tokens) is int:
-            group["usage_known"] += 1
-            group["tokens"] += tokens
-        choice = (row.get("answers") or {}).get("recommendation", {}).get("choice")
-        if status == "evaluated" and choice is not None and row.get("baseline_action") is not None:
-            group["comparable_choices"] += 1
-            group["disagreements"] += choice != row["baseline_action"]
-        outcome_path = db_root / "advice-outcomes" / path.name
-        outcome = json.loads(outcome_path.read_text()) if outcome_path.is_file() else {}
-        if status == "evaluated" and outcome.get("outcome") in OUTCOMES - {"unknown"}:
-            group["labeled"] += 1
-            group["correct"] += outcome["outcome"] == "correct"
-        else:
-            group["unresolved"] += 1
-        for metric, target in (("total_decision_ms", "total_times"), ("rework_ms", "rework")):
-            if finite(outcome.get(metric)):
-                group[target].append(outcome[metric])
-        if finite(outcome.get("baseline_ms")) and finite(outcome.get("total_decision_ms")):
-            group["paired_baselines"] += 1
-            group["paired_delta_ms"] += outcome["total_decision_ms"] - outcome["baseline_ms"]
+    skipped: list[str] = []
+    for name, database in scope_databases(db_root, scope):
+        for _path, row, outcome in records(name, database, database == db_root, skipped):
+            key = tuple(row.get(k) for k in COHORT_FIELDS)
+            group = groups.setdefault(key, {"cohort": dict(zip(COHORT_FIELDS, key)),
+                "checkpoints": 0, "evaluated": 0, "fallback": 0, "bypassed": 0, "pending": 0,
+                "labeled": 0, "correct": 0, "disagreements": 0, "comparable_choices": 0,
+                "unresolved": 0, "latencies": [], "state_build": [], "total_times": [], "rework": [],
+                "usage_known": 0, "tokens": 0, "paired_baselines": 0, "paired_delta_ms": 0})
+            group["checkpoints"] += 1
+            status = row.get("status", "evaluated" if row.get("exit_code") == 0 else "fallback")
+            group[status] += 1
+            if finite(row.get("latency_ms")):
+                group["latencies"].append(row["latency_ms"])
+            if finite(row.get("state_build_ms")):
+                group["state_build"].append(row["state_build_ms"])
+            usage = row.get("usage") or {}
+            tokens = usage.get("total_tokens")
+            if tokens is None and all(type(usage.get(k)) is int for k in ("input_tokens", "output_tokens")):
+                tokens = usage["input_tokens"] + usage["output_tokens"]
+            if type(tokens) is int:
+                group["usage_known"] += 1
+                group["tokens"] += tokens
+            choice = (row.get("answers") or {}).get("recommendation", {}).get("choice")
+            if status == "evaluated" and choice is not None and row.get("baseline_action") is not None:
+                group["comparable_choices"] += 1
+                group["disagreements"] += choice != row["baseline_action"]
+            if status == "evaluated" and outcome.get("outcome") in OUTCOMES - {"unknown"}:
+                group["labeled"] += 1
+                group["correct"] += outcome["outcome"] == "correct"
+            else:
+                group["unresolved"] += 1
+            for metric, target in (("total_decision_ms", "total_times"), ("rework_ms", "rework")):
+                if finite(outcome.get(metric)):
+                    group[target].append(outcome[metric])
+            if finite(outcome.get("baseline_ms")) and finite(outcome.get("total_decision_ms")):
+                group["paired_baselines"] += 1
+                group["paired_delta_ms"] += outcome["total_decision_ms"] - outcome["baseline_ms"]
     for group in groups.values():
         for field in ("latencies", "state_build", "total_times", "rework"):
             values = group.pop(field)
@@ -543,7 +616,7 @@ def report(db_root: Path) -> dict:
             group["tokens"] = None
         if not group["paired_baselines"]:
             group["paired_delta_ms"] = None
-    return {"cohorts": list(groups.values()), "pilot": pilot(db_root), "automatic_promotion": False,
+    return {"scope": scope, "cohorts": list(groups.values()), "pilot": pilot(db_root, scope), "automatic_promotion": False,
             "note": "Shadow comparisons measure disagreement, not causal savings. Null means unknown."}
 
 
@@ -573,14 +646,17 @@ def main(argv: list[str] | None = None) -> int:
     label.add_argument("--outcome", choices=sorted(OUTCOMES))
     label.add_argument("--action-taken", help="what actually happened")
     label.add_argument("--evidence", help="one sentence of independent support")
+    parser.add_argument("--scope", choices=SCOPES, help="with --report or --pending: this target's database or every registered target on the machine (report default machine, pending default target)")
     parser.add_argument("--router", type=Path, default=Path(os.environ.get("HARNESS_TYPESAFE_ROUTER", str(Path.home() / ".agents/skills/typesafe-routing/scripts/route.py"))))
     parser.add_argument("--db-root", type=Path, default=Path(os.environ.get("HARNESS_DB_ROOT", str(ROOT / ".harness-db"))))
     args = parser.parse_args(argv)
     try:
+        if args.scope and not (args.report or args.pending):
+            raise InputError("--scope applies only to --report and --pending")
         if args.report:
-            result = report(args.db_root)
+            result = report(args.db_root, args.scope or "machine")
         elif args.pending:
-            result = pending(args.db_root)
+            result = pending(args.db_root, scope=args.scope or "target")
         else:
             router = load_router(args.router)
             if args.record:

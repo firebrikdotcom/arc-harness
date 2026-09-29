@@ -310,6 +310,103 @@ class ContextAdviceTests(unittest.TestCase):
                                    env=env, capture_output=True, text=True, check=False)
         self.assertEqual(malformed.returncode, 2)
 
+    def seed_target(self, name, rows, register=True):
+        """Write advice records (family, status, outcome, policy) into a registered fake target."""
+        directory = self.root / "harness-db" / "targets" / name
+        database = directory / "db"
+        (database / "advice").mkdir(parents=True)
+        (database / "advice-outcomes").mkdir()
+        if register:
+            (directory / "target.state").write_text(f"TARGET_ID={name}\n")
+        for index, (family, status, outcome, policy) in enumerate(rows):
+            call = f"{name}-{index}"
+            (database / "advice" / f"{call}.json").write_text(json.dumps({
+                "call_id": call, "at": f"2026-09-29T00:00:{index:02d}Z", "family": family, "status": status,
+                "question_version": "q1", "question_hash": "h", "policy_version": policy,
+                "model_requested": "m", "model_returned": "m", "baseline_action": "a",
+                "answers": {"recommendation": {"choice": "a"}}}))
+            if outcome:
+                (database / "advice-outcomes" / f"{call}.json").write_text(json.dumps({"outcome": outcome}))
+        return database
+
+    def test_pilot_report_and_pending_aggregate_across_registered_targets(self):
+        one = self.seed_target("one-aaa", [("tool_selection", "evaluated", "correct", "p1"),
+                                            ("tool_selection", "evaluated", None, "p1"),
+                                            ("handoff_assessment", "fallback", None, "p1")])
+        self.seed_target("two-bbb", [("tool_selection", "evaluated", "incorrect", "p1"),
+                                     ("handoff_assessment", "evaluated", "correct", "p2"),
+                                     ("handoff_assessment", "bypassed", None, "p2")])
+        self.seed_target("three-ccc", [("tool_selection", "evaluated", None, "p1")])
+        (one.parent.parent / "not-registered" / "db" / "advice").mkdir(parents=True)
+        machine = ADVICE.pilot(one)
+        self.assertEqual((machine["scope"], machine["labeled"], machine["correct"], machine["remaining"]), ("machine", 3, 2, 27))
+        self.assertEqual((machine["unlabeled_evaluated"], machine["fallback"], machine["bypassed"]), (2, 1, 1))
+        self.assertFalse(machine["review_batch_ready"])
+        self.assertEqual(machine["by_family"]["tool_selection"], {"labeled": 2, "unlabeled": 2})
+        self.assertEqual(machine["by_target"]["one-aaa"]["labeled"], 1)
+        self.assertEqual(machine["by_target"]["two-bbb"]["labeled"], 2)
+        self.assertEqual(set(machine["by_target"]), {"one-aaa", "two-bbb", "three-ccc"})
+        local = ADVICE.pilot(one, scope="target")
+        self.assertEqual((local["scope"], local["labeled"], list(local["by_target"])), ("target", 1, ["one-aaa"]))
+        report = ADVICE.report(one)
+        self.assertEqual(report["pilot"]["labeled"], 3)
+        policies = {(g["cohort"]["family"], g["cohort"]["policy_version"]): g for g in report["cohorts"]}
+        self.assertEqual(policies[("tool_selection", "p1")]["checkpoints"], 4)
+        self.assertEqual(policies[("handoff_assessment", "p2")]["checkpoints"], 2)
+        self.assertEqual(len(policies), 3)
+        self.assertEqual(sum(g["checkpoints"] for g in ADVICE.report(one, scope="target")["cohorts"]), 3)
+        self.assertEqual(ADVICE.pending(one)["unlabeled_total"], 1)
+        every = ADVICE.pending(one, scope="machine")
+        self.assertEqual((every["scope"], every["unlabeled_total"]), ("machine", 2))
+        self.assertEqual({row["target"] for row in every["unlabeled"]}, {"one-aaa", "three-ccc"})
+        with self.assertRaises(ADVICE.InputError):
+            ADVICE.pilot(one, scope="everything")
+
+    def test_machine_scope_reaches_the_review_batch_and_skips_unreadable_foreign_records(self):
+        one = self.seed_target("one-aaa", [("tool_selection", "evaluated", "correct", "p1")] * 15)
+        other = self.seed_target("two-bbb", [("tool_selection", "evaluated", "correct", "p1")] * 15)
+        self.assertFalse(ADVICE.pilot(one, scope="target")["review_batch_ready"])
+        self.assertTrue(ADVICE.pilot(one)["review_batch_ready"])
+        (other / "advice" / "broken.json").write_text("{not json")
+        summary = ADVICE.pilot(one)
+        self.assertEqual((summary["labeled"], summary["unreadable_records"]), (30, 1))
+        (one / "advice" / "broken.json").write_text("{not json")
+        with self.assertRaises(ValueError):
+            ADVICE.pilot(one)
+
+    def test_shared_legacy_database_counts_from_every_entry_point(self):
+        one = self.seed_target("one-aaa", [("tool_selection", "evaluated", "correct", "p1")])
+        root = one.parent.parent.parent
+        (root / "advice").mkdir()
+        (root / "advice-outcomes").mkdir()
+        (root / "advice" / "old.json").write_text(json.dumps({"call_id": "old", "family": "tool_selection", "status": "evaluated"}))
+        (root / "advice-outcomes" / "old.json").write_text(json.dumps({"outcome": "correct"}))
+        from_target, from_root = ADVICE.pilot(one), ADVICE.pilot(root)
+        self.assertEqual((from_target["labeled"], from_root["labeled"]), (2, 2))
+        self.assertEqual(set(from_target["by_target"]), {"one-aaa", "legacy"})
+        self.assertEqual(from_target["by_target"], from_root["by_target"])
+        self.assertEqual(ADVICE.pilot(one, scope="target")["labeled"], 1)
+
+    def test_legacy_database_without_registry_is_its_own_machine(self):
+        legacy = self.root / "db"
+        (legacy / "advice").mkdir(parents=True)
+        self.assertEqual(ADVICE.pilot(legacy)["by_target"], {"legacy": {"labeled": 0, "correct": 0, "unlabeled_evaluated": 0,
+                                                                          "fallback": 0, "bypassed": 0}})
+
+    def test_scope_flag_selects_scope_and_is_limited_to_report_and_pending(self):
+        one = self.seed_target("one-aaa", [("tool_selection", "evaluated", "correct", "p1")])
+        self.seed_target("two-bbb", [("tool_selection", "evaluated", "correct", "p1")])
+        cli = [sys.executable, str(ROOT / "scripts/context_advice.py"), "--db-root", str(one), "--router", "/missing"]
+        def run(*extra):
+            return subprocess.run(cli + list(extra), capture_output=True, text=True, check=False)
+        self.assertEqual(json.loads(run("--report").stdout)["pilot"]["labeled"], 2)
+        self.assertEqual(json.loads(run("--report", "--scope", "target").stdout)["pilot"]["labeled"], 1)
+        self.assertEqual(json.loads(run("--pending").stdout)["scope"], "target")
+        self.assertEqual(json.loads(run("--pending", "--scope", "machine").stdout)["scope"], "machine")
+        rejected = run("--label", "x", "--scope", "machine")
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("--scope applies only", rejected.stderr)
+
     def test_timeout_and_attempts_environment_is_validated(self):
         with unittest.mock.patch.dict(os.environ, {"HARNESS_JEV_TIMEOUT": "nope"}):
             with self.assertRaises(ADVICE.InputError):

@@ -497,3 +497,7 @@ Known risks:
 
 ## Grouped audit summary (feat/audit-summary-by-family)
 - Added /api/audit/summary/checkpoints and /routes (services/harness-audit/src/summary.rs); cargo test 9 pass, clippy clean, scripts/verify.sh passed, live curl checked, independent review: no findings.
+
+## Pilot aggregation (feat/jev-pilot-aggregate)
+- 2026-09-29: Lane 2 (pilot aggregation): implemented machine scope in scripts/context_advice.py pilot/report/pending, `--scope` flag, tests in tests/test_context_advice.py, docs updated. Verification recorded below after scripts/verify.sh.
+- 2026-09-29: scripts/verify.sh passed (ran=3 skipped=3 failures=0; required lint and test satisfied). Independent review: round 1 one finding (legacy shared database omitted from machine scope), fixed with a regression test; round 2 zero findings.
