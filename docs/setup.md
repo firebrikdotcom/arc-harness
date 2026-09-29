@@ -270,6 +270,8 @@ Each machine keeps its own SQLite database; to pool telemetry, point another hos
 scripts/harness advise --report | python3 -m json.tool | sed -n '/"pilot"/,/}/p'
 ```
 
+The pilot summary is machine-wide by default (every registered target's checkpoints, with a per-target `by_target` breakdown); pass `--scope target` to see only the current worktree's database. `harness review done` prints the same machine-wide counter.
+
 The explicit operator flag is an activation acknowledgement, not accuracy evidence. The launcher automatically records an `unknown` outcome after completion; review can later replace that unresolved label with `correct`, `over_escalated`, or `under_escalated` using the TypeSafe recorder. Agent token counts are emitted when supplied by `HARNESS_AGENT_*_TOKENS` or by the App Server `harness budget --watch` meter; missing measurements remain explicitly marked `missing`.
 
 ### Codex token-budget meter
@@ -476,7 +478,7 @@ Replace these placeholders with exact project commands when tooling is added.
 
 ### Broad Jev checkpoints
 
-See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, baseline capture, deterministic bypasses, outcome recording, and cohort reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `scripts/harness advise --report` without credentials; use `--record OUTCOME.json` or `--label CALL_ID ...` to attach independent labels, `--pending` to list what still needs one, and `--family ...` for the flag form. New families are shadow-only.
+See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, baseline capture, deterministic bypasses, outcome recording, and cohort reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `scripts/harness advise --report` without credentials; use `--record OUTCOME.json` or `--label CALL_ID ...` to attach independent labels, `--pending` to list what still needs one (`--scope machine` covers every target; `--report` defaults to machine scope), and `--family ...` for the flag form. New families are shadow-only.
 
 With `HARNESS_JEV_CHECKPOINTS=1`, `harness plan done`, `harness build start`, `scripts/verify.sh`, and `scripts/review.sh` emit their own shadow checkpoints and label them from the verification exit code and the run's loop count; `harness review done` prints the pilot counter. The checkpoints add one bounded API call per seam and never change a gate result.
 
