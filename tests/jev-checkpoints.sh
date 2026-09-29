@@ -81,26 +81,31 @@ grep -q '"family": "progress_assessment"' "$HARNESS_DB_ROOT"/advice/*.json || fa
 grep -q 'make test' "$HARNESS_DB_ROOT"/advice/*.json && fail "command text leaked into the checkpoint"
 payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh >/dev/null
 [ "$(count "$HARNESS_DB_ROOT/advice")" = "1" ] || fail "a fourth repeat emitted another checkpoint"
+grep -q '"resolver": "tool_repeat"' "$HARNESS_DB_ROOT"/advice-pending/*.json || fail "tool repeat left no pending oracle"
 
 # 6. Phase gates, verify, and review emit checkpoints and label them from the real results.
 plan_out=$(scripts/harness plan "done")
-printf '%s\n' "$plan_out" | grep -c 'Jev: handoff_assessment/phase-plan-1 shadow recommendation' >/dev/null || fail "plan done emitted no checkpoint: $plan_out"
+printf '%s\n' "$plan_out" | grep -c 'Jev: handoff_assessment/phase-plan-2 shadow recommendation' >/dev/null || fail "plan done emitted no checkpoint: $plan_out"
+# The fourth identical command above recurred after the checkpoint: the oracle labels it stuck.
+printf '%s\n' "$plan_out" | grep -c 'Jev: labeled progress_assessment/tool-repeat-2 under_escalated' >/dev/null || fail "plan done did not label the tool repeat: $plan_out"
 build_out=$(scripts/harness build start)
-printf '%s\n' "$build_out" | grep -c 'Jev: reasoning_allocation/phase-build-1' >/dev/null || fail "build start emitted no checkpoint: $build_out"
+printf '%s\n' "$build_out" | grep -c 'Jev: reasoning_allocation/phase-build-2' >/dev/null || fail "build start emitted no checkpoint: $build_out"
 [ "$(count "$HARNESS_DB_ROOT/advice-pending")" = "2" ] || fail "expected two pending oracles"
 verify_out=$(scripts/verify.sh --project "$TARGET" 2>&1) || fail "verify failed: $verify_out"
-printf '%s\n' "$verify_out" | grep -c 'Jev: evidence_assessment/verify-predict-1 shadow recommendation' >/dev/null || fail "verify emitted no prediction"
-printf '%s\n' "$verify_out" | grep -c 'Jev: labeled evidence_assessment/verify-predict-1 correct' >/dev/null || fail "verify did not label its prediction"
-printf '%s\n' "$verify_out" | grep -c 'Jev: labeled reasoning_allocation/phase-build-1 correct' >/dev/null || fail "verify did not label the allocation"
+printf '%s\n' "$verify_out" | grep -c 'Jev: evidence_assessment/verify-predict-2 shadow recommendation' >/dev/null || fail "verify emitted no prediction"
+printf '%s\n' "$verify_out" | grep -c 'Jev: labeled evidence_assessment/verify-predict-2 correct' >/dev/null || fail "verify did not label its prediction"
+printf '%s\n' "$verify_out" | grep -c 'Jev: labeled reasoning_allocation/phase-build-2 correct' >/dev/null || fail "verify did not label the allocation"
 scripts/harness build "done" >/dev/null
 scripts/harness review start >/dev/null
 review_out=$(scripts/review.sh --project "$TARGET" 2>&1) || fail "review failed: $review_out"
-printf '%s\n' "$review_out" | grep -c 'Jev: handoff_assessment/review-handoff-1 shadow recommendation ready_for_handoff' >/dev/null || fail "review emitted no handoff checkpoint"
+printf '%s\n' "$review_out" | grep -c 'Jev: handoff_assessment/review-handoff-2 shadow recommendation ready_for_handoff' >/dev/null || fail "review emitted no handoff checkpoint"
 done_out=$(scripts/harness review "done")
-printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/phase-plan-1 correct' >/dev/null || fail "review done did not label the plan handoff"
-printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/review-handoff-1 correct' >/dev/null || fail "review done did not label the review handoff"
-printf '%s\n' "$done_out" | grep -c 'Jev: pilot 5/30 labeled shadow decisions' >/dev/null || fail "pilot counter missing: $done_out"
-printf '%s\n' "$done_out" | grep -c 'unlabeled checkpoints .*progress_assessment:' >/dev/null || fail "unlabeled progress checkpoint not listed"
+printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/phase-plan-2 correct' >/dev/null || fail "review done did not label the plan handoff"
+printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/review-handoff-2 correct' >/dev/null || fail "review done did not label the review handoff"
+printf '%s\n' "$done_out" | grep -c 'Jev: pilot 6/30 labeled shadow decisions' >/dev/null || fail "pilot counter missing: $done_out"
+if printf '%s\n' "$done_out" | grep -q 'unlabeled checkpoints'; then fail "a checkpoint was left unlabeled: $done_out"; fi
+# One history line from verify.sh, one from the verification inside review.sh.
+[ "$(wc -l < "$HARNESS_DB_ROOT/records/verify-history.jsonl" | tr -d ' ')" = "2" ] || fail "expected two verify history lines"
 [ "$(count "$HARNESS_DB_ROOT/advice-pending")" = "0" ] || fail "pending oracles remain after run completion"
 
 # 7. Nested harness tests never emit checkpoints even when the outer shell enables them.
