@@ -142,6 +142,21 @@ export HARNESS_TYPESAFE_ROUTER="$ROOT/tests/fake_router.py"
 export FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
 payload SessionStart "$WT" "" "" | sh "$HOOK" > "$OUT" 2>&1
 [ "$(count "$TDIR/db/routes")" -ge 1 ] || fail "chained session route did not record in the target database"
+python3 - "$TDIR/db/routes" "$TMP_ROOT" <<'PY' || fail "session route did not carry enum-only target history"
+import json, sys
+from pathlib import Path
+directory, private = sys.argv[1:]
+records = [json.loads(path.read_text()) for path in Path(directory).glob("*.json")]
+routed = [record for record in records if record.get("source") != "deterministic"]
+assert routed, records
+enums = {"none", "one", "few", "many", "passed", "failed"}
+for record in routed:
+    history = record["history"]
+    assert len(history) == 7 and set(history.values()) <= enums, history
+    assert private not in json.dumps(history), history
+    # Section 10 left one run in the target database with a verified build.
+    assert (history["prior_runs"], history["verified_builds"], history["last_verify"]) == ("one", "one", "passed"), history
+PY
 before=$(count "$TDIR/db/advice")
 for _ in 1 2 3; do
   payload PreToolUse "$WT/sub" Bash "make test" | sh "$OBSERVE" >/dev/null

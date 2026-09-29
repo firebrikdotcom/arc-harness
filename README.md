@@ -97,6 +97,7 @@ scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and sh
 scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, then runs the session route
 scripts/hooks/session-route.sh  SessionStart hook: one shadow task-entry route per interactive session in a harness target
 scripts/hooks/jev-observe.sh    PreToolUse hook: progress checkpoint on the third identical shell command; never blocks
+scripts/retrieval-reminder.sh   PreToolUse hook (Grep/Glob, Claude Code): one jg.sh reminder on a session's first search without a retrieval; never blocks
 .claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Bootstrap: registers the target, previews project-owned commands, runs them after confirmation (or automatically with --auto)
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
