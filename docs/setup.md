@@ -231,6 +231,24 @@ scripts/harness launch --state /tmp/task-metadata.json --project /path/to/projec
 
 `launch` can also take `--default-command`, `--routine-command`, `--targeted-command`, and `--deep-command`. Each command file contains one JSON argv array, such as `["codex", "--model", "<configured-routine-model>"]`. Without a matching profile, it uses the default command. It executes the chosen argv directly, never through a shell. Use command files to call an existing Herdr or other launcher when that is the established start path. Sessions started directly in a terminal or Herdr bypass this intake route; the launcher must be the entrypoint for token savings at task start.
 
+#### Target history in the routed state
+
+Every call that reaches TypeSafe also carries `signals.history`, seven bucketed enums that `scripts/task_route.py` computes from the target's own database (the 20 most recent runs under `runs/`, their `state` and `log`, and `records/verify.state`):
+
+| Fact | Meaning | Values |
+| --- | --- | --- |
+| `prior_runs` | recent runs, including one still active | `none`, `one`, `few` (2-5), `many` (6+) |
+| `verified_builds` | runs whose `build done` gate accepted a passing `scripts/verify.sh` record | same buckets |
+| `unverified_builds` | runs that started a build but never passed that gate | same buckets |
+| `runs_with_loops` | runs that re-entered an earlier phase | same buckets |
+| `total_loops` | phase re-entries summed across those runs | same buckets |
+| `aborted_runs` | runs ended with `harness abort` | same buckets |
+| `last_verify` | exit of the most recent verification record | `none`, `passed`, `failed` |
+
+Individual failed verification attempts are not counted: `scripts/verify.sh` keeps only the latest `records/verify.state`, so a run that failed several times before passing looks like one verified build. The facts therefore combine each run's gate outcome with the last exit. Only these enums leave the machine: no paths, run ids, commit hashes, step notes, or commands. The route record under `routes/` stores the same `history` object. Deterministic routes do not read history.
+
+Why facts rather than making the session-start route opt-in: over 76 session-start routes the answer was `reasoning_model` every time, because every field the hook could fill (`task_kind`, `area`, `diff_size`, `reversibility`, `uncertainty_reason`, `known_failures`) is constant or nearly constant for an interactive session with no prompt. The harness already keeps per-target run outcomes, so reading them costs a directory scan and no new state, and a target with a record of clean verified builds is distinguishable from one that loops or leaves builds unverified. The facts are added inside the task adapter, so `harness launch` and the SessionStart hook both get them without new metadata fields; when `--project` names a registered target, its own database is read even if the command runs elsewhere. If `harness advise --report` still shows a constant answer once targets have history, making the SessionStart route opt-in is the next step.
+
 Deterministic conditions bypass TypeSafe: required checks, known failures, explicit user choices, authorization, irreversible actions, and tasks with no route ambiguity. Ambiguous reversible tasks use the TypeSafe routing skill at `~/.agents/skills/typesafe-routing/scripts/route.py` (override with `HARNESS_TYPESAFE_ROUTER`). The call uses `--strict`, so any detected secret cancels the API request. Missing credentials or service errors fall back to the default command and are recorded.
 
 The default mode is `shadow`: TypeSafe answers and logs its judgment while `launch` keeps the existing default command. Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`). The TypeSafe skill records its own calls under `~/.typesafe-routing/logs/`. Record each real outcome using the skill's `route.py record --call-id ...` command and inspect `route.py report` for accuracy, token usage, and latency. The harness cannot measure avoided reasoning tokens itself.
@@ -408,7 +426,7 @@ It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to
 
 ## Agent Guide Block
 
-The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
+The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. Its Jev paragraph names three concrete points to ask Jev (grep versus retrieval in an unfamiliar target, a review finding's severity, a handoff with unresolved failures), each with an exact flag-form `harness advise --family ...` command; `tests/install-guides.sh` runs those commands against the offline fake router. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
 
 ```sh
 make install-guides
@@ -482,7 +500,7 @@ With `HARNESS_JEV_CHECKPOINTS=1`, `harness plan done`, `harness build start`, `s
 
 ### Jev hooks for interactive sessions
 
-Interactive Claude Code and Codex sessions bypass `harness launch`, so two additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/hooks/jev-observe.sh` (PreToolUse for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. Install or remove both entries with:
+Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/hooks/jev-observe.sh` (PreToolUse for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
 
 ```sh
 scripts/install-hooks.sh            # ~/.claude/settings.json and ~/.codex/hooks.json, with backups
@@ -490,4 +508,4 @@ scripts/install-hooks.sh --dry-run
 scripts/install-hooks.sh --uninstall
 ```
 
-The installer only touches hook groups whose command points at these two scripts. Neither hook replaces `scripts/hooks/require-phase.sh`, which remains the only enforcement hook.
+The installer only touches hook groups whose command points at these scripts, and writes the Grep/Glob reminder only to the Claude Code settings file. None of these hooks replaces `scripts/hooks/require-phase.sh`, which remains the only enforcement hook.
