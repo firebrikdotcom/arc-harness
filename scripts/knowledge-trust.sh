@@ -75,7 +75,9 @@ content_hash() {
 }
 
 approved_hash() {
-  [ -f "$TRUST_FILE" ] && sed -n 's/^HASH=//p' "$TRUST_FILE" | tail -n 1 || true
+  if [ -f "$TRUST_FILE" ]; then
+    sed -n 's/^HASH=//p' "$TRUST_FILE" | tail -n 1 || true
+  fi
 }
 
 case "$COMMAND" in
