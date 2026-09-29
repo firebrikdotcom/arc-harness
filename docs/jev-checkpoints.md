@@ -91,6 +91,8 @@ The `plan done` checkpoint also states whether semantic retrieval through `scrip
 
 `harness review done` prints the pilot counter (labeled decisions out of 30) and any unlabeled evaluated checkpoints. `scripts/harness advise --pending` lists them at any time; `advise --report` includes the same `pilot` summary.
 
+Every git worktree is its own target with its own database, so a per-target count would never reach 30. The pilot counter and `advise --report` therefore default to **machine scope**: they sum the `advice/` and `advice-outcomes/` directories of every target in the registry (`scripts/harness-target.sh list`) that has checkpoints, and `review done` prints that machine-wide number. `--scope target|machine` selects the scope explicitly (`--report` defaults to `machine`; `--pending` defaults to `target`, because a label is recorded in the database that owns the checkpoint, and `--pending --scope machine` names each row's `target`). The JSON keeps the fields consumers already read (`pilot.labeled`, `correct`, `remaining`, `review_batch_ready`, `by_family`) and adds `scope`, `by_target` (labeled, correct, unlabeled, fallback and bypassed counts per registry id, plus `legacy` for the pre-registry shared database beside `targets/`) and `unreadable_records` (other targets' malformed files are skipped and counted; the current target's still fail loudly). Report cohorts remain keyed by family, question/policy version, question hash and model, so machine scope pools only identical cohorts and never mixes versions for tuning. Registry ids are local names and appear only in this local output, never in checkpoint facts or telemetry.
+
 ## Flag form
 
 `scripts/harness advise --family FAMILY ...` builds and validates the same v2 payload without a JSON file:
