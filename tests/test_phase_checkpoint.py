@@ -452,7 +452,9 @@ class PhaseCheckpointTests(unittest.TestCase):
         (directory / "dead.json").write_text(json.dumps(dict(valid, call_id="00000000-0000-0000-0000-0000000000bb")))
         (directory / "no-id.json").write_text(json.dumps({"resolver": "tool_repeat", "run_id": "run-1", "digest": "1",
                                                          "digest_index": 1, "recommendation": "change_approach"}))
-        # Shapes that raise AttributeError (answers null) and TypeError (unhashable recommendation) mid-oracle.
+        # null-answers.json: its run has no state, so it resolves as an unknown stale label and is dropped because
+        # it has no advice record. list-rec.json: its unhashable recommendation raises TypeError in label_tool_repeat.
+        # AttributeError is covered by verify-null.json below (null answers in label_verify).
         (directory / "null-answers.json").write_text(json.dumps(dict(valid, call_id="00000000-0000-0000-0000-0000000000cc",
                                                                     run_id="run-0", resolver="run_complete", answers=None,
                                                                     recommendation=["x"])))
