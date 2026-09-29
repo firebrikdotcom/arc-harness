@@ -13,13 +13,13 @@ fail() {
 }
 
 deny_cmd() {
-  "$PERMIT" check --command "$1" >/dev/null 2>&1 && fail "command should be denied: $1" || true
+  if "$PERMIT" check --command "$1" >/dev/null 2>&1; then fail "command should be denied: $1"; fi
 }
 allow_cmd() {
   "$PERMIT" check --command "$1" >/dev/null 2>&1 || fail "command should be allowed: $1"
 }
 deny_path() {
-  "$PERMIT" check --path "$1" >/dev/null 2>&1 && fail "path should be denied: $1" || true
+  if "$PERMIT" check --path "$1" >/dev/null 2>&1; then fail "path should be denied: $1"; fi
 }
 allow_path() {
   "$PERMIT" check --path "$1" >/dev/null 2>&1 || fail "path should be allowed: $1"
@@ -81,12 +81,12 @@ allow_path '.harness-db/runs/x/state'
 # A project denylist replaces the default entirely.
 mkdir -p "$TMP_ROOT/proj"
 printf '%s\n' 'command \bforbidden-tool\b' > "$TMP_ROOT/proj/.harness-denylist"
-"$PERMIT" check --command 'forbidden-tool run' --project "$TMP_ROOT/proj" >/dev/null 2>&1 && fail "project rule should deny" || true
+if "$PERMIT" check --command 'forbidden-tool run' --project "$TMP_ROOT/proj" >/dev/null 2>&1; then fail "project rule should deny"; fi
 "$PERMIT" check --command 'rm -rf /' --project "$TMP_ROOT/proj" >/dev/null 2>&1 || fail "project denylist should replace the default"
 "$PERMIT" rules --project "$TMP_ROOT/proj" | grep -q 'forbidden-tool' || fail "rules should print the project list"
 
 # Usage errors.
-"$PERMIT" check >/dev/null 2>&1 && fail "check without a subject should fail" || true
-"$PERMIT" bogus >/dev/null 2>&1 && fail "unknown command should fail" || true
+if "$PERMIT" check >/dev/null 2>&1; then fail "check without a subject should fail"; fi
+if "$PERMIT" bogus >/dev/null 2>&1; then fail "unknown command should fail"; fi
 
 printf '%s\n' 'PASS: denylist denies destructive commands and protected paths, allows normal work'
