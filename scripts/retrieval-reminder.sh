@@ -61,7 +61,9 @@ key=$(printf '%s' "${session:-no-session}" | cksum | cut -d' ' -f1)
 marks="$DB_ROOT/retrieval-reminders"
 mkdir -p "$marks" 2>/dev/null || exit 0
 [ ! -e "$marks/$key" ] || exit 0
-{ : > "$marks/$key"; } 2>/dev/null || exit 0
+# touch, not a `:` redirection: dash exits the whole shell when a redirection
+# on a special built-in fails, which would turn a silent no-op into an error.
+touch "$marks/$key" 2>/dev/null || exit 0
 
 run_id=""
 if [ -f "$DB_ROOT/runs/current" ]; then
