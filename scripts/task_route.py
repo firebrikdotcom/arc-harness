@@ -39,6 +39,8 @@ ROLLOUT_ENV = "HARNESS_TYPESAFE_ROLLOUT_PERCENT"
 ACTIVATION_ENV = "HARNESS_TYPESAFE_OPERATOR_ACTIVATION"
 DEFAULT_ROLLOUT_PERCENT = 100
 ROLLOUT_SALT = "jev-task-entry-v1"
+# Recent runs whose outcomes describe the target in the routed state.
+HISTORY_WINDOW = 20
 
 
 class InputError(ValueError):
@@ -97,8 +99,83 @@ def deterministic_route(data: dict[str, Any]) -> tuple[str, str] | None:
     return None
 
 
-def api_state(data: dict[str, Any]) -> dict[str, Any]:
+def count_bucket(count: int) -> str:
+    if count <= 0:
+        return "none"
+    if count == 1:
+        return "one"
+    if count <= 5:
+        return "few"
+    return "many"
+
+
+def read_kv(path: Path) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return {}
+    return dict(line.split("=", 1) for line in lines if "=" in line)
+
+
+def history_facts(db_root: Path) -> dict[str, str]:
+    """Bucketed outcomes of the target's recent harness runs, as enums only.
+
+    Reads run state and logs under the target database; never paths, notes,
+    commands, or run identifiers. A run's build counts as verified when the
+    build gate accepted a passing scripts/verify.sh record, and unverified
+    when it started a build that never passed that gate.
+    """
+    runs_dir = db_root / "runs"
+    runs = sorted(path for path in runs_dir.iterdir() if (path / "state").is_file()) if runs_dir.is_dir() else []
+    recent = runs[-HISTORY_WINDOW:]
+    verified = unverified = looped = loops = aborted = 0
+    for run in recent:
+        state = read_kv(run / "state")
+        try:
+            events = [line.split("\t")[-1] for line in (run / "log").read_text(encoding="utf-8").splitlines()]
+        except (OSError, UnicodeError):
+            events = []
+        if any(event.startswith("build gate: verify record") for event in events):
+            verified += 1
+        elif "build start" in events:
+            unverified += 1
+        used = state.get("LOOPS_USED", "0")
+        used = int(used) if used.isdigit() else 0
+        looped += used > 0
+        loops += used
+        aborted += state.get("RUN_STATUS") == "aborted"
+    last = read_kv(db_root / "records" / "verify.state").get("EXIT")
     return {
+        "prior_runs": count_bucket(len(recent)),
+        "verified_builds": count_bucket(verified),
+        "unverified_builds": count_bucket(unverified),
+        "runs_with_loops": count_bucket(looped),
+        "total_loops": count_bucket(loops),
+        "aborted_runs": count_bucket(aborted),
+        "last_verify": "none" if last is None else "passed" if last == "0" else "failed",
+    }
+
+
+def history_db(project: Path, db_root: Path) -> Path:
+    """The registered target's own database for PROJECT, else DB_ROOT.
+
+    `harness route` and `harness launch` resolve DB_ROOT from the working
+    directory, so a `--project` elsewhere must be looked up in the registry.
+    """
+    helper = ROOT / "scripts" / "harness-target.sh"
+    if not os.access(helper, os.X_OK):
+        return db_root
+    try:
+        result = subprocess.run([str(helper), "db-root", str(project)], capture_output=True,
+                                text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return db_root
+    found = result.stdout.strip()
+    return Path(found) if result.returncode == 0 and found else db_root
+
+
+def api_state(data: dict[str, Any], history: dict[str, str] | None = None) -> dict[str, Any]:
+    state = {
         "decision": {
             "question": "Does this reversible task need a targeted check or deeper reasoning before a routine agent starts?",
             "proposed_action": data["proposed_action"],
@@ -113,6 +190,9 @@ def api_state(data: dict[str, Any]) -> dict[str, Any]:
         },
         "constraints": ["Required checks and user choices are deterministic gates"],
     }
+    if history is not None:
+        state["signals"]["history"] = history
+    return state
 
 
 def policy_version(router: Path) -> str:
@@ -254,6 +334,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
     data = load_metadata(metadata)
     fixed = deterministic_route(data)
     answer = error = None
+    history: dict[str, str] | None = None
     routing_mode = mode
     # Hard deterministic gates do not depend on rollout configuration.
     percentage = DEFAULT_ROLLOUT_PERCENT if fixed else rollout_percent()
@@ -271,7 +352,8 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
             bucket = rollout_bucket(data)
             if bucket >= percentage:
                 routing_mode = "shadow"
-        answer, error = invoke_router(api_state(data), router, routing_mode)
+        history = history_facts(history_db(project, db_root))
+        answer, error = invoke_router(api_state(data, history), router, routing_mode)
         if answer is None:
             recommendation, reason, source = "default", error or "router unavailable", "fallback"
         else:
@@ -297,6 +379,8 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         "rollout_percent": percentage,
         "operator_activation": operator_activation,
     }
+    if history is not None:
+        record["history"] = history
     if bucket is not None:
         record["rollout_bucket"] = bucket
         record["rollout_selected"] = routing_mode == "active"

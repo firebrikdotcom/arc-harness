@@ -122,6 +122,68 @@ class TaskRoutingTests(unittest.TestCase):
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
 
+    def write_run(self, run_id: str, status: str, loops: int, events: list[str]) -> None:
+        run = self.db / "runs" / run_id
+        run.mkdir(parents=True)
+        (run / "state").write_text(f"RUN_ID={run_id}\nRUN_STATUS={status}\nLOOPS_USED={loops}\n")
+        (run / "log").write_text("".join(f"2026-09-29T00:00:00Z\tbuild\t{event}\n" for event in events))
+
+    def test_history_facts_are_bucketed_enums_without_paths(self) -> None:
+        verified = ["plan start", "plan done", "build start",
+                    f"build gate: verify record at 2026-09-29T00:00:00Z head={'a' * 40}", "build done"]
+        self.write_run("20260901T000000Z-1", "complete", 0, verified)
+        self.write_run("20260902T000000Z-2", "complete", 2, verified)
+        self.write_run("20260903T000000Z-3", "aborted", 1, ["plan start", "plan done", "build start", "abort"])
+        self.write_run("20260904T000000Z-4", "active", 0, ["plan start", "step private note about /secret/path"])
+        (self.db / "runs" / "current").write_text("20260904T000000Z-4\n")
+        (self.db / "records").mkdir()
+        (self.db / "records" / "verify.state").write_text(f"RECORD_KIND=verify\nPROJECT_ROOT={self.root}\nEXIT=1\n")
+        record = json.loads(self.route().stdout)
+        sent = json.loads(self.state_capture.read_text())["state"]
+        expected = {"prior_runs": "few", "verified_builds": "few", "unverified_builds": "one",
+                    "runs_with_loops": "few", "total_loops": "few", "aborted_runs": "one", "last_verify": "failed"}
+        self.assertEqual(sent["signals"]["history"], expected)
+        self.assertEqual(record["history"], expected)
+        encoded = json.dumps(sent)
+        for leaked in (str(self.root), "secret", "20260904T000000Z-4", "a" * 40):
+            self.assertNotIn(leaked, encoded)
+
+    def test_history_comes_from_the_project_target_database(self) -> None:
+        target = self.root / "target"
+        target.mkdir()
+        registered = subprocess.run([str(ROOT / "scripts/harness-target.sh"), "register", str(target)],
+                                    env=self.env, text=True, capture_output=True, check=True).stdout.strip()
+        run = Path(registered) / "db" / "runs" / "20260901T000000Z-1"
+        run.mkdir(parents=True)
+        (run / "state").write_text("RUN_STATUS=complete\nLOOPS_USED=0\n")
+        (run / "log").write_text("2026-09-01T00:00:00Z\tbuild\tbuild start\n")
+        # Run from outside the target, as the documented launcher form does.
+        self.run_cli("route", "--state", str(self.metadata), "--project", str(target), "--router", str(self.router))
+        history = json.loads(self.state_capture.read_text())["state"]["signals"]["history"]
+        self.assertEqual((history["prior_runs"], history["unverified_builds"]), ("one", "one"))
+        self.assertFalse((self.db / "runs").exists())
+
+    def test_history_facts_for_a_new_target_are_none(self) -> None:
+        self.route()
+        history = json.loads(self.state_capture.read_text())["state"]["signals"]["history"]
+        self.assertEqual(set(history.values()), {"none"})
+        self.assertEqual(len(history), 7)
+
+    def test_history_window_and_buckets(self) -> None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("task_route_under_test", ROOT / "scripts/task_route.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual([module.count_bucket(n) for n in (0, 1, 2, 5, 6)], ["none", "one", "few", "few", "many"])
+        for index in range(module.HISTORY_WINDOW + 5):
+            self.write_run(f"202609{index:04d}T000000Z-{index}", "complete", 0, ["build start"])
+        history = module.history_facts(self.db)
+        self.assertEqual((history["prior_runs"], history["unverified_builds"], history["last_verify"]), ("many", "many", "none"))
+
+    def test_deterministic_route_does_not_read_history(self) -> None:
+        self.metadata.write_text(json.dumps({**METADATA, "known_failures": 1}))
+        self.assertNotIn("history", json.loads(self.route().stdout))
+
     def test_missing_router_falls_back_to_default(self) -> None:
         result = self.run_cli(
             "route", "--state", str(self.metadata), "--router", str(self.root / "missing.py"),

@@ -32,10 +32,46 @@ grep -q 'advise --context CHECKPOINT.json' "$PROJECT/AGENTS.md" || fail "checkpo
 grep -q 'advise --record OUTCOME.json' "$PROJECT/CLAUDE.md" || fail "outcome command missing"
 grep -q 'shadow mode' "$PROJECT/AGENTS.md" || fail "shadow boundary missing"
 
+# Jev guidance names concrete trigger points instead of a generic paragraph,
+# and every trigger command is an exact, runnable flag-form checkpoint.
+if grep -q 'Consider Jev at every meaningful decision' "$PROJECT/AGENTS.md"; then
+  fail "generic Jev paragraph should be replaced by trigger points"
+fi
+for family in tool_selection evidence_assessment handoff_assessment; do
+  grep -q "^- Before .*advise --family $family " "$PROJECT/AGENTS.md" || fail "trigger for $family missing"
+done
+# shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
+grep -q 'set `--baseline` to the choice you would make without asking' "$PROJECT/AGENTS.md" \
+  || fail "trigger commands must tell the agent to substitute its own baseline and facts"
+# shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
+grep '^- Before' "$PROJECT/AGENTS.md" | sed 's/^[^`]*`//; s/`$//' > "$TMP_ROOT/triggers"
+[ "$(wc -l < "$TMP_ROOT/triggers")" -eq 3 ] || fail "expected exactly three trigger commands"
+if grep -q "$PROJECT\|$HARNESS_ROOT_UNDER_TEST/scripts/jg" "$TMP_ROOT/triggers"; then
+  fail "trigger choices must not embed paths that would be sent to Jev"
+fi
+(
+  export HARNESS_TYPESAFE_ROUTER="$HARNESS_ROOT_UNDER_TEST/tests/fake_router.py"
+  export HARNESS_DB_ROOT="$TMP_ROOT/db" FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
+  while IFS= read -r trigger; do
+    eval "$trigger" > "$TMP_ROOT/trigger.out" 2>&1 || fail "trigger command failed: $(cat "$TMP_ROOT/trigger.out")"
+    grep -q '"advisory": true' "$TMP_ROOT/trigger.out" || fail "trigger command was not evaluated as advice"
+  done < "$TMP_ROOT/triggers"
+  call_id=$(sed -n 's/.*"call_id": "\([^"]*\)".*/\1/p' "$TMP_ROOT/trigger.out")
+  "$HARNESS_ROOT_UNDER_TEST/scripts/harness" advise --label "$call_id" --outcome correct \
+    --action-taken "handed off" --evidence "fixture" >/dev/null 2>&1 || fail "documented label command failed"
+) || exit 1
+
 # Outside the harness root the commands use a clean absolute CLI path. The CLI
 # infers its root from that path, so no repeated environment assignment is needed.
 grep -q "^$HARNESS_ROOT_UNDER_TEST/scripts/harness plan start" "$PROJECT/AGENTS.md" \
   || fail "external project block should point at the harness CLI"
+# The harness root's own guides carry the current block with repository-relative links.
+for guide in AGENTS.md CLAUDE.md; do
+  grep -qF "Formats: docs/jev-checkpoints.md." "$HARNESS_ROOT_UNDER_TEST/$guide" \
+    || fail "$guide block is stale or uses a machine-specific docs path; rerun scripts/install-guides.sh --project ."
+done
+grep -qF "Formats: $HARNESS_ROOT_UNDER_TEST/docs/jev-checkpoints.md." "$PROJECT/AGENTS.md" \
+  || fail "external project block should point at the harness checkpoint docs"
 if grep -q 'HARNESS_ROOT=' "$PROJECT/AGENTS.md"; then
   fail "external project block should not repeat HARNESS_ROOT"
 fi
