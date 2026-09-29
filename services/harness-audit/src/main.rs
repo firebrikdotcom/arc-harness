@@ -13,6 +13,7 @@ use crate::domain::audit_event::projector::{AuditEventProjector, AUDIT_EVENTS_VI
 
 mod domain;
 mod routes;
+mod summary;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 

@@ -1,6 +1,7 @@
 use crate::domain::audit_event::aggregate::AuditEventAggregate;
 use crate::domain::audit_event::commands::AuditEventCommand;
 use crate::domain::audit_event::projector::AUDIT_EVENTS_VIEW;
+use crate::summary as grouped;
 use actix_web::{get, post, web, HttpResponse, Responder};
 use arc_core::command_bus::{CommandBus, CommandContext};
 use arc_core::read_model_store::ReadModelStore;
@@ -18,6 +19,12 @@ struct RecordAuditEvent {
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GroupedQuery {
+    #[serde(default)]
+    include_fixtures: bool,
 }
 
 #[get("/health")]
@@ -107,12 +114,38 @@ async fn summary(store: web::Data<dyn ReadModelStore>) -> impl Responder {
     }))
 }
 
+#[get("/audit/summary/checkpoints")]
+async fn checkpoint_summary(
+    query: web::Query<GroupedQuery>,
+    store: web::Data<dyn ReadModelStore>,
+) -> impl Responder {
+    match store.list(AUDIT_EVENTS_VIEW).await {
+        Ok(rows) => {
+            HttpResponse::Ok().json(grouped::checkpoint_groups(&rows, query.include_fixtures))
+        }
+        Err(error) => HttpResponse::InternalServerError().json(json!({"error": error.to_string()})),
+    }
+}
+
+#[get("/audit/summary/routes")]
+async fn route_summary(
+    query: web::Query<GroupedQuery>,
+    store: web::Data<dyn ReadModelStore>,
+) -> impl Responder {
+    match store.list(AUDIT_EVENTS_VIEW).await {
+        Ok(rows) => HttpResponse::Ok().json(grouped::route_groups(&rows, query.include_fixtures)),
+        Err(error) => HttpResponse::InternalServerError().json(json!({"error": error.to_string()})),
+    }
+}
+
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(health).service(
         web::scope("/api")
             .service(record_event)
             .service(list_events)
-            .service(summary),
+            .service(summary)
+            .service(checkpoint_summary)
+            .service(route_summary),
     );
 }
 
@@ -122,7 +155,9 @@ mod tests {
 
     #[test]
     fn list_limit_is_bounded() {
-        let query = ListQuery { limit: Some(50_000) };
+        let query = ListQuery {
+            limit: Some(50_000),
+        };
         assert_eq!(query.limit.unwrap_or(1000).clamp(1, 10_000), 10_000);
     }
 }

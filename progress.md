@@ -494,3 +494,6 @@ Known risks:
 - 2026-05-25: `scripts/review.sh` passed locally. It reran `scripts/verify.sh` with the same result and printed target git diff summary.
 - 2026-05-25: `scripts/init.sh --project .`, `scripts/verify.sh --project .`, `scripts/review.sh --project .`, and `HARNESS_TARGET_ROOT=. scripts/verify.sh` passed as target-root smoke checks.
 - 2026-05-25: Final `scripts/verify.sh` passed locally after updating `progress.md`. Result: ran=1 skipped=4 failures=0. Note: local `shellcheck` is unavailable.
+
+## Grouped audit summary (feat/audit-summary-by-family)
+- Added /api/audit/summary/checkpoints and /routes (services/harness-audit/src/summary.rs); cargo test 9 pass, clippy clean, scripts/verify.sh passed, live curl checked, independent review: no findings.
