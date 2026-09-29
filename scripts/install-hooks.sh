@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Register the harness hooks in the user's Claude Code settings and Codex
 # hooks file: automatic target initialisation plus the shadow Jev route at
-# SessionStart, and the repeated-command observer at PreToolUse. Idempotent:
+# SessionStart, the repeated-command observer at PreToolUse, and (Claude Code
+# only, which has Grep and Glob tools) the retrieval reminder. Idempotent:
 # existing harness entries are replaced, other hooks are preserved, and each
 # file is backed up before it is rewritten.
 #
@@ -41,11 +42,22 @@ root, mode, dry_run, *targets = sys.argv[1:]
 dry_run = dry_run == "1"
 SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
 OBSERVE = str(Path(root) / "scripts/hooks/jev-observe.sh")
-MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh")
-ENTRIES = {
-    "SessionStart": {"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]},
-    "PreToolUse": {"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]},
+REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
+MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
+           "scripts/retrieval-reminder.sh")
+SHARED = {
+    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]}],
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]}],
 }
+# Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only.
+CLAUDE_ONLY = {
+    "PreToolUse": [{"matcher": "Grep|Glob", "hooks": [{"type": "command", "command": f'"{REMIND}"', "timeout": 10}]}],
+}
+
+
+def entries_for(index: int) -> dict:
+    extra = CLAUDE_ONLY if index == 0 else {}
+    return {event: SHARED[event] + extra.get(event, []) for event in SHARED}
 
 
 def is_ours(group: dict) -> bool:
@@ -56,7 +68,7 @@ def is_ours(group: dict) -> bool:
     return False
 
 
-for target in targets:
+for index, target in enumerate(targets):
     path = Path(target)
     data = {}
     if path.is_file():
@@ -72,10 +84,10 @@ for target in targets:
     if not isinstance(hooks, dict):
         print(f"FAIL: {path} has a non-object 'hooks' key; not touching it.", file=sys.stderr)
         sys.exit(1)
-    for event, entry in ENTRIES.items():
+    for event, entries in entries_for(index).items():
         groups = [group for group in hooks.get(event, []) if not is_ours(group)]
         if mode == "install":
-            groups.append(entry)
+            groups.extend(entries)
         if groups:
             hooks[event] = groups
         else:
