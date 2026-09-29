@@ -55,6 +55,16 @@ class PhaseCheckpointTests(unittest.TestCase):
     def write_state(self, **values: str) -> None:
         (self.run_dir / "state").write_text("".join(f"{k}={v}\n" for k, v in values.items()))
 
+    def write_digests(self, *digests: str) -> None:
+        (self.run_dir / "command-digests").write_text("".join(f"{d}\n" for d in digests))
+
+    def start_new_run(self, run_id: str, **values: str) -> None:
+        self.run_dir = self.db / "runs" / run_id
+        self.run_dir.mkdir(parents=True)
+        (self.db / "runs" / "current").write_text(f"{run_id}\n")
+        state = {"RUN_STATUS": "active", "CURRENT_PHASE": "build", "STEPS_USED": "1", "LOOPS_USED": "0", "RUN_ID": run_id}
+        self.write_state(**{**state, **values})
+
     def run_event(self, *arguments: str, env: dict | None = None) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(SCRIPT), *arguments, "--project", str(self.project), "--db-root", str(self.db)],
                               env=env or self.env, capture_output=True, text=True, check=False)
@@ -96,10 +106,204 @@ class PhaseCheckpointTests(unittest.TestCase):
         self.assertNotIn(str(self.project), text)
         self.assertEqual(resolver, "verify_result")
 
+    def test_change_shape_and_test_path_rules(self) -> None:
+        self.assertTrue(MODULE.is_test_path("tests/helpers.py"))
+        self.assertTrue(MODULE.is_test_path("src/test_api.py"))
+        self.assertTrue(MODULE.is_test_path("web/Button.spec.tsx"))
+        self.assertTrue(MODULE.is_test_path("app/UserServiceTest.php"))
+        self.assertFalse(MODULE.is_test_path("src/latest.py"))
+        self.assertFalse(MODULE.is_test_path("contest/entry.py"))
+        self.assertFalse(MODULE.is_test_path("src/Contest.php"))
+        self.assertEqual(MODULE.change_shape(["src/app.py", "tests/test_app.py"]), "source_and_tests")
+        self.assertEqual(MODULE.change_shape(["src/app.py", "README.md"]), "source_only")
+        self.assertEqual(MODULE.change_shape(["tests/test_app.py"]), "tests_only")
+        self.assertEqual(MODULE.change_shape(["docs/a.md", "config.json"]), "docs_or_config_only")
+        self.assertEqual(MODULE.change_shape([]), "none")
+        self.assertEqual([MODULE.line_bucket(n) for n in (0, 50, 51, 300, 1500, 1501)],
+                         ["none", "small", "medium", "medium", "large", "very_large"])
+
+    def test_signals_count_changed_lines_including_untracked_files(self) -> None:
+        (self.project / "app.py").write_text("print('hi')\n" + "x = 1\n" * 60)
+        signals = MODULE.git_signals(self.project)
+        self.assertEqual((signals["change_shape"], signals["changed_lines_bucket"]), ("source_and_tests", "medium"))
+
+    def test_changed_line_bucket_counts_untracked_deleted_and_capped_files(self) -> None:
+        repo = self.root / "lines"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        (repo / "big.py").write_text("x = 1\n" * 60)
+        git(repo, "add", ".")
+        git(repo, "commit", "-q", "-m", "init")
+        (repo / "notes.py").write_text("a\nb\n")
+        self.assertEqual(MODULE.git_signals(repo)["changed_lines_bucket"], "small")
+        (repo / "notes.py").write_text("a\n" * 60)
+        self.assertEqual(MODULE.git_signals(repo)["changed_lines_bucket"], "medium")
+        (repo / "notes.py").unlink()
+        (repo / "big.py").unlink()
+        self.assertEqual(MODULE.git_signals(repo)["changed_lines_bucket"], "medium")
+        git(repo, "checkout", "--", "big.py")
+        (repo / "huge.log").write_bytes(b"\n" * (MODULE.UNTRACKED_LINE_LIMIT_BYTES + 1))
+        self.assertEqual(MODULE.git_signals(repo)["changed_lines_bucket"], "none")
+        clean = self.root / "clean"
+        clean.mkdir()
+        git(clean, "init", "-q")
+        self.assertEqual((MODULE.git_signals(clean)["changed_lines_bucket"], MODULE.git_signals(clean)["change_shape"]), ("none", "none"))
+
+    def test_verify_result_keeps_a_private_history_and_facts_use_it(self) -> None:
+        records = self.db / "records"
+        records.mkdir()
+        for exit_code in ("1", "0", "0"):
+            (records / "verify.state").write_text(f"RECORD_EPOCH=200\nEXIT={exit_code}\nFAILURES={exit_code}\nRAN=3\n")
+            self.assertEqual(self.run_event("verify-result", "--exit", exit_code).returncode, 0)
+        history = [json.loads(line) for line in (records / "verify-history.jsonl").read_text().splitlines()]
+        self.assertEqual([h["exit"] for h in history], [1, 0, 0])
+        self.assertEqual({h["run_id"] for h in history}, {"run-1"})
+        self.assertEqual(oct((records / "verify-history.jsonl").stat().st_mode & 0o777), "0o600")
+        state = {"RUN_ID": "run-1", "STEPS_USED": "4", "LOOPS_USED": "0"}
+        facts = MODULE.verify_facts(self.db, state, self.project)
+        self.assertIn("Verification history for this target (last 3): 2 passed, 1 failed; the most recent passed (2 in a row).", facts)
+        self.assertIn("Verifications in this run so far: small count, 1 failed.", facts)
+        self.assertIn("Working tree changed since the most recent verification: no.", facts)
+        (self.project / "app.py").write_text("print('changed')\n")
+        self.assertIn("Working tree changed since the most recent verification: yes.", MODULE.verify_facts(self.db, state, self.project))
+        self.assertIn("Verifications in this run so far: none.", MODULE.verify_facts(self.db, {"RUN_ID": "run-9"}, self.project))
+        self.run_event("verify-start")
+        [record] = self.advice_records()
+        text = json.dumps(record["context"])
+        self.assertNotIn(history[-1]["tree"], text)
+        self.assertNotIn("run-1", text)
+
+    def test_repository_without_a_commit_counts_staged_lines(self) -> None:
+        repo = self.root / "fresh"
+        repo.mkdir()
+        git(repo, "init", "-q")
+        (repo / "main.py").write_text("x = 1\n" * 60)
+        git(repo, "add", "main.py")
+        self.assertEqual(MODULE.git_signals(repo)["changed_lines_bucket"], "medium")
+        fingerprint = MODULE.tree_fingerprint(repo)
+        self.assertIsNotNone(fingerprint)
+        (repo / "main.py").write_text("x = 2\n")
+        self.assertNotEqual(fingerprint, MODULE.tree_fingerprint(repo))
+
+    def test_tree_fingerprint_changes_with_untracked_and_staged_edits(self) -> None:
+        first = MODULE.tree_fingerprint(self.project)
+        self.assertEqual(first, MODULE.tree_fingerprint(self.project))
+        (self.project / "tests" / "test_secretive_name.py").write_text("x = 2\n")
+        second = MODULE.tree_fingerprint(self.project)
+        self.assertNotEqual(first, second)
+        (self.project / "new_module.py").write_text("")
+        third = MODULE.tree_fingerprint(self.project)
+        self.assertNotEqual(second, third)
+        (self.project / "app.py").write_text("print('staged')\n")
+        fourth = MODULE.tree_fingerprint(self.project)
+        git(self.project, "add", "app.py")
+        self.assertEqual(fourth, MODULE.tree_fingerprint(self.project))
+        (self.project / "app.py").write_text("print('staged then edited')\n")
+        self.assertNotEqual(fourth, MODULE.tree_fingerprint(self.project))
+
+    def test_verify_history_is_not_written_when_checkpoints_are_disabled(self) -> None:
+        records = self.db / "records"
+        records.mkdir()
+        (records / "verify.state").write_text("RECORD_EPOCH=200\nEXIT=0\n")
+        env = {k: v for k, v in self.env.items() if k != "HARNESS_JEV_CHECKPOINTS"}
+        self.assertEqual(self.run_event("verify-result", "--exit", "0", env=env).stdout, "")
+        self.assertFalse((records / "verify-history.jsonl").exists())
+
+    def test_newer_verify_state_than_history_is_the_most_recent_result(self) -> None:
+        records = self.db / "records"
+        records.mkdir()
+        (records / "verify-history.jsonl").write_text(json.dumps({"epoch": 100, "exit": 0, "tree": "x", "run_id": "run-1"}) + "\n")
+        (records / "verify.state").write_text("RECORD_EPOCH=200\nEXIT=1\nFAILURES=1\n")
+        facts = MODULE.verify_facts(self.db, {"RUN_ID": "run-1", "RUN_STARTED_EPOCH": "50"}, self.project)
+        self.assertIn("Verification history for this target (last 2): 1 passed, 1 failed; the most recent failed (1 in a row).", facts)
+        self.assertIn("Verifications in this run so far: small count, 1 failed.", facts)
+        self.assertIn("Working tree changed since the most recent verification: unknown.", facts)
+        (records / "verify.state").write_text("RECORD_EPOCH=100\nEXIT=0\n")
+        self.assertEqual(len(MODULE.verify_history(self.db)), 1)
+
+    def test_verify_history_is_written_without_an_active_run_and_is_bounded(self) -> None:
+        self.write_state(RUN_STATUS="complete", RUN_ID="run-1")
+        records = self.db / "records"
+        records.mkdir()
+        (records / "verify-history.jsonl").write_text("".join(json.dumps({"epoch": i, "exit": 0}) + "\n" for i in range(150)) + "not json\n")
+        (records / "verify.state").write_text("RECORD_EPOCH=999\nEXIT=1\nFAILURES=2\nRAN=3\n")
+        result = self.run_event("verify-result", "--exit", "1")
+        self.assertIn("skipped: no active harness run", result.stdout)
+        lines = (records / "verify-history.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), MODULE.VERIFY_HISTORY_KEEP)
+        self.assertEqual((json.loads(lines[-1])["epoch"], json.loads(lines[-1])["failures"]), (999, 2))
+
+    def test_unwritable_history_never_blocks_verify_labels(self) -> None:
+        self.run_event("verify-start")
+        (self.db / "records").write_text("not a directory\n")
+        result = self.run_event("verify-result", "--exit", "0")
+        self.assertIn("verify history not written", result.stdout)
+        self.assertIn("labeled evidence_assessment/verify-predict-2 correct", result.stdout)
+
+    def test_legacy_verify_state_without_history_still_yields_a_fact(self) -> None:
+        records = self.db / "records"
+        records.mkdir()
+        (records / "verify.state").write_text("RECORD_EPOCH=150\nEXIT=1\nFAILURES=1\n")
+        facts = MODULE.verify_facts(self.db, {"RUN_ID": "run-1", "RUN_STARTED_EPOCH": "100"}, self.project)
+        self.assertIn("Verification history for this target (last 1): 0 passed, 1 failed; the most recent failed (1 in a row).", facts)
+        self.assertIn("Verifications in this run so far: small count, 1 failed.", facts)
+        self.assertIn("Working tree changed since the most recent verification: unknown.", facts)
+        self.assertEqual(MODULE.verify_facts(self.root / "empty", {}, self.project), ["Verification history for this target: none recorded yet."])
+
+    def test_previous_run_history_facts(self) -> None:
+        for name, status, loops, started in (("r-a", "complete", "0", "10"), ("r-b", "complete", "2", "20"),
+                                             ("r-c", "aborted", "0", "30"), ("r-d", "active", "0", "40")):
+            directory = self.db / "runs" / name
+            directory.mkdir()
+            (directory / "state").write_text(f"RUN_ID={name}\nRUN_STATUS={status}\nLOOPS_USED={loops}\nRUN_STARTED_EPOCH={started}\n")
+        facts = MODULE.run_history_facts(self.db, {"RUN_ID": "run-1"})
+        self.assertEqual(facts, ["Previous runs of this target: small completed, small aborted, small left unfinished.",
+                                 "Of the last 2 completed runs, 1 re-entered an earlier phase."])
+        # The current run is excluded even when it is complete.
+        self.assertEqual(MODULE.run_history_facts(self.db, {"RUN_ID": "r-b"})[1], "Of the last 1 completed runs, 0 re-entered an earlier phase.")
+        # Only the five most recent completed runs count, ordered by start time, not by name.
+        for index in range(6):
+            directory = self.db / "runs" / f"z-{index}"
+            directory.mkdir()
+            loops = "1" if index == 0 else "0"
+            (directory / "state").write_text(f"RUN_ID=z-{index}\nRUN_STATUS=complete\nLOOPS_USED={loops}\nRUN_STARTED_EPOCH={100 + index}\n")
+        facts = MODULE.run_history_facts(self.db, {"RUN_ID": "run-1"})
+        self.assertEqual(facts, ["Previous runs of this target: medium completed, small aborted, small left unfinished.",
+                                 "Of the last 5 completed runs, 0 re-entered an earlier phase."])
+        self.assertEqual(MODULE.run_history_facts(self.root / "empty", {"RUN_ID": "x"}),
+                         ["Previous runs of this target: none completed, none aborted, none left unfinished."])
+
+    def test_v2_handoff_questions_ask_about_loops_not_progress_md(self) -> None:
+        self.run_event("plan-done")
+        self.run_event("review-handoff", "--verify-exit", "0")
+        plan, review = sorted(self.advice_records(), key=lambda r: r["question_version"])
+        self.assertEqual((plan["question_version"], review["question_version"]), ("phase-plan-2", "review-handoff-2"))
+        for record in (plan, review):
+            self.assertEqual(set(record["questions"]), {"recommendation", "loop_likely"})
+            self.assertNotIn("progress.md", json.dumps(record["questions"]))
+            self.assertNotIn("progress.md", json.dumps(record["context"]))
+            facts = record["context"]["context"]["facts"]
+            self.assertTrue(any(f.startswith("Change shape: ") for f in facts))
+            self.assertTrue(any(f.startswith("Previous runs of this target") for f in facts))
+            self.assertTrue(any(f.startswith("Semantic retrieval") for f in facts))
+
+    def test_legacy_pending_items_without_run_id_keep_their_behaviour(self) -> None:
+        directory = self.db / "advice-pending"
+        self.run_event("plan-done")
+        [path] = list(directory.glob("*.json"))
+        item = json.loads(path.read_text())
+        item.pop("run_id")
+        item["question_version"] = "phase-plan-1"
+        path.write_text(json.dumps(item))
+        self.start_new_run("run-2")
+        self.assertNotIn("labeled", self.run_event("build-start").stdout)
+        result = self.run_event("run-complete")
+        self.assertIn("labeled handoff_assessment/phase-plan-1 correct", result.stdout)
+
     def test_plan_done_emits_shadow_checkpoint_and_pending_oracle(self) -> None:
         result = self.run_event("plan-done")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("handoff_assessment/phase-plan-1 shadow recommendation proceed_to_build agrees with baseline", result.stdout)
+        self.assertIn("handoff_assessment/phase-plan-2 shadow recommendation proceed_to_build agrees with baseline", result.stdout)
         self.assertIn("baseline kept", result.stdout)
         [record] = self.advice_records()
         self.assertEqual((record["status"], record["shadow"], record["baseline_action"]), ("evaluated", True, "proceed_to_build"))
@@ -131,8 +335,8 @@ class PhaseCheckpointTests(unittest.TestCase):
         self.assertEqual({p["resolver"] for p in self.pending()}, {"first_verify", "verify_result"})
         result = self.run_event("verify-result", "--exit", "0")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("labeled evidence_assessment/verify-predict-1 correct", result.stdout)
-        self.assertIn("labeled reasoning_allocation/phase-build-1 correct", result.stdout)
+        self.assertIn("labeled evidence_assessment/verify-predict-2 correct", result.stdout)
+        self.assertIn("labeled reasoning_allocation/phase-build-2 correct", result.stdout)
         self.assertEqual(self.pending(), [])
         self.assertEqual(sorted(o["outcome"] for o in self.outcomes()), ["correct", "correct"])
         report = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/context_advice.py"), "--report", "--db-root", str(self.db)],
@@ -158,7 +362,7 @@ class PhaseCheckpointTests(unittest.TestCase):
         self.run_event("plan-done")
         self.write_state(RUN_STATUS="active", CURRENT_PHASE="review", STEPS_USED="9", LOOPS_USED="1", RUN_ID="run-1")
         result = self.run_event("run-complete")
-        self.assertIn("labeled handoff_assessment/phase-plan-1 under_escalated", result.stdout)
+        self.assertIn("labeled handoff_assessment/phase-plan-2 under_escalated", result.stdout)
         self.assertIn("pilot 1/30 labeled shadow decisions", result.stdout)
         self.assertEqual(self.pending(), [])
 
@@ -168,18 +372,195 @@ class PhaseCheckpointTests(unittest.TestCase):
         self.assertEqual(record["baseline_action"], "needs_more_work")
         self.assertIn("Verification during review failed.", record["context"]["context"]["facts"])
 
-    def test_tool_repeat_checkpoint_is_not_auto_labeled(self) -> None:
+    def test_tool_repeat_checkpoint_waits_for_its_oracle(self) -> None:
+        self.write_digests("111", "222", "111", "111")
         result = self.run_event("tool-repeat", "--repeats", "3")
-        self.assertIn("progress_assessment/tool-repeat-1", result.stdout)
-        self.assertEqual(self.pending(), [])
+        self.assertIn("progress_assessment/tool-repeat-2", result.stdout)
+        [pending] = self.pending()
+        self.assertEqual((pending["resolver"], pending["digest"], pending["digest_index"], pending["phase_at"]),
+                         ("tool_repeat", "111", 4, "build"))
+        [record] = self.advice_records()
+        self.assertNotIn("111", json.dumps(record["context"]))
+        self.assertIn("Shell commands recorded in this run: medium count, small distinct.", record["context"]["context"]["facts"])
+        self.assertEqual(self.run_event("verify-start").stdout.count("labeled progress_assessment"), 0)
         pending = json.loads(subprocess.run([sys.executable, str(ROOT / "scripts/context_advice.py"), "--pending", "--db-root", str(self.db)],
                                             capture_output=True, text=True, check=True).stdout)
-        self.assertEqual(pending["unlabeled_total"], 1)
+        self.assertEqual(pending["unlabeled_total"], 2)
+
+    def test_tool_repeat_tracks_the_repeated_digest_despite_a_parallel_append(self) -> None:
+        self.write_digests("111", "111", "111", "222")
+        self.run_event("tool-repeat", "--repeats", "3", env={**self.env, "FAKE_ROUTER_CHOICE": "change_approach"})
+        [pending] = self.pending()
+        self.assertEqual((pending["digest"], pending["digest_index"]), ("111", 3))
+        self.assertEqual(MODULE.repeated_digest(["a", "b", "b", "a", "b", "a"], 3), ("a", 6))
+        self.assertEqual(MODULE.repeated_digest([], 3), (None, 0))
+        # A digest that already crossed the threshold is not the one that just reached it.
+        self.assertEqual(MODULE.repeated_digest(list("bbbaaab"), 3), ("a", 6))
+        self.write_digests("111", "111", "111", "222", "111")
+        self.assertIn("labeled progress_assessment/tool-repeat-2 correct", self.run_event("verify-start").stdout)
+
+    def test_tool_repeat_recurring_command_labels_stuck(self) -> None:
+        self.write_digests("111", "111", "111")
+        self.run_event("tool-repeat", "--repeats", "3", env={**self.env, "FAKE_ROUTER_CHOICE": "change_approach"})
+        self.write_digests("111", "111", "111", "222", "111")
+        result = self.run_event("verify-start")
+        self.assertIn("labeled progress_assessment/tool-repeat-2 correct", result.stdout)
+        [outcome] = self.outcomes()
+        self.assertIn("issued again after the checkpoint", outcome["evidence"])
+
+    def test_tool_repeat_loop_after_checkpoint_labels_retry_under_escalated(self) -> None:
+        self.write_digests("111", "111", "111")
+        self.run_event("tool-repeat", "--repeats", "3")
+        self.write_state(RUN_STATUS="active", CURRENT_PHASE="build", STEPS_USED="9", LOOPS_USED="1", RUN_ID="run-1")
+        result = self.run_event("verify-start")
+        self.assertIn("labeled progress_assessment/tool-repeat-2 under_escalated", result.stdout)
+
+    def test_tool_repeat_clean_finish_labels_hold_over_escalated_at_run_complete(self) -> None:
+        self.write_digests("111", "111", "111")
+        self.run_event("tool-repeat", "--repeats", "3", env={**self.env, "FAKE_ROUTER_CHOICE": "gather_more_evidence"})
+        self.write_digests("111", "111", "111", "222", "333")
+        self.write_state(RUN_STATUS="active", CURRENT_PHASE="review", PHASE_BUILD="done", STEPS_USED="9", LOOPS_USED="0", RUN_ID="run-1")
+        self.assertNotIn("labeled progress_assessment", self.run_event("review-handoff", "--verify-exit", "0").stdout)
+        result = self.run_event("run-complete")
+        self.assertIn("labeled progress_assessment/tool-repeat-2 over_escalated", result.stdout)
+        [outcome] = [o for o in self.outcomes() if "command" in o["evidence"]]
+        self.assertIn("did not recur", outcome["evidence"])
+
+    def test_tool_repeat_from_a_superseded_run_is_resolved_from_that_run(self) -> None:
+        self.write_digests("111", "111", "111")
+        self.run_event("tool-repeat", "--repeats", "3")
+        self.start_new_run("run-2")
+        result = self.run_event("verify-start")
+        self.assertIn("labeled progress_assessment/tool-repeat-2 unknown", result.stdout)
+        [outcome] = self.outcomes()
+        self.assertIn("ended before the phase", outcome["evidence"])
+
+    def test_superseded_run_that_finished_the_phase_labels_not_stuck(self) -> None:
+        self.write_digests("111", "111", "111")
+        self.run_event("tool-repeat", "--repeats", "3")
+        self.write_state(RUN_STATUS="active", CURRENT_PHASE="review", PHASE_BUILD="done", LOOPS_USED="0", RUN_ID="run-1")
+        self.start_new_run("run-2")
+        result = self.run_event("plan-done")
+        self.assertIn("labeled progress_assessment/tool-repeat-2 correct", result.stdout)
+
+    def test_unlabelable_pending_items_never_block_checkpoints(self) -> None:
+        self.run_event("verify-start")
+        [valid] = self.pending()
+        directory = self.db / "advice-pending"
+        # Advice records removed by operator retention, and an item without a call id.
+        (directory / "stale.json").write_text(json.dumps(dict(valid, call_id="00000000-0000-0000-0000-0000000000aa", run_id="run-0")))
+        (directory / "dead.json").write_text(json.dumps(dict(valid, call_id="00000000-0000-0000-0000-0000000000bb")))
+        (directory / "no-id.json").write_text(json.dumps({"resolver": "tool_repeat", "run_id": "run-1", "digest": "1",
+                                                         "digest_index": 1, "recommendation": "change_approach"}))
+        # Shapes that raise AttributeError (answers null) and TypeError (unhashable recommendation) mid-oracle.
+        (directory / "null-answers.json").write_text(json.dumps(dict(valid, call_id="00000000-0000-0000-0000-0000000000cc",
+                                                                    run_id="run-0", resolver="run_complete", answers=None,
+                                                                    recommendation=["x"])))
+        (directory / "list-rec.json").write_text(json.dumps({"resolver": "tool_repeat", "run_id": "run-1", "call_id": "z",
+                                                            "digest": "1", "digest_index": 1, "recommendation": ["x"]}))
+        self.write_digests("1", "1")
+        before = len(self.advice_records())
+        for event in ("plan-done", "build-start"):
+            result = self.run_event(event)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.advice_records()), before + 2)
+        self.assertFalse(any((directory / name).exists() for name in ("stale.json", "no-id.json", "null-answers.json", "list-rec.json")))
+        (directory / "verify-null.json").write_text(json.dumps(dict(valid, call_id="00000000-0000-0000-0000-0000000000dd", answers=None)))
+        result = self.run_event("verify-result", "--exit", "0")
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertFalse((directory / "verify-null.json").exists())
+        self.assertIn("could not label 00000000", result.stdout)
+        self.assertIn("labeled evidence_assessment/verify-predict-2 correct", result.stdout)
+        self.assertFalse((directory / "dead.json").exists())
+
+    def test_resolution_failure_never_suppresses_the_event_checkpoint(self) -> None:
+        self.write_digests("1", "1", "1")
+        self.run_event("tool-repeat", "--repeats", "3", env={**self.env, "FAKE_ROUTER_CHOICE": "change_approach"})
+        [valid] = self.pending()
+        directory = self.db / "advice-pending"
+        (directory / "zz-valid.json").write_text(json.dumps(valid))
+        (directory / f"{valid['call_id']}.json").unlink()
+        # Sorted before the valid item: a list, broken JSON, and malformed fields in two resolvers.
+        (directory / "a-list.json").write_text("[1, 2]")
+        (directory / "b-broken.json").write_text("{not json")
+        (directory / "c-odd.json").write_text(json.dumps({"resolver": "tool_repeat", "run_id": "run-1", "call_id": "x",
+                                                         "digest": "1", "digest_index": "nope", "loops_at": "zz"}))
+        (directory / "d-stale.json").write_text(json.dumps({"resolver": "run_complete", "run_id": "run-0", "call_id": "y",
+                                                           "loops_at": "zz", "recommendation": "proceed_to_build"}))
+        self.write_digests("1", "1", "1", "1")
+        result = self.run_event("plan-done")
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertIn("handoff_assessment/phase-plan-2 shadow recommendation", result.stdout)
+        self.assertIn("labeled progress_assessment/tool-repeat-2 correct", result.stdout)
+        self.assertNotIn("pending oracles not resolved", result.stdout)
+        # Only this plan-done oracle and the well-formed but still-waiting tool repeat remain.
+        plan_oracle = [f"{p['call_id']}.json" for p in self.pending() if p.get("question_version") == "phase-plan-2"]
+        self.assertEqual(sorted(p.name for p in directory.glob("*.json")), sorted(plan_oracle + ["c-odd.json"]))
+        self.assertNotIn("pending oracles not resolved", self.run_event("build-start").stdout)
+        self.assertEqual(MODULE.as_int("zz"), 0)
+        # pending_items tolerates a non-object file on its own, even before drop_corrupt_pending runs.
+        (directory / "e-list.json").write_text("[3]")
+        self.assertEqual([path.name for path, _ in MODULE.pending_items(self.db, "tool_repeat")], ["c-odd.json"])
+        self.assertEqual((MODULE.as_int(3), MODULE.as_int("4"), MODULE.as_int(True), MODULE.as_int(None)), (3, 4, 0, 0))
+
+    def test_malformed_integer_fields_read_as_zero_and_are_still_labeled(self) -> None:
+        self.run_event("plan-done")
+        [path] = list((self.db / "advice-pending").glob("*.json"))
+        item = json.loads(path.read_text())
+        path.write_text(json.dumps(dict(item, loops_at="zz")))
+        self.write_state(RUN_STATUS="active", CURRENT_PHASE="review", LOOPS_USED="1", RUN_ID="run-1")
+        self.assertIn("labeled handoff_assessment/phase-plan-2 under_escalated", self.run_event("run-complete").stdout)
+        # The same tolerance applies to another run's leftover item.
+        self.write_state(RUN_STATUS="active", CURRENT_PHASE="plan", LOOPS_USED="0", RUN_ID="run-1")
+        self.run_event("plan-done")
+        [path] = list((self.db / "advice-pending").glob("*.json"))
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), loops_at="zz")))
+        self.write_state(RUN_STATUS="aborted", CURRENT_PHASE="build", LOOPS_USED="1", RUN_ID="run-1")
+        self.start_new_run("run-2")
+        self.assertIn("labeled handoff_assessment/phase-plan-2 under_escalated", self.run_event("build-start").stdout)
+
+    def test_stale_oracles_are_labeled_from_their_own_run(self) -> None:
+        self.run_event("plan-done")
+        self.run_event("verify-start")
+        self.write_state(RUN_STATUS="active", CURRENT_PHASE="build", LOOPS_USED="1", RUN_ID="run-1")
+        self.start_new_run("run-2")
+        result = self.run_event("build-start")
+        self.assertIn("labeled handoff_assessment/phase-plan-2 under_escalated", result.stdout)
+        self.assertIn("labeled evidence_assessment/verify-predict-2 unknown", result.stdout)
+        # The new run's own build-start oracle is untouched by the old run.
+        self.assertEqual([p["resolver"] for p in self.pending()], ["first_verify"])
+        self.assertEqual(self.run_event("verify-result", "--exit", "0").stdout.count("labeled"), 1)
+
+    def test_stale_handoff_from_a_completed_run_uses_that_runs_loops(self) -> None:
+        for loops, expected in (("0", "correct"), ("1", "under_escalated")):
+            with self.subTest(loops=loops):
+                self.run_dir = self.db / "runs" / "run-1"
+                (self.db / "runs" / "current").write_text("run-1\n")
+                self.write_state(RUN_STATUS="active", CURRENT_PHASE="plan", LOOPS_USED="0", RUN_ID="run-1")
+                self.run_event("plan-done")
+                self.write_state(RUN_STATUS="complete", CURRENT_PHASE="review", LOOPS_USED=loops, RUN_ID="run-1")
+                self.start_new_run(f"run-{loops}-next")
+                result = self.run_event("build-start")
+                self.assertIn(f"labeled handoff_assessment/phase-plan-2 {expected}", result.stdout)
+
+    def test_other_runs_handoff_is_not_labeled_by_this_runs_loops(self) -> None:
+        self.run_event("plan-done")
+        self.start_new_run("run-2", LOOPS_USED="1")
+        result = self.run_event("run-complete")
+        self.assertIn("labeled handoff_assessment/phase-plan-2 unknown", result.stdout)
+
+    def test_tool_repeat_label_matrix(self) -> None:
+        self.assertEqual(MODULE.label_tool_repeat({"recommendation": "change_approach"}, True, "r")[0], "correct")
+        self.assertEqual(MODULE.label_tool_repeat({"recommendation": "change_approach"}, False, "r")[0], "over_escalated")
+        self.assertEqual(MODULE.label_tool_repeat({"recommendation": "retry_same_command"}, True, "r")[0], "under_escalated")
+        self.assertEqual(MODULE.label_tool_repeat({"recommendation": "retry_same_command"}, False, "r")[0], "correct")
+        self.assertEqual(MODULE.label_tool_repeat({"recommendation": "change_approach"}, None, "r")[0], "unknown")
+        self.assertEqual(MODULE.label_tool_repeat({"recommendation": None}, True, "r")[0], "unknown")
 
     def test_router_failure_records_fallback_and_never_fails_the_caller(self) -> None:
         result = self.run_event("verify-start", env={**self.env, "FAKE_ROUTER_FAIL": "1"})
         self.assertEqual(result.returncode, 0)
-        self.assertIn("evidence_assessment/verify-predict-1 fallback (ConnectionError); baseline kept", result.stdout)
+        self.assertIn("evidence_assessment/verify-predict-2 fallback (ConnectionError); baseline kept", result.stdout)
         self.assertEqual(self.pending(), [])
         self.assertEqual(self.run_event("verify-result", "--exit", "0").returncode, 0)
         self.assertEqual(self.outcomes(), [])
