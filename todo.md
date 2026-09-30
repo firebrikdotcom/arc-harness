@@ -10,9 +10,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 
 ## The pass or fail sensor gives wrong answers
 
-- [ ] 11. The required `test` category is satisfied by `sh -n`, a syntax check.
-  - Why: checking that a sentence is spelled right does not prove it is true.
-  - Fix: move `sh -n` to the lint category so `test` passes only when real tests run.
 - [ ] 30. Verification and bootstrap commands have no timeouts. (Merged #34.)
   - Why: a stuck install or test hangs the whole run forever.
   - Fix: wrap each command in a timeout with a clear failure message.

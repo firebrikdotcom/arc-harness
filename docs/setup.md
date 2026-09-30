@@ -452,7 +452,7 @@ The hook is enforcement for Claude Code only. Other agents still rely on the wri
 sh tests/harness-hook.sh
 ```
 
-`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
+`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`, each without an inherited `HARNESS_REQUIRED_CHECKS` so its fixtures keep their own requirements while the override still applies to the harness itself. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
 
 Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
 
@@ -463,7 +463,7 @@ Detection order:
 - PHP projects use Composer scripts such as `lint`, `analyse`/`analyze`, `phpstan`, `psalm`, `test`, and `build`.
 - Go projects use `gofmt`, `go vet`, `go test`, and `go build`.
 - Rust projects use `cargo fmt --check`, `cargo clippy`, `cargo check`, `cargo test`, and `cargo build`.
-- Bash/shell files use `sh -n`; `shellcheck` runs when available.
+- Bash/shell files use `sh -n`; `shellcheck` runs when available. Both are lint checks: a syntax check proves a script parses, not that it works, so shell files alone never satisfy a required `test` category. `sh -n` runs even when a `make lint` target exists; that target replaces only the other lint detectors, ShellCheck included.
 
 Manual command placeholders:
 

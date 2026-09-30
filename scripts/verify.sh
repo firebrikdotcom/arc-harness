@@ -200,8 +200,10 @@ run_harness_tests() {
   status=0
   for test_file in tests/*.sh; do
     info "--> $test_file"
-    # Nested harness runs inside tests must not emit real Jev checkpoints.
-    if ! HARNESS_JEV_CHECKPOINTS=0 sh "$test_file"; then
+    # Nested harness runs inside tests must not emit real Jev checkpoints, and
+    # each fixture declares its own required checks: the outer override applies
+    # to this target (already read into REQUIRED_CHECKS), not to the fixtures.
+    if ! (unset HARNESS_REQUIRED_CHECKS; HARNESS_JEV_CHECKPOINTS=0 sh "$test_file"); then
       status=1
     fi
   done
@@ -303,6 +305,12 @@ verify_format() {
 }
 
 verify_lint() {
+  # A syntax check is lint: it proves a script parses, not that it works. It
+  # runs before the Make short-circuit so a `make lint` target cannot drop it.
+  if has_shell_files; then
+    run_check "bash:syntax" find . \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec sh -n {} +
+  fi
+
   if run_make_or_skip lint; then
     return
   fi
@@ -444,11 +452,6 @@ verify_test() {
 
   if [ -x scripts/harness ] && ls tests/*.sh >/dev/null 2>&1; then
     run_check "harness:tests" run_harness_tests
-    ran_any=1
-  fi
-
-  if has_shell_files; then
-    run_check "bash:syntax" find . \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec sh -n {} +
     ran_any=1
   fi
 
