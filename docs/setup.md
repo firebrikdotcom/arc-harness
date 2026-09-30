@@ -167,6 +167,16 @@ sh tests/permit.sh
 
 `scripts/action.sh validate` runs this check after schema validation. The phase guard hook runs it on every real Write, Edit, and Bash call, so the check and the action are the same event.
 
+For an authorized rebase of a task branch, the default permits
+`git push --force-with-lease=<ref>:<expected-commit> origin <branch>` when the expected
+commit is a full 40- or 64-character hexadecimal object ID. Capture the remote branch
+head before the rebase; if it changes, Git rejects the push instead of overwriting
+someone else's work. Plain `--force`, `-f`, forced refspecs, and leases without an
+explicit expected commit remain denied, including when combined with a valid lease.
+This permission does not authorize rewriting shared or long-lived branches; those
+still require explicit user authorization. Harness policy maintenance itself remains
+protected and requires an explicit user request to change that policy.
+
 ## Knowledge Trust
 
 A `knowledge/` folder inside a project can carry instructions and hooks, so nothing in it is followed until a human approves its exact content once per machine. `scripts/knowledge-trust.sh check` exits `1` while the folder is unapproved or changed since approval; the phase guard hook blocks every tool call in that state. Approval is human-only: the hook refuses `approve` from the agent.

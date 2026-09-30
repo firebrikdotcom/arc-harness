@@ -58,6 +58,34 @@ allow_cmd 'npm test'
 allow_cmd 'sh tests/harness-hook.sh'
 allow_cmd 'echo sum'
 
+# Explicit leases may update an authorized rebased task branch. Test both regex
+# runtimes and ensure a lease never masks an additional unconditional force.
+check_push_policy() {
+  push_sha=0123456789012345678901234567890123456789
+  push_ref=refs/heads/fix/example
+  allow_cmd "git push --force-with-lease=$push_ref:$push_sha origin HEAD:$push_ref"
+  allow_cmd "git push origin HEAD --force-with-lease=$push_ref:$push_sha"
+  allow_cmd "git push --force-with-lease=$push_ref:${push_sha}012345678901234567890123 origin HEAD"
+  deny_cmd 'git push --force-with-lease origin HEAD'
+  deny_cmd "git push --force-with-lease=$push_ref: origin HEAD"
+  deny_cmd "git push --force-with-lease=$push_ref:01234567 origin HEAD"
+  deny_cmd "git push --force-with-lease=$push_ref:${push_sha}0 origin HEAD"
+  deny_cmd "git push --force-with-lease=$push_ref:${push_sha}x origin HEAD"
+  deny_cmd "git push --force-with-lease=$push_ref:$push_sha --force origin HEAD"
+  deny_cmd "git push --force --force-with-lease=$push_ref:$push_sha origin HEAD"
+  deny_cmd "git push --force-with-lease=$push_ref:$push_sha -f origin HEAD"
+  deny_cmd "git push --force-with-lease=$push_ref:$push_sha origin +HEAD:$push_ref"
+  deny_cmd 'git push --force-if-includes origin HEAD'
+}
+check_push_policy
+if command -v node >/dev/null 2>&1; then
+  mkdir -p "$TMP_ROOT/node-bin"
+  for push_tool in node sh dirname; do
+    ln -s "$(command -v "$push_tool")" "$TMP_ROOT/node-bin/$push_tool"
+  done
+  (PATH="$TMP_ROOT/node-bin" check_push_policy)
+fi
+
 deny_path '.git/hooks/pre-commit'
 deny_path "$HARNESS_ROOT_UNDER_TEST/.git/config"
 deny_path '.env'
