@@ -350,7 +350,7 @@ mod tests {
                 "model_returned": "jev-1.13.0",
                 "baseline_action": baseline,
                 "recommendation": recommendation,
-                "recommendation_confidence": 0.8,
+                "recommendation_confidence": 0.3299999999999996,
                 "jev_latency_ms": 210,
                 "jev_input_tokens": 500,
                 "jev_output_tokens": 60
@@ -460,6 +460,8 @@ mod tests {
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
         assert!(html.contains("Harness audit"));
+        assert!(html.contains(">0.33<"), "median confidence is rounded for display");
+        assert!(!html.contains("0.3299999"));
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly
