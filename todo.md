@@ -43,9 +43,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 - [ ] 13. `progress.md` holds many goals and months of history instead of the current run. (Merged #44, #45, #46, #49, #52.)
   - Why: reading a whole diary to find today's page wastes time and mixes things up.
   - Fix: keep `progress.md` to the current run's goal, plan, and decisions; archive finished runs under `.harness-db/runs/<id>/`.
-- [ ] 15. Two sessions in one checkout share `.harness-db/runs/current` with no lock. (Merged #47.)
-  - Why: two people writing on the same sticky note at once make a mess.
-  - Fix: use a per-session run id from an environment variable, or a lock file around state writes.
 - [ ] 17. Mandatory reading is six or more files that duplicate each other and mostly say "unknown". (Merged #18, #50, #51.)
   - Why: a huge, repeated instruction pile makes the AI skim, and copies drift apart.
   - Fix: one short core guide; `README.md`, `CLAUDE.md`, and `AGENTS.md` point to it, and other docs open only when a task needs them.

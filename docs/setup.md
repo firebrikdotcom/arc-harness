@@ -50,7 +50,7 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
 
-Once registered, `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the Jev hooks resolve the target from the current directory or `--project` and use its private database at `targets/<id>/db/`: runs, `runs/current`, gate records, routes, advice, and pending oracles are per target, so parallel worktrees never share one active run. `scripts/harness-target.sh list` shows the registered targets. Manual `scripts/init.sh --project PATH` registers the target as well.
+Once registered, `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the Jev hooks resolve the target from the current directory or `--project` and use its private database at `targets/<id>/db/`: runs, `runs/current`, gate records, routes, advice, and pending oracles are per target, so parallel worktrees never share one active run. Sessions in the same checkout do share it; the run-state lock (see [Harness CLI](#harness-cli)) serializes their commands, and a separate worktree is the way to give a session its own run. `scripts/harness-target.sh list` shows the registered targets. Manual `scripts/init.sh --project PATH` registers the target as well.
 
 Detected bootstrap inputs:
 
@@ -75,6 +75,7 @@ Optional harness variables:
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
 - `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
 - `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
+- `HARNESS_LOCK_TIMEOUT`: seconds a state-changing `scripts/harness` command waits for the run-state lock before failing with exit `2`; a non-negative integer, default `30`, `0` to fail at once when another command holds it.
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
 - `HARNESS_TYPESAFE_ACTIVE`: set to `1` only after the active-routing outcome gate is satisfied and reviewed.
@@ -393,6 +394,10 @@ Run state lives under `.harness-db/runs/<run-id>/` in the harness root and is ig
 - `pauses/NNN.json`: one record per budget pause, including the evaluation note once resolved.
 - `log`: append-only record of the commands the run accepted.
 - `abort.note`: the reason given to `harness abort`, when the run was aborted.
+
+`runs/current` names the active run, and every session in the checkout shares it: two sessions, or the parallel tool calls whose steps the phase guard counts, change the same run. Each state-changing command (`plan`, `build`, and `review` start or done, `step`, `continue`, `abort`) therefore holds `runs/.lock` from reading the run to its last write (including the bounded Jev checkpoint a phase command may emit, whose facts read that run), so no update is lost and two `plan start` calls cannot each open a run; the second is refused because plan is already started. `status` does not take the lock; the pointer, `state`, and JSON snapshots are replaced by rename, so it never reads a half-written file.
+
+The lock is a symlink whose target names its owner, `pid:N`. A command waits for it up to `HARNESS_LOCK_TIMEOUT` seconds (default `30`) and then exits `2`, naming the lock and its holder and leaving the run unchanged; the phase guard then blocks that tool call with the message. A lock whose owner is no longer running, left by a crash, is cleared automatically by the next waiter; waiters take turns through the short-lived `runs/.lock.break` guard, so a lock that has already passed to another process is not removed. A lock whose target is not `pid:N` was not written by the harness and is never removed automatically. If the timeout message names a holder that is not a harness command (for example a reused pid), a person can delete `runs/.lock` once no harness command is running.
 
 Gate records live under `.harness-db/records/` (or `targets/<id>/db/records/` for a registered target):
 
