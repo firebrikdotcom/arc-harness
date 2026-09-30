@@ -30,12 +30,12 @@ Planning output must include:
 - Goal and non-goals.
 - Relevant files and docs read.
 - Harness root and target project root.
-- Acceptance criteria.
+- Acceptance criteria, written as a list under `## Acceptance Criteria` in the task file (from `tasks/task-template.md`; for cross-project work, under `.harness-db/`).
 - Implementation plan.
 - Verification plan.
 - Known risks or unknowns.
 
-Record the plan in `progress.md` before building.
+Start the run with `scripts/harness plan start --task PATH` so review can find the task. Record the plan in `progress.md` before building.
 
 ## Build Behavior
 
@@ -60,9 +60,11 @@ Run:
 scripts/review.sh
 ```
 
+The review prints each acceptance criterion of the task recorded by `plan start --task`; `--task PATH` or `HARNESS_TASK` names a different one. Answer every criterion as met, not met, or not applicable, with evidence.
+
 Review must consider:
 
-- Does the change satisfy acceptance criteria?
+- Does the change satisfy each acceptance criterion?
 - Are tests meaningful?
 - Did the work avoid scope creep?
 - Are docs and `progress.md` updated?
@@ -96,13 +98,15 @@ A task is complete only when:
 Every session runs inside a harness phase. Open one before editing files or running commands. Where the phase guard hook is installed, Write, Edit, and Bash are blocked until a phase is active.
 
 ```sh
-scripts/harness plan start      # read, scope the task, record the plan in progress.md
+scripts/harness plan start --task TASK.md  # read, scope the task, record the plan in progress.md
 scripts/harness plan done
 scripts/harness build start     # implement; run scripts/verify.sh before finishing
 scripts/harness build done
-scripts/harness review start    # run scripts/review.sh and inspect the diff
+scripts/harness review start    # run scripts/review.sh, answer each acceptance criterion it prints, inspect the diff
 scripts/harness review done
 ```
+
+Write `TASK.md` from `tasks/task-template.md` with its criteria as a list under `## Acceptance Criteria`, and keep it in the ignored `.harness-db/tasks/`. `plan start --task` records it for the run, and `scripts/review.sh` prints each criterion for the reviewer to answer.
 
 Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
 

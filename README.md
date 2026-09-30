@@ -34,8 +34,8 @@ These files explain how agents and humans should work in this repo.
 ## Daily Workflow
 
 ```sh
-scripts/harness plan start
-# plan the work
+scripts/harness plan start --task tasks/my-task.md
+# plan the work; list the acceptance criteria under "## Acceptance Criteria" in the task file
 scripts/harness plan done
 
 scripts/harness build start
@@ -43,7 +43,7 @@ scripts/harness build start
 scripts/harness build done
 
 scripts/harness review start
-# review; run scripts/review.sh
+# review; run scripts/review.sh and answer each acceptance criterion it prints
 scripts/harness review done
 ```
 
@@ -145,7 +145,7 @@ The script detects common project tooling:
 
 It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
 
-Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
+Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), prints each acceptance criterion of the active task (recorded by `harness plan start --task PATH`, or named by `--task PATH` or `HARNESS_TASK`) for the reviewer to answer, and writes `.harness-db/records/review.state` even when verification fails.
 
 ## Agent Entry Points
 

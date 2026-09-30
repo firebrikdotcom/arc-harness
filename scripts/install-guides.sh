@@ -52,14 +52,24 @@ PROJECT_ROOT=$(CDPATH='' cd "$PROJECT_ROOT" && pwd -P)
 
 # Inside the harness root a relative command is convenient. External projects
 # use the absolute CLI path, which now resolves its root from its own location.
+# The task template and the task database follow the same rule: an external
+# project has neither, so its block names the harness's own.
 if [ "$PROJECT_ROOT" = "$HARNESS_ROOT" ]; then
   CLI="scripts/harness"
+  REVIEW="scripts/review.sh"
   JG="scripts/jg.sh"
   DOCS="docs"
+  TEMPLATE="tasks/task-template.md"
+  TASKS_DB=".harness-db/tasks/"
+  TASKS_DB_NOTE="the ignored"
 else
   CLI="$HARNESS_ROOT/scripts/harness"
+  REVIEW="$HARNESS_ROOT/scripts/review.sh"
   JG="$HARNESS_ROOT/scripts/jg.sh"
   DOCS="$HARNESS_ROOT/docs"
+  TEMPLATE="$HARNESS_ROOT/tasks/task-template.md"
+  TASKS_DB="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}/tasks/"
+  TASKS_DB_NOTE="the harness database, outside this project, at"
 fi
 
 block_file="$PROJECT_ROOT/.harness-guide-block.tmp.$$"
@@ -71,13 +81,15 @@ $START_MARK
 Every session runs inside a harness phase. Open one before editing files or running commands. Where the phase guard hook is installed, Write, Edit, and Bash are blocked until a phase is active.
 
 \`\`\`sh
-$CLI plan start      # read, scope the task, record the plan in progress.md
+$CLI plan start --task TASK.md  # read, scope the task, record the plan in progress.md
 $CLI plan done
 $CLI build start     # implement; run scripts/verify.sh before finishing
 $CLI build done
-$CLI review start    # run scripts/review.sh and inspect the diff
+$CLI review start    # run $REVIEW, answer each acceptance criterion it prints, inspect the diff
 $CLI review done
 \`\`\`
+
+Write \`TASK.md\` from \`$TEMPLATE\` with its criteria as a list under \`## Acceptance Criteria\`, and keep it in $TASKS_DB_NOTE \`$TASKS_DB\`. \`plan start --task\` records it for the run, and \`$REVIEW\` prints each criterion for the reviewer to answer.
 
 Record work with \`$CLI step --note "..."\`. When blocked, run \`$CLI status\`. After a budget pause, evaluate and run \`$CLI continue "<evaluation note>"\`.
 

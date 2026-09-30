@@ -5,15 +5,19 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}"
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
+TASK_FILE="${HARNESS_TASK:-}"
 
 info() {
   printf '%s\n' "$*"
 }
 
 usage() {
-  info "Usage: scripts/review.sh [--project PATH]"
+  info "Usage: scripts/review.sh [--project PATH] [--task PATH]"
   info ""
   info "Runs project verification and prints target/harness diff summaries."
+  info "--task (or HARNESS_TASK) names the active task file; without either, the task"
+  info "recorded by 'harness plan start --task PATH' for the current run is used. Each"
+  info "item under its Acceptance Criteria heading is printed for the reviewer to answer."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -24,6 +28,14 @@ while [ "$#" -gt 0 ]; do
         exit 2
       fi
       PROJECT_ROOT="$2"
+      shift 2
+      ;;
+    --task)
+      if [ "$#" -lt 2 ]; then
+        info "FAIL: --task requires a path."
+        exit 2
+      fi
+      TASK_FILE="$2"
       shift 2
       ;;
     --help|-h)
@@ -52,6 +64,28 @@ if [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
   if [ -n "$target_db" ]; then
     HARNESS_DB_ROOT=$target_db
   fi
+fi
+
+# Without --task or HARNESS_TASK, the active task is the one the current run
+# recorded with `harness plan start --task PATH`.
+TASK_SOURCE="named"
+if [ -z "$TASK_FILE" ]; then
+  run_id=$(head -n 1 "$HARNESS_DB_ROOT/runs/current" 2>/dev/null || :)
+  if [ -n "$run_id" ] && [ -f "$HARNESS_DB_ROOT/runs/$run_id/state" ]; then
+    TASK_FILE=$(sed -n 's/^TASK_FILE=//p' "$HARNESS_DB_ROOT/runs/$run_id/state" | tail -n 1)
+    TASK_SOURCE="run $run_id"
+  fi
+fi
+
+# A named or recorded task that cannot be read is a mistake, not a task
+# without criteria.
+if [ -n "$TASK_FILE" ] && { [ ! -f "$TASK_FILE" ] || [ ! -r "$TASK_FILE" ]; }; then
+  if [ "$TASK_SOURCE" = "named" ]; then
+    info "FAIL: task file does not exist or is not readable: $TASK_FILE"
+  else
+    info "FAIL: the task file recorded by $TASK_SOURCE does not exist or is not readable: $TASK_FILE"
+  fi
+  exit 2
 fi
 
 info "Review started"
@@ -111,9 +145,83 @@ if [ "$PROJECT_ROOT" != "$HARNESS_ROOT" ]; then
   show_patch "$HARNESS_ROOT" "harness"
 fi
 
+# acceptance_criteria FILE  Prints each list item under the first "Acceptance
+# Criteria" heading as "AC<n>. text": checkbox markers are stripped, wrapped
+# lines are joined, fenced code is skipped, and the section ends at the next
+# heading of the same or a higher level. Control characters are dropped and a
+# carriage return becomes a space, so a task file cannot drive the terminal. Exits 1 without the heading, 3 when the
+# heading has no items.
+acceptance_criteria() {
+  tr -d '\000-\010\013\014\016-\037\177' < "$1" | awk '
+    function flush() {
+      if (cur != "") { n++; printf "AC%d. %s\n", n, cur }
+      cur = ""
+    }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      gsub(/\r/, " ", line)
+      if (line ~ /^[ \t]*(```|~~~)/) { fence = !fence; if (in_sec) flush(); next }
+      if (fence) next
+      if (line ~ /^#+[ \t]/) {
+        hashes = line; sub(/[ \t].*$/, "", hashes)
+        title = line; sub(/^#+[ \t]+/, "", title); sub(/[ \t#:]*$/, "", title)
+        if (in_sec) {
+          flush()
+          if (length(hashes) <= level) { in_sec = 0; done = 1 }
+        } else if (!done && tolower(title) == "acceptance criteria") {
+          in_sec = 1; found = 1; level = length(hashes)
+        }
+        next
+      }
+      if (!in_sec) next
+      if (line ~ /^[ \t]*([-*+]|[0-9]+[.)])[ \t]+/) {
+        flush()
+        sub(/^[ \t]*([-*+]|[0-9]+[.)])[ \t]+/, "", line)
+        sub(/^\[[ xX]\]([ \t]+|$)/, "", line)
+        cur = line
+        next
+      }
+      if (line ~ /^[ \t]*$/) { flush(); next }
+      if (cur != "") { sub(/^[ \t]+/, "", line); cur = cur " " line }
+    }
+    END {
+      flush()
+      if (!found) exit 1
+      if (n == 0) exit 3
+    }
+  '
+}
+
+info ""
+if [ -n "$TASK_FILE" ]; then
+  criteria_status=0
+  criteria=$(acceptance_criteria "$TASK_FILE") || criteria_status=$?
+  case "$criteria_status" in
+    0)
+      if [ "$TASK_SOURCE" = "named" ]; then
+        info "Acceptance criteria from $TASK_FILE:"
+      else
+        info "Acceptance criteria from $TASK_FILE ($TASK_SOURCE task):"
+      fi
+      printf '%s\n' "$criteria"
+      info "Answer each criterion: met, not met, or not applicable, with the evidence (command and result, test, or file:line)."
+      ;;
+    1) info "WARN: $TASK_FILE has no Acceptance Criteria heading; answer question 1 against the task's goal." ;;
+    3) info "WARN: the Acceptance Criteria section of $TASK_FILE lists no items; answer question 1 against the task's goal." ;;
+    *) info "WARN: could not read acceptance criteria from $TASK_FILE (exit $criteria_status)." ;;
+  esac
+else
+  info "Acceptance criteria: no active task file. Start the run with 'harness plan start --task PATH', or pass --task PATH or set HARNESS_TASK, to print its criteria."
+fi
+
 info ""
 info "Review questions:"
-info "1. Does it satisfy acceptance criteria?"
+if [ -n "$TASK_FILE" ] && [ "$criteria_status" -eq 0 ]; then
+  info "1. Does it satisfy every acceptance criterion listed above?"
+else
+  info "1. Does it satisfy acceptance criteria?"
+fi
 info "2. Are tests meaningful?"
 info "3. Did we avoid scope creep?"
 info "4. Are docs/progress updated?"

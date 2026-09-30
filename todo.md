@@ -31,9 +31,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 
 ## Review does not really review
 
-- [ ] 42. Review output is not tied to the task's acceptance criteria.
-  - Why: a review that never looks at the goal cannot say whether the goal was met.
-  - Fix: read the active task's acceptance criteria and print each one for the reviewer to answer.
 - [ ] 16. The same AI with the same memory marks plan, build, and review done.
   - Why: checking your own homework does not catch what you did not see.
   - Fix: run review in a fresh session or subagent that only gets the diff and the acceptance criteria.

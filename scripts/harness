@@ -43,7 +43,9 @@ usage() {
   info "Usage: harness COMMAND [ARGS]"
   info ""
   info "Commands:"
-  info "  plan start|done      Open or close the planning phase."
+  info "  plan start [--task PATH]|done"
+  info "                       Open or close the planning phase. --task records the run's"
+  info "                       task file; scripts/review.sh prints its acceptance criteria."
   info "  build start|done     Open or close the build phase (needs plan done)."
   info "  review start|done    Open or close the review phase (needs build done)."
   info "  step [--note TEXT] [--tokens N]"
@@ -441,7 +443,8 @@ write_run_json() {
     tokens_cap "$(typed_number "$(effective_cap TOKENS)")" \
     continues_used "n:$(state_get CONTINUES_USED 0)" \
     continues_cap "n:$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")" \
-    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")"
+    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")" \
+    task_file "s:$(state_get TASK_FILE)"
 }
 
 pause_run() {
@@ -594,6 +597,26 @@ previous_phase() {
   esac
 }
 
+# resolve_task_file PATH  Prints the absolute path of a readable task file, or
+# explains why it cannot be the run's task and fails.
+resolve_task_file() {
+  # Run state is one KEY=VALUE line written through awk -v, which would split a
+  # newline and rewrite backslash escapes.
+  case "$1" in
+    *'
+'*|*\\*)
+      info "FAIL: task path must not contain a newline or a backslash." >&2
+      return 1
+      ;;
+  esac
+  if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+    info "FAIL: task file does not exist or is not readable: $1" >&2
+    return 1
+  fi
+  _task_dir=$(CDPATH='' cd "$(dirname "$1")" && pwd -P) || return 1
+  printf '%s/%s\n' "$_task_dir" "$(basename "$1")"
+}
+
 cmd_phase_start() {
   _phase=$1
 
@@ -643,6 +666,9 @@ cmd_phase_start() {
   state_set "$(phase_key "$_phase")" active
   state_set CURRENT_PHASE "$_phase"
   state_set RUN_STATUS active
+  if [ -n "${TASK_ARG:-}" ]; then
+    state_set TASK_FILE "$TASK_ARG"
+  fi
   case "$_phase" in
     build) state_set PHASE_BUILD_STARTED_EPOCH "$(now_epoch)" ;;
     review) state_set PHASE_REVIEW_STARTED_EPOCH "$(now_epoch)" ;;
@@ -883,6 +909,7 @@ cmd_status() {
   info "Run:          $(state_get RUN_ID) ($(state_get RUN_STATUS))"
   info "Run state:    $RUN_DIR"
   info "Phase:        $(state_get CURRENT_PHASE)"
+  info "Task:         $(state_get TASK_FILE "none (harness plan start --task PATH records one)")"
   info "  plan   $(phase_status plan)"
   info "  build  $(phase_status build)"
   info "  review $(phase_status review)"
@@ -927,6 +954,15 @@ case "$COMMAND" in
     fi
     ACTION=$1
     shift
+    TASK_ARG=""
+    if [ "$COMMAND $ACTION" = "plan start" ] && [ "${1:-}" = "--task" ]; then
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        info "FAIL: --task requires a path."
+        exit "$EXIT_USAGE"
+      fi
+      TASK_ARG=$(resolve_task_file "$2") || exit "$EXIT_USAGE"
+      shift 2
+    fi
     if [ "$#" -gt 0 ]; then
       info "FAIL: unknown argument: $1"
       exit "$EXIT_USAGE"

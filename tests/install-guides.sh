@@ -8,6 +8,8 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-guides.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 PROJECT="$TMP_ROOT/project"
 mkdir -p "$PROJECT"
+# External blocks name the harness database; start from its default location.
+unset HARNESS_DB_ROOT
 
 fail() {
   printf '%s\n' "FAIL: $*"
@@ -25,7 +27,9 @@ printf '%s\n' '# Agent Guide' '' 'Keep this line.' > "$PROJECT/AGENTS.md"
 grep -q 'Keep this line.' "$PROJECT/AGENTS.md" || fail "existing AGENTS.md content was lost"
 [ "$(count_markers "$PROJECT/AGENTS.md")" -eq 1 ] || fail "AGENTS.md should hold exactly one block"
 [ "$(count_markers "$PROJECT/CLAUDE.md")" -eq 1 ] || fail "CLAUDE.md should hold exactly one block"
-grep -q 'plan start' "$PROJECT/AGENTS.md" || fail "block missing the plan command"
+grep -q 'plan start --task TASK.md' "$PROJECT/AGENTS.md" || fail "block missing the plan command with its task"
+# shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
+grep -q 'criteria as a list under `## Acceptance Criteria`' "$PROJECT/AGENTS.md" || fail "block must say where the task's criteria go"
 grep -q 'launch --state TASK.json' "$PROJECT/AGENTS.md" || fail "block missing the task-entry launch command"
 
 grep -q 'advise --context CHECKPOINT.json' "$PROJECT/AGENTS.md" || fail "checkpoint command missing"
@@ -67,6 +71,8 @@ grep -q "^$HARNESS_ROOT_UNDER_TEST/scripts/harness plan start" "$PROJECT/AGENTS.
   || fail "external project block should point at the harness CLI"
 # The harness root's own guides carry the current block with repository-relative links.
 for guide in AGENTS.md CLAUDE.md; do
+  grep -qF "plan start --task TASK.md" "$HARNESS_ROOT_UNDER_TEST/$guide" \
+    || fail "$guide block is stale; rerun scripts/install-guides.sh --project ."
   grep -qF "Formats: docs/jev-checkpoints.md." "$HARNESS_ROOT_UNDER_TEST/$guide" \
     || fail "$guide block is stale or uses a machine-specific docs path; rerun scripts/install-guides.sh --project ."
 done
@@ -75,6 +81,34 @@ grep -qF "Formats: $HARNESS_ROOT_UNDER_TEST/docs/jev-checkpoints.md." "$PROJECT/
 if grep -q 'HARNESS_ROOT=' "$PROJECT/AGENTS.md"; then
   fail "external project block should not repeat HARNESS_ROOT"
 fi
+
+# The task step names files that exist from the external project: the harness's
+# own template and task database, never paths relative to the project.
+for guide in AGENTS.md CLAUDE.md; do
+  grep -qF "Write \`TASK.md\` from \`$HARNESS_ROOT_UNDER_TEST/tasks/task-template.md\`" "$PROJECT/$guide" \
+    || fail "external $guide block should name the harness task template by absolute path"
+  grep -qF "outside this project, at \`$HARNESS_ROOT_UNDER_TEST/.harness-db/tasks/\`" "$PROJECT/$guide" \
+    || fail "external $guide block should name the harness task database by absolute path"
+  grep -qF "run $HARNESS_ROOT_UNDER_TEST/scripts/review.sh, answer each acceptance criterion" "$PROJECT/$guide" \
+    || fail "external $guide block should name the review script by absolute path"
+  # shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
+  if grep -qF -e '`tasks/task-template.md`' -e '`.harness-db/' "$PROJECT/$guide"; then
+    fail "external $guide block must not name project-relative task paths"
+  fi
+done
+[ -f "$HARNESS_ROOT_UNDER_TEST/tasks/task-template.md" ] || fail "the named task template does not exist"
+[ ! -e "$PROJECT/tasks" ] || fail "install-guides must not create a tasks directory in the project"
+# A custom harness database is the one named.
+mkdir -p "$TMP_ROOT/project-db"
+HARNESS_DB_ROOT="$TMP_ROOT/custom-db" "$INSTALL" --project "$TMP_ROOT/project-db" >/dev/null
+grep -qF "outside this project, at \`$TMP_ROOT/custom-db/tasks/\`" "$TMP_ROOT/project-db/AGENTS.md" \
+  || fail "external block should name HARNESS_DB_ROOT when it is set"
+# Inside the harness root the same step stays repository-relative.
+for guide in AGENTS.md CLAUDE.md; do
+  # shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
+  grep -qF 'Write `TASK.md` from `tasks/task-template.md` with its criteria as a list under `## Acceptance Criteria`, and keep it in the ignored `.harness-db/tasks/`.' "$HARNESS_ROOT_UNDER_TEST/$guide" \
+    || fail "harness root $guide block should keep the relative task paths; rerun scripts/install-guides.sh --project ."
+done
 
 # Second run changes nothing.
 cp "$PROJECT/AGENTS.md" "$TMP_ROOT/agents.before"

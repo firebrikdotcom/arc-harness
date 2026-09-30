@@ -67,6 +67,7 @@ No required environment variables are currently known.
 Optional harness variables:
 
 - `HARNESS_TARGET_ROOT`: target project directory for `scripts/init.sh`, `scripts/verify.sh`, and `scripts/review.sh` when `--project` is not passed.
+- `HARNESS_TASK`: task file for `scripts/review.sh` when `--task` is not passed; it takes precedence over the task recorded by `harness plan start --task`, and its acceptance criteria are printed for the reviewer. Optional, e.g. `.harness-db/tasks/fix-login.md`; safe locally.
 - `HARNESS_INIT_YES`: set to `1` to let `scripts/init.sh` run its previewed project-owned setup commands non-interactively.
 - `HARNESS_AUTO_INIT`: set to `0` to make the `SessionStart` auto-init hook exit without registering or bootstrapping; default on.
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
@@ -138,6 +139,15 @@ scripts/review.sh --project /path/to/project
 
 The review script runs verification in the target project root, then prints the full patch: status, staged diff, unstaged diff, and every untracked file as a new-file diff, for the target and separately for the harness when they differ. It keeps going when verification fails, so the reviewer still sees the change, and exits with the verification status. Its record carries `VERIFY_EXIT`, and `scripts/harness review done` accepts it only when that is `0`.
 
+The review is tied to the goal through the active task file. Start the run with it, and the review finds it without further arguments:
+
+```sh
+scripts/harness plan start --task /path/to/task.md
+scripts/review.sh --project /path/to/project
+```
+
+`plan start --task` records the task's absolute path as `TASK_FILE` in the run state (`harness status` and `run.json` show it). `scripts/review.sh --task PATH` or `HARNESS_TASK=PATH` names a task explicitly, in that order of precedence over the current run's task. The review prints every list item under the task's first `Acceptance Criteria` heading (any level, as in `tasks/task-template.md`) as `AC1.`, `AC2.`, … before the review questions, and asks the reviewer to answer each one as met, not met, or not applicable with evidence. Checkbox markers are stripped, wrapped lines are joined, fenced code is skipped, and the section ends at the next heading of the same or a higher level. A named or recorded file that does not exist or cannot be read fails with exit `2` before verification runs; a task without the heading or without items prints a `WARN` and the review continues. Without a task, the review says how to supply one. The task file is printed as data, with control characters removed and carriage returns turned into spaces; it is never executed.
+
 To validate a proposed action JSON file:
 
 ```sh
@@ -184,7 +194,7 @@ sh tests/knowledge-trust.sh
 It finds the harness root by walking up from the current directory for a directory containing `AGENTS.md` and `scripts/verify.sh`. Set `HARNESS_ROOT` to skip discovery.
 
 ```sh
-scripts/harness plan start
+scripts/harness plan start --task tasks/my-task.md
 scripts/harness plan done
 scripts/harness build start
 scripts/harness step --note "edit scripts/verify.sh"
@@ -428,7 +438,7 @@ It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to
 
 ## Agent Guide Block
 
-The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. Its Jev paragraph names three concrete points to ask Jev (grep versus retrieval in an unfamiliar target, a review finding's severity, a handoff with unresolved failures), each with an exact flag-form `harness advise --family ...` command; `tests/install-guides.sh` runs those commands against the offline fake router. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
+The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. Its Jev paragraph names three concrete points to ask Jev (grep versus retrieval in an unfamiliar target, a review finding's severity, a handoff with unresolved failures), each with an exact flag-form `harness advise --family ...` command; `tests/install-guides.sh` runs those commands against the offline fake router. Its task step names `tasks/task-template.md` and the ignored `.harness-db/tasks/` inside the harness root, and the harness's own template and task database (`HARNESS_DB_ROOT`, default `.harness-db/` under the harness root) by absolute path for an external project, which has neither. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
 
 ```sh
 make install-guides

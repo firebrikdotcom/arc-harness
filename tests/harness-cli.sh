@@ -364,4 +364,43 @@ expect_output "unknown plan action: finish"
 run 2 bogus
 expect_output "unknown command: bogus"
 
+# --- task file --------------------------------------------------------------
+
+# plan start --task records the absolute path of the run's task for review.sh.
+new_case
+printf '%s\n' '## Acceptance Criteria' '- Works.' > "$WORKDIR/task.md"
+run 0 status
+expect_output "Run:          none"
+run 0 plan start --task task.md
+grep -q "^TASK_FILE=$WORKDIR/task.md\$" "$(state_dir)/state" || fail "plan start --task should record the absolute task path"
+run 0 status
+expect_output "^Task:         $WORKDIR/task.md\$"
+run 0 status --json
+expect_output "\"task_file\": \"$WORKDIR/task.md\""
+
+# Without --task the status says how to record one, and the run keeps no task.
+new_case
+run 0 plan start
+run 0 status
+expect_output '^Task:         none (harness plan start --task PATH records one)$'
+if grep -q '^TASK_FILE=' "$(state_dir)/state"; then fail "a run started without --task should record no task"; fi
+
+# A task that cannot be read, a bare --task, and --task on another phase are usage errors.
+new_case
+run 2 plan start --task missing.md
+expect_output 'FAIL: task file does not exist or is not readable: missing.md'
+[ ! -f "$HARNESS_DB_ROOT/runs/current" ] || fail "an unreadable task must not create a run"
+run 2 plan start --task
+expect_output 'FAIL: --task requires a path\.'
+run 2 plan start --task "$WORKDIR"
+expect_output 'FAIL: task file does not exist or is not readable'
+mkdir -p "$WORKDIR/back\\slash"
+printf '%s\n' '- x' > "$WORKDIR/back\\slash/task.md"
+run 2 plan start --task "back\\slash/task.md"
+expect_output 'FAIL: task path must not contain a newline or a backslash\.'
+run 0 plan start
+run 0 plan "done"
+run 2 build start --task task.md
+expect_output 'FAIL: unknown argument: --task'
+
 printf '%s\n' 'PASS: harness CLI phase order, budgets, pause, continue cap, abort, and gates'
