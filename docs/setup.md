@@ -287,6 +287,7 @@ scripts/audit-service.sh install     # systemd user service or macOS launchd
 curl http://127.0.0.1:18080/health
 curl http://127.0.0.1:18080/api/audit/summary
 curl http://127.0.0.1:18080/api/audit/summary/checkpoints   # per family/version/model; add ?include_fixtures=true to keep test fixtures
+open http://127.0.0.1:18080/                                # browser workbench (Arc UI host): totals, families, routes, recent events; /events for the log
 ```
 
 Each machine keeps its own SQLite database; to pool telemetry, point another host's `HARNESS_AUDIT_URL` at one service over the tailnet. See `services/harness-audit/README.md`.
