@@ -2,12 +2,6 @@
 
 Items are numbered so they can be referred to as `#N`. Numbers are stable: a done or dropped item is removed and its number is not reused, so gaps are expected. Pruned 2026-09-03: duplicates were merged into one item each and nitpicks were dropped. Resolved the same day: #6 and #7 (denylist enforced by the hook), #8 (bootstrap preview), #9 (knowledge trust), #27 (check-only verify), #39 and #40 (full-patch review that continues after failure), and #14 (a time-budget continue restarts the clock).
 
-## Safety checks do not check for danger
-
-- [ ] 53. `SECURITY.md` has no threat model.
-  - Why: without a list of what can go wrong, every safety fix is a guess.
-  - Fix: add a short section covering untrusted repositories, lifecycle scripts, prompt injection, and command authorization.
-
 ## The pass or fail sensor gives wrong answers
 
 - [ ] 11. The required `test` category is satisfied by `sh -n`, a syntax check.

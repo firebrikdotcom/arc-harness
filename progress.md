@@ -1,5 +1,17 @@
 # Jev checkpoint implementation — 2026-09-22
 
+## TODO #53: threat model in SECURITY.md (2026-09-30)
+
+- Harness root and target: `/home/savior/Code/harness-template-todo-53-20260930` (worktree, branch `feat/todo-53-20260930`, base e5b148a; same directory). Docs read: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/architecture.md`, `docs/conventions.md`, `docs/setup.md`, `todo.md`, `SECURITY.md`, `schemas/denylist.default`, `schemas/action.schema.json`, `scripts/init.sh`.
+- Diagnosis: not already resolved; `SECURITY.md` covers only hygiene and pre-commit commands.
+- Goal: a short threat-model section covering untrusted repositories, lifecycle scripts, prompt injection, and command authorization, each stating the threat, the existing control, and the known gap. Non-goals: no script, hook, or denylist change; gaps are documented, not fixed.
+- Evidence gathered for the gaps: `scripts/action.sh validate` accepts `sh -c "sh -c 'rm -rf /'"` (the regex denylist does not see nested commands); `make -qp` in a scratch directory executed a Makefile `$(shell touch ran)`, and `scripts/init.sh` calls it while building the preview, before confirmation; `init.sh --auto` (session-start hook) runs the setup plan without confirmation.
+- Acceptance: the section exists with the four topics; every script or file it names exists (checked by hand); `scripts/verify.sh` and `scripts/review.sh` pass.
+- Verification plan: manual path check, `scripts/init.sh --yes`, `scripts/verify.sh`, `scripts/review.sh`, `git diff --check`.
+- Build: added `## Threat Model` to `SECURITY.md` (Threat / Controls / Gaps for each of the four topics). A heading-assertion test was drafted and then removed at the root coordinator's instruction: this item is documentation only, and the existing gates plus a manual source and link check are enough. Removed the #53 entry and its now-empty section from `todo.md`. Manual check: all seven named harness files exist.
+- Verification: `scripts/init.sh --yes` exit 0; `scripts/verify.sh` exit 0 (ran=3 skipped=3 failures=0, every `tests/*.sh` PASS); `scripts/review.sh` exit 0; `git diff --check` clean. Waiting for independent review before commit.
+- Review round 1 (panel): 1 confirmed Medium finding, fixed. The prompt-injection controls said Jev and TypeSafe get only enum or redacted context, which contradicted jevgrep's source upload. The line now covers only Jev decision calls (route, advise, automatic checkpoints) and points to Untrusted repositories for jevgrep retrieval. Gates rerun: `scripts/verify.sh` exit 0 (ran=3 skipped=3 failures=0), `scripts/review.sh` exit 0, `git diff --check` clean.
+
 ## Jev adoption: task-entry history, trigger points, retrieval reminder (2026-09-29)
 
 - Harness root and target: `/Users/savior/Code/harness-jev-adoption` (worktree of harness-template, branch `feat/jev-adoption`, same directory). Docs read: `AGENTS.md`, `CLAUDE.md`, `docs/setup.md`, `docs/jev-checkpoints.md`, `docs/architecture.md`, `scripts/task_route.py`, `scripts/phase_checkpoint.py` (read only, lane 1), `scripts/install-guides.sh`, `scripts/install-jg-skill.sh`, `scripts/install-hooks.sh`, the existing hooks, and their tests.
