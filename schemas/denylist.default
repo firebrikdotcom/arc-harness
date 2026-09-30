@@ -16,8 +16,9 @@ command (^|[;&|(]\s*)(sudo|doas|su)\b
 command \|\s*(sudo\s+)?(ba|z|da|k|c|tc)?sh\b
 command \b(curl|wget)\b.*\|\s*(python3?|perl|node|ruby)\b
 
-# History-rewriting or destructive git
-command \bgit\s+push\b.*(\s--force\b|\s-f\b|\s\+[A-Za-z])
+# History-rewriting or destructive git. Explicit leases compare the remote ref
+# with the expected full object ID; implicit leases and unconditional force stay denied.
+command \bgit\s+push\b.*(\s--force(?!-with-lease=[^\s:]+:(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?:\s|$))\b|\s-f\b|\s\+[A-Za-z])
 command \bgit\s+(reset\s+--hard|clean\s+-[A-Za-z]*[fFxX]|checkout\s+--\s+\.|restore\s+(--staged\s+)?\.\s*$)
 command \bgit\s+(branch\s+-D|filter-branch|filter-repo|update-ref\s+-d)\b
 command \bgit\s+config\b.*\bcore\.hooksPath\b
