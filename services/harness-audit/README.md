@@ -18,6 +18,12 @@ The harness client treats the service as best-effort telemetry. If it is down,
 the agent task continues and the local TypeSafe logs remain authoritative for
 the route call itself.
 
+Browser pages (Arc UI host, same read model as the API):
+
+- `GET /` — audit workbench: headline totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
+- `GET /events[?type=jev.checkpoint&limit=200]` — newest-first event log with a type filter
+- `GET /public/styles.css` — the Arc scaffold stylesheet, embedded at build time
+
 Endpoints:
 
 - `GET /health`
@@ -70,3 +76,15 @@ Every machine that runs the service has its own SQLite database, so summaries
 only cover events emitted on that machine. To pool them, point a second host's
 `HARNESS_AUDIT_URL` at one service over the tailnet, or copy the database file.
 There is no sync between databases.
+
+## Browser workbench
+
+The service registers an Arc UI host (`src/ui.rs`) with the scaffold's admin
+layout, `components/ui.html` macros and `public/styles.css`, all embedded with
+`include_str!` so no working directory or asset build is needed. `GET /` renders
+the grouped checkpoint and route summaries from `summary.rs` plus the newest
+events; `GET /events` lists the log. Both pages read `audit_events_view`
+through the same `ReadModelStore` as the JSON endpoints. There is no sign-in:
+the service binds to loopback, and the framework's authenticated navigation is
+replaced by the host's own links. Open http://127.0.0.1:18080/ after
+`scripts/audit-service.sh serve` (a restart rebuilds the binary).

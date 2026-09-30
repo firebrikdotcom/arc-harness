@@ -14,6 +14,7 @@ use crate::domain::audit_event::projector::{AuditEventProjector, AUDIT_EVENTS_VI
 mod domain;
 mod routes;
 mod summary;
+mod ui;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
@@ -41,6 +42,8 @@ fn builder() -> ArcAppBuilder {
     ArcApp::builder()
         .register_aggregate::<AuditEventAggregate>()
         .register_projector(AuditEventProjector, AUDIT_EVENTS_VIEW)
+        .register_ui_host(ui::host())
+        .register_ui(ui::contribution())
         .register_routes(routes::config)
 }
 

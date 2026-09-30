@@ -1563,6 +1563,7 @@ dependencies = [
 name = "harness-audit"
 version = "0.1.0"
 dependencies = [
+ "actix-session 0.10.1",
  "actix-web",
  "anyhow",
  "arc-core",
@@ -1574,6 +1575,7 @@ dependencies = [
  "rand 0.8.8",
  "serde",
  "serde_json",
+ "tera",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
