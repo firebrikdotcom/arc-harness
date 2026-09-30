@@ -172,6 +172,8 @@ scripts/verify.sh
 
 CI uses safe defaults and does not assume secrets.
 
+Every action in a workflow is pinned to a full 40-character commit SHA, with the release it came from in a trailing comment (`actions/checkout@<sha> # v4.4.0`), because a tag such as `@v4` can be moved to different code without any change in this repository. `tests/ci-pinned-actions.sh` fails verification on a tag, branch, or short SHA, and on any `uses` it does not parse (a flow mapping such as `- {uses: ...}` or a quoted key), so write steps in the block form `- uses: OWNER/REPO@SHA`. To update an action, resolve the new release's commit with `git ls-remote --tags https://github.com/OWNER/REPO` (for an annotated tag, take the commit on its `^{}` line) and replace both the SHA and the comment.
+
 ## Updating This Project
 
 When source code, runtime commands, dependencies, or architecture are added:

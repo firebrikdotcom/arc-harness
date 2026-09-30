@@ -25,9 +25,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 - [ ] 38. Local and CI verification need the same tools, but nothing checks that. (Merged #24, #35.)
   - Why: a green CI and a red laptop, or the reverse, means one of them is lying.
   - Fix: list required tools in one place, have `scripts/init.sh` check them, and have CI install exactly that list.
-- [ ] 19. CI actions are pinned to floating tags like `@v4`. (Merged #36.)
-  - Why: a floating tag can change under you tomorrow without you knowing.
-  - Fix: pin `actions/checkout` and `actions/setup-node` to full commit SHAs.
 
 ## Review does not really review
 
