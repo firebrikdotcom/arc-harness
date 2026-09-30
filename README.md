@@ -60,7 +60,7 @@ The phase guard is a Claude Code hook only. It checks the denylist and knowledge
 - Do not declare success without running `scripts/verify.sh`.
 - Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`. The same denylist is applied by the guard hook to every real Write, Edit, and Bash call.
 - `scripts/init.sh` previews project-owned setup commands and runs them only after you confirm, or with `--yes`.
-- Bootstrap uses the lockfile-aware install command: `npm ci`, `yarn install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists.
+- Bootstrap uses the lockfile-aware install command: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`, `bun install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists. `scripts/init.sh` installs a Node lockfile only with the package manager that wrote it; when that manager is missing, or lockfiles from different managers are present, it refuses and runs nothing.
 - A `knowledge/` folder is followed only after a human runs `scripts/knowledge-trust.sh approve`.
 - Keep planning, building, and reviewing as separate phases.
 - Do not assume secrets exist locally or in CI.

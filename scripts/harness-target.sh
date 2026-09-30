@@ -23,7 +23,7 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 DB_ROOT=${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}
 TARGETS_DIR=$DB_ROOT/targets
-BOOTSTRAP_INPUTS="Makefile package.json package-lock.json pnpm-lock.yaml yarn.lock composer.json composer.lock go.mod go.sum Cargo.toml Cargo.lock"
+BOOTSTRAP_INPUTS="Makefile package.json package-lock.json pnpm-lock.yaml yarn.lock composer.json composer.lock go.mod go.sum Cargo.toml Cargo.lock npm-shrinkwrap.json bun.lock bun.lockb"
 
 info() {
   printf '%s\n' "$*"

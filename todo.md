@@ -16,9 +16,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 - [ ] 30. Verification and bootstrap commands have no timeouts. (Merged #34.)
   - Why: a stuck install or test hangs the whole run forever.
   - Fix: wrap each command in a timeout with a clear failure message.
-- [ ] 31. Bootstrap installs with a different package manager than the lockfile chose.
-  - Why: a `yarn.lock` installed by npm gives a different set of packages than the team tested.
-  - Fix: honor the lockfile's package manager or refuse with a clear message.
 - [ ] 37. Detection for Node, PHP, Go, and Rust projects has no fixture tests.
   - Why: the harness's own tests cover the CLI but not the project types it claims to verify.
   - Fix: add small fixture projects and failure cases under `tests/`.

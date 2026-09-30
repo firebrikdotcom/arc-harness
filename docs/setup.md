@@ -10,7 +10,7 @@ Required:
 Optional, depending on project files:
 
 - `make` when a `Makefile` exists.
-- Node.js and one of `npm`, `pnpm`, or `yarn` when `package.json` exists.
+- Node.js and one of `npm`, `pnpm`, or `yarn` when `package.json` exists; with a lockfile, the manager that owns it (`bun` for `bun.lock`).
 - `composer` and PHP when `composer.json` exists.
 - Go when `go.mod` exists.
 - Rust and Cargo when `Cargo.toml` exists.
@@ -45,7 +45,7 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 `scripts/install-hooks.sh` registers `scripts/hooks/auto-init.sh` as a Claude Code and Codex `SessionStart` hook (`startup`, `resume`, and `clear`). Every session then initialises the project it starts in, whether that is a linked git worktree, a main checkout, or a plain directory:
 
 1. The project root (the git toplevel when inside a repository, otherwise the directory itself) is registered as a harness target with `scripts/harness-target.sh register`. Registration lives under `HARNESS_DB_ROOT/targets/<name>-<hash>/` and never writes inside the project, so tracked files stay clean. The home directory, `/`, and the harness root are never registered.
-2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, lockfiles, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
+2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, the Node lockfiles listed below, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
 3. The same payload is handed to `scripts/hooks/session-route.sh`, so the shadow task-entry route is recorded for the registered target.
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
@@ -55,7 +55,7 @@ Once registered, `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, an
 Detected bootstrap inputs:
 
 - `Makefile`: runs `make init` or `make setup` when either target exists.
-- `package.json`: installs JavaScript/TypeScript dependencies with `pnpm install`, `yarn install` (`--frozen-lockfile` when locked), or `npm ci` (`npm install` without a lockfile).
+- `package.json`: installs JavaScript/TypeScript dependencies with the package manager that owns the lockfile, frozen to it: `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` or `npm-shrinkwrap.json` → `npm ci`, `bun.lock` or `bun.lockb` → `bun install --frozen-lockfile`. There is no fallback to another manager, because it would resolve a different set of packages than the lockfile records: when the owner is not installed, or lockfiles from different managers are present, the bootstrap prints `REFUSED:` with the lockfiles and the manager, runs nothing (not even `make init`), and exits `1`; `--auto` records that as `STATUS=failed` with the reason in `bootstrap.log`. Without a lockfile it uses the first available of `pnpm install`, `yarn install`, or `npm install`.
 - `composer.json`: installs PHP dependencies with `composer install --no-interaction`, adding `--prefer-dist` when locked.
 - `go.mod`: downloads Go modules with `go mod download`.
 - `Cargo.toml`: fetches Rust dependencies with `cargo fetch`, adding `--locked` when `Cargo.lock` exists.
