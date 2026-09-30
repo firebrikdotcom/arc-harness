@@ -1,5 +1,15 @@
 # Jev checkpoint implementation — 2026-09-22
 
+## Explicit lease pushes (2026-09-30)
+
+- Goal: permit an authorized task-branch rebase push when an explicit expected remote commit protects the update. The user explicitly requested maintenance of the harness denylist after it rejected both requested pushes.
+- Plan: distinguish `--force-with-lease=<ref>:<expected-commit>` from unconditional force; keep implicit leases, plain force, forced refspecs, and protected-file rules blocked; add regression coverage, update setup guidance, run verification and review, then publish the two already verified task branches.
+- Scope: default denylist, permit regression tests, setup guidance, and this progress record. No guard disabling or project denylist replacement.
+- Build: allowed only leases containing a ref and full expected object ID. Added Python/Node parity cases and setup guidance. The first targeted run exposed a test fixture PATH leak; isolated the fallback in a subshell and reran the same command successfully.
+- Verification: `sh tests/permit.sh`, `sh tests/action-schema.sh`, and `git diff --check` passed. Full `scripts/verify.sh` passed (ran=3, skipped=3, failures=0); skips are categories without project tooling and the opt-in live API check.
+- Review: `scripts/review.sh` passed and the review phase completed; inspected the exact patch and confirmed protected-file rules remain intact. Both requested push actions now pass validation.
+- Delivery: both task branches were pushed with explicit leases and normal hooks. Pre-push checks passed (253 tests for tag sheets; 426 for desktop icons). GitHub confirms heads `6512040b02176c3847526c7add278c0458f781ae` (#2759) and `fd6df0f0c4a154526d39d9269d8a401daf192bfa` (#2758), both mergeable. Hosted CI is running on these heads; the desktop PR was restored to draft after the push.
+
 ## Jev adoption: task-entry history, trigger points, retrieval reminder (2026-09-29)
 
 - Harness root and target: `/Users/savior/Code/harness-jev-adoption` (worktree of harness-template, branch `feat/jev-adoption`, same directory). Docs read: `AGENTS.md`, `CLAUDE.md`, `docs/setup.md`, `docs/jev-checkpoints.md`, `docs/architecture.md`, `scripts/task_route.py`, `scripts/phase_checkpoint.py` (read only, lane 1), `scripts/install-guides.sh`, `scripts/install-jg-skill.sh`, `scripts/install-hooks.sh`, the existing hooks, and their tests.
