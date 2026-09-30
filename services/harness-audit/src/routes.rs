@@ -139,7 +139,7 @@ async fn route_summary(
 }
 
 pub fn config(cfg: &mut web::ServiceConfig) {
-    cfg.service(health).service(
+    cfg.configure(crate::ui::config).service(health).service(
         web::scope("/api")
             .service(record_event)
             .service(list_events)
