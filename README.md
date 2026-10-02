@@ -60,7 +60,8 @@ The phase guard is a Claude Code hook only. It checks the denylist and knowledge
 - Do not declare success without running `scripts/verify.sh`.
 - Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`. The same denylist is applied by the guard hook to every real Write, Edit, and Bash call.
 - `scripts/init.sh` previews project-owned setup commands and runs them only after you confirm, or with `--yes`.
-- Bootstrap uses the lockfile-aware install command: `npm ci`, `yarn install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists.
+- Bootstrap uses the lockfile-aware install command: `npm ci`, `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`, `bun install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists. `scripts/init.sh` installs a Node lockfile only with the package manager that wrote it; when that manager is missing, or lockfiles from different managers are present, it refuses and runs nothing.
+- Every bootstrap command and every verification check runs under a time limit (`HARNESS_BOOTSTRAP_TIMEOUT` and `HARNESS_VERIFY_TIMEOUT`, 1800 seconds each by default). A command that runs longer is stopped along with its child processes and fails with exit `124` and a `TIMEOUT:` line. Discovery probes that run project code (`make -qp`, the `node` script listing) are bounded too. Without a supervisor (`python3` or GNU `timeout`) nothing is run.
 - A `knowledge/` folder is followed only after a human runs `scripts/knowledge-trust.sh approve`.
 - Keep planning, building, and reviewing as separate phases.
 - Do not assume secrets exist locally or in CI.
@@ -107,6 +108,7 @@ scripts/permit.sh           Denylist check for commands and write paths
 scripts/knowledge-trust.sh  Human approval gate for a project's knowledge/ folder
 schemas/denylist.default    Default denylist; a project replaces it with .harness-denylist
 scripts/verify.sh           Local verification sensor (check-only, never rewrites)
+scripts/with-timeout.sh     Runs one bootstrap or verification command under a time limit, stopping its whole process group
 scripts/review.sh           Review helper: full patch, continues after a failing verify
 tasks/task-template.md      Reusable task template
 tasks/auditability-wizard.md  Scope and acceptance criteria for the offline auditability planner
@@ -143,7 +145,7 @@ The script detects common project tooling:
 - `Cargo.toml` for Rust projects.
 - Bash/shell files, including `scripts/*.sh`.
 
-It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
+It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. Each check, and each harness test file, is stopped after `HARNESS_VERIFY_TIMEOUT` seconds (default 1800) and fails with exit `124`, while the remaining checks still run. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
 
 Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
 
