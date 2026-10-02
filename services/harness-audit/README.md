@@ -20,7 +20,7 @@ the route call itself.
 
 Browser pages (Arc UI host, same read model as the API):
 
-- `GET /` — audit workbench: headline totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
+- `GET /` — audit workbench: a daily accuracy line (labeled checkpoint decisions by UTC day of the checkpoint), headline totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
 - `GET /events[?type=jev.checkpoint&limit=200]` — newest-first event log with a type filter
 - `GET /public/styles.css` — the Arc scaffold stylesheet, embedded at build time
 
@@ -86,5 +86,9 @@ the grouped checkpoint and route summaries from `summary.rs` plus the newest
 events; `GET /events` lists the log. Both pages read `audit_events_view`
 through the same `ReadModelStore` as the JSON endpoints. There is no sign-in:
 the service binds to loopback, and the framework's authenticated navigation is
-replaced by the host's own links. Open http://127.0.0.1:18080/ after
+replaced by the host's own links. The accuracy chart at the top is inline
+SVG computed server-side by `summary::daily_checkpoint_accuracy` and
+`ui::accuracy_chart`, so it needs no JavaScript; its daily counts sum to the
+headline labeled and correct totals, and it pools families and question
+versions, so use the checkpoint table to compare cohorts. Open http://127.0.0.1:18080/ after
 `scripts/audit-service.sh serve` (a restart rebuilds the binary).

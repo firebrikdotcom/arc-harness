@@ -233,6 +233,90 @@ pub fn totals(event_count: usize, checkpoints: &Value) -> Value {
     })
 }
 
+// Accuracy chart geometry, in SVG user units; the SVG scales to its panel.
+const CHART_WIDTH: f64 = 720.0;
+const CHART_HEIGHT: f64 = 220.0;
+const CHART_LEFT: f64 = 48.0;
+const CHART_RIGHT: f64 = 56.0;
+const CHART_TOP: f64 = 16.0;
+const CHART_BOTTOM: f64 = 32.0;
+const MAX_DAY_TICKS: i64 = 10;
+
+fn day_label(day: i64) -> String {
+    format_timestamp(day * 86_400_000_000)[..10].to_owned()
+}
+
+/// Template-ready geometry for the daily accuracy line: one point per day with
+/// labeled decisions, a path that breaks across days without labels, y
+/// gridlines at 0/50/100%, and up to ten evenly spaced day ticks. Coordinates
+/// are pre-formatted so the template does no arithmetic.
+pub fn accuracy_chart(days: &[grouped::DailyAccuracy]) -> Value {
+    let (Some(first), Some(last)) = (days.first(), days.last()) else {
+        return json!({"points": [], "days": []});
+    };
+    let plot_width = CHART_WIDTH - CHART_LEFT - CHART_RIGHT;
+    let plot_height = CHART_HEIGHT - CHART_TOP - CHART_BOTTOM;
+    let span = last.day - first.day;
+    let x = |day: i64| -> f64 {
+        if span == 0 {
+            CHART_LEFT + plot_width / 2.0
+        } else {
+            CHART_LEFT + (day - first.day) as f64 / span as f64 * plot_width
+        }
+    };
+    let y = |fraction: f64| CHART_TOP + (1.0 - fraction) * plot_height;
+    let mut path = String::new();
+    let mut previous_day: Option<i64> = None;
+    let points: Vec<Value> = days
+        .iter()
+        .map(|point| {
+            let (px, py) = (x(point.day), y(point.correct as f64 / point.labeled as f64));
+            let command = if previous_day == Some(point.day - 1) {
+                'L'
+            } else {
+                'M'
+            };
+            path.push_str(&format!("{command}{px:.1},{py:.1}"));
+            previous_day = Some(point.day);
+            json!({
+                "x": format!("{px:.1}"),
+                "y": format!("{py:.1}"),
+                "date": day_label(point.day),
+                "labeled": point.labeled,
+                "correct": point.correct,
+                "percent": (point.correct * 100 + point.labeled / 2) / point.labeled,
+            })
+        })
+        .collect();
+    let gridlines: Vec<Value> = [(1.0, "100%"), (0.5, "50%"), (0.0, "0%")]
+        .iter()
+        .map(|(fraction, label)| json!({"y": format!("{:.1}", y(*fraction)), "label": label}))
+        .collect();
+    // A whole number of days between ticks keeps them evenly spaced; the
+    // latest day is already named in the panel header when it falls between.
+    let step = (span + MAX_DAY_TICKS - 2) / (MAX_DAY_TICKS - 1);
+    let ticks: Vec<Value> = (0..=span)
+        .step_by(step.max(1) as usize)
+        .map(|offset| first.day + offset)
+        .map(
+            |day| json!({"x": format!("{:.1}", x(day)), "label": day_label(day)[5..].to_owned()}),
+        )
+        .collect();
+    json!({
+        "width": CHART_WIDTH,
+        "height": CHART_HEIGHT,
+        "plot_left": CHART_LEFT,
+        "plot_right": CHART_WIDTH - CHART_RIGHT,
+        "axis_y": format!("{:.1}", CHART_HEIGHT - CHART_BOTTOM + 20.0),
+        "path": path,
+        "points": points,
+        "gridlines": gridlines,
+        "ticks": ticks,
+        "latest": points.last(),
+        "days": points.iter().rev().collect::<Vec<_>>(),
+    })
+}
+
 #[get("/")]
 async fn workbench(
     request: HttpRequest,
@@ -252,8 +336,13 @@ async fn workbench(
         .take(RECENT_EVENTS)
         .map(event_row)
         .collect();
+    let chart = accuracy_chart(&grouped::daily_checkpoint_accuracy(
+        &rows,
+        query.include_fixtures,
+    ));
     let mut context = Context::new();
     context.insert("totals", &totals(rows.len(), &checkpoints));
+    context.insert("accuracy_chart", &chart);
     context.insert("checkpoints", &checkpoints);
     context.insert("routes", &routes);
     context.insert("recent", &recent);
@@ -436,12 +525,84 @@ mod tests {
                             "observed_recommendation": "reasoning_model", "jev_latency_ms": 190}
             }),
         ];
-        let registry = UiRegistry::build(Some(&host()), &[contribution()]).unwrap().unwrap();
-        let checkpoints = grouped::checkpoint_groups(&rows, false);
+        let html = render_workbench(&rows);
+        assert!(html.contains("Audit workbench"));
+        assert!(html.contains("evidence_assessment"));
+        assert!(html.contains("run_full_verification-&gt;run_full_verification"));
+        assert!(html.contains("reasoning_model"));
+        assert!(html.contains("class=\"workbench\""));
+        assert!(html.contains("/public/styles.css"));
+        assert!(html.contains("Harness audit"));
+        assert!(
+            html.contains(">0.33<"),
+            "median confidence is rounded for display"
+        );
+        assert!(!html.contains("0.3299999"));
+        let chart = html
+            .find("Accuracy over time")
+            .expect("chart panel renders");
+        assert!(
+            chart < html.find("metric-grid").unwrap(),
+            "chart sits above the metric grid"
+        );
+        assert!(html.contains("<path class=\"chart__line\" d=\"M356.0,16.0\"/>"));
+        assert!(html.contains("1970-01-01: 100% (1 correct of 1 labeled)"));
+    }
+
+    #[test]
+    fn workbench_shows_an_empty_chart_state_without_labels() {
+        let html = render_workbench(&[checkpoint("a", "evidence_assessment", "run", "run", 1)]);
+        assert!(html.contains("No labeled decisions yet"));
+        assert!(!html.contains("<svg class=\"chart\""));
+    }
+
+    #[test]
+    fn accuracy_chart_breaks_the_line_on_days_without_labels() {
+        let day = |day, labeled, correct| grouped::DailyAccuracy {
+            day,
+            labeled,
+            correct,
+        };
+        let chart = accuracy_chart(&[day(100, 4, 2), day(101, 2, 2), day(110, 3, 0)]);
+        // 0% sits on the plot floor (y=188), 50% midway, 100% on the top line.
+        assert_eq!(chart["path"], "M48.0,102.0L109.6,16.0M664.0,188.0");
+        assert_eq!(chart["points"][0]["percent"], 50);
+        assert_eq!(chart["latest"]["date"], "1970-04-21");
+        assert_eq!(
+            chart["days"][0]["date"], "1970-04-21",
+            "table lists newest first"
+        );
+        let ticks: Vec<&str> = chart["ticks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ticks,
+            ["04-11", "04-13", "04-15", "04-17", "04-19", "04-21"]
+        );
+        let nine_days = accuracy_chart(&[day(0, 1, 1), day(8, 1, 1)]);
+        assert_eq!(nine_days["ticks"].as_array().unwrap().len(), 9, "short spans tick every day");
+        let single = accuracy_chart(&[day(5, 3, 1)]);
+        assert_eq!(single["path"], "M356.0,130.7");
+        assert_eq!(single["ticks"].as_array().unwrap().len(), 1);
+        assert_eq!(accuracy_chart(&[])["points"], json!([]));
+    }
+
+    fn render_workbench(rows: &[Value]) -> String {
+        let registry = UiRegistry::build(Some(&host()), &[contribution()])
+            .unwrap()
+            .unwrap();
+        let checkpoints = grouped::checkpoint_groups(rows, false);
         let mut context = Context::new();
         context.insert("totals", &totals(rows.len(), &checkpoints));
+        context.insert(
+            "accuracy_chart",
+            &accuracy_chart(&grouped::daily_checkpoint_accuracy(rows, false)),
+        );
         context.insert("checkpoints", &checkpoints);
-        context.insert("routes", &grouped::route_groups(&rows, false));
+        context.insert("routes", &grouped::route_groups(rows, false));
         context.insert("recent", &rows.iter().map(event_row).collect::<Vec<_>>());
         context.insert("include_fixtures", &false);
         decorate(&mut context, "Audit workbench");
@@ -452,16 +613,9 @@ mod tests {
         context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
         context.insert("admin_navigation", &Vec::<Value>::new());
         context.insert("admin_actions", &Vec::<Value>::new());
-        let html = registry_tera(&registry).render("audit/workbench.html", &context).expect("renders");
-        assert!(html.contains("Audit workbench"));
-        assert!(html.contains("evidence_assessment"));
-        assert!(html.contains("run_full_verification-&gt;run_full_verification"));
-        assert!(html.contains("reasoning_model"));
-        assert!(html.contains("class=\"workbench\""));
-        assert!(html.contains("/public/styles.css"));
-        assert!(html.contains("Harness audit"));
-        assert!(html.contains(">0.33<"), "median confidence is rounded for display");
-        assert!(!html.contains("0.3299999"));
+        registry_tera(&registry)
+            .render("audit/workbench.html", &context)
+            .expect("renders")
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly

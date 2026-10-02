@@ -1,5 +1,16 @@
 {% extends "layouts/admin.html" %}{% import "components/ui.html" as ui %}{% block content %}
 <header class="page-head"><div><p class="eyebrow">Jev / shadow audit</p><h1>Audit workbench</h1></div>{% if totals.events > 0 %}{{ ui::status(label="LIVE", tone="success") }}{% else %}{{ ui::status(label="EMPTY", tone="warning") }}{% endif %}</header>
+<section class="panel accuracy-chart"><div class="panel__head"><h2>Accuracy over time</h2>{% if accuracy_chart.latest %}<span class="mono">Latest {{ accuracy_chart.latest.date }}: {{ accuracy_chart.latest.percent }}%</span>{% endif %}</div>
+<p class="section-note">Share of labeled checkpoint decisions that were correct, by UTC day of the checkpoint. Unknown labels are left out, gaps are days without labels, and the line pools every family and question version.</p>
+{% if accuracy_chart.points %}<div class="chart-wrap"><svg class="chart" viewBox="0 0 {{ accuracy_chart.width }} {{ accuracy_chart.height }}" role="img" aria-labelledby="accuracy-chart-title"><title id="accuracy-chart-title">Daily Jev accuracy, {{ accuracy_chart.points | length }} days with labeled decisions</title>
+{% for g in accuracy_chart.gridlines %}<line class="chart__grid" x1="{{ accuracy_chart.plot_left }}" x2="{{ accuracy_chart.plot_right }}" y1="{{ g.y }}" y2="{{ g.y }}"/><text class="chart__axis" x="{{ accuracy_chart.plot_left - 8 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>{% endfor %}
+{% for t in accuracy_chart.ticks %}<text class="chart__axis" x="{{ t.x }}" y="{{ accuracy_chart.axis_y }}" text-anchor="middle">{{ t.label }}</text>{% endfor %}
+<path class="chart__line" d="{{ accuracy_chart.path }}"/>
+{% for p in accuracy_chart.points %}<g class="chart__point"><circle class="chart__hit" cx="{{ p.x }}" cy="{{ p.y }}" r="14"/><circle class="chart__dot" cx="{{ p.x }}" cy="{{ p.y }}" r="4"/><title>{{ p.date }}: {{ p.percent }}% ({{ p.correct }} correct of {{ p.labeled }} labeled)</title></g>{% endfor %}
+<text class="chart__label" x="{{ accuracy_chart.latest.x }}" y="{{ accuracy_chart.latest.y }}" dx="10" dominant-baseline="middle">{{ accuracy_chart.latest.percent }}%</text>
+</svg></div>
+<details class="chart-data"><summary>Daily data</summary><div class="data-wrap"><table class="data-table"><thead><tr><th>Day (UTC)</th><th class="num">Correct</th><th class="num">Labeled</th><th class="num">Accuracy</th></tr></thead><tbody>{% for d in accuracy_chart.days %}<tr><td class="mono">{{ d.date }}</td><td class="num">{{ d.correct }}</td><td class="num">{{ d.labeled }}</td><td class="num">{{ d.percent }}%</td></tr>{% endfor %}</tbody></table></div></details>
+{% else %}{{ ui::empty(title="No labeled decisions yet", detail="The line appears once checkpoint outcomes are labeled.") }}{% endif %}</section>
 <section class="metric-grid">
 <article><span>Audit events</span><strong>{{ totals.events }}</strong><small>Immutable records in this database</small></article>
 <article><span>Shadow checkpoints</span><strong>{{ totals.checkpoints }}</strong><small>{{ totals.excluded_fixtures }} regression fixtures excluded</small></article>
