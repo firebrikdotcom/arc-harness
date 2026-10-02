@@ -10,6 +10,8 @@ HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}"
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
 REQUIRED_CHECKS="${HARNESS_REQUIRED_CHECKS:-}"
 REQUIRED_CHECKS_SOURCE="environment"
+# Each check, and each harness test file, gets this many seconds.
+VERIFY_TIMEOUT="${HARNESS_VERIFY_TIMEOUT:-1800}"
 
 usage() {
   info "Usage: scripts/verify.sh [--project PATH]"
@@ -23,6 +25,13 @@ info() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_positive_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 0 ] 2>/dev/null
 }
 
 while [ "$#" -gt 0 ]; do
@@ -52,8 +61,23 @@ if [ ! -d "$PROJECT_ROOT" ]; then
   exit 2
 fi
 
+if ! is_positive_int "$VERIFY_TIMEOUT"; then
+  info "FAIL: HARNESS_VERIFY_TIMEOUT must be a whole number of seconds greater than 0, got '$VERIFY_TIMEOUT'."
+  exit 2
+fi
+
+# Every check runs under a timeout supervisor; without one nothing runs.
+if ! "$SCRIPT_DIR/with-timeout.sh" --check; then
+  info "FAIL: no timeout supervisor (python3, GNU timeout, or gtimeout) is installed, so checks cannot be time-limited. Install one and rerun. Nothing was run."
+  exit 2
+fi
+
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
 cd "$PROJECT_ROOT" || exit 2
+
+VERIFY_TMP=$(mktemp -d "${TMPDIR:-/tmp}/harness-verify.XXXXXX")
+trap 'rm -rf "$VERIFY_TMP"' EXIT
+trap 'exit 1' HUP INT TERM
 
 # A registered target (scripts/harness-target.sh) owns its own database
 # beneath the database root.
@@ -96,7 +120,24 @@ mark_skip() {
   info "SKIP: $*"
 }
 
+# bounded LABEL CMD...  Runs one external command under the verification time
+# limit, with no terminal input: a check must not wait for an answer.
+bounded() {
+  _label="$1"
+  shift
+  "$SCRIPT_DIR/with-timeout.sh" "$VERIFY_TIMEOUT" "$_label" HARNESS_VERIFY_TIMEOUT "$@" </dev/null
+}
+
+# run_check NAME CMD...  One external command, bounded.
 run_check() {
+  name="$1"
+  shift
+  run_check_steps "$name" bounded "$name" "$@"
+}
+
+# run_check_steps NAME FUNCTION [ARG...]  A shell function whose own commands
+# are each bounded; the function itself cannot run under an external timeout.
+run_check_steps() {
   name="$1"
   shift
   ran=$((ran + 1))
@@ -127,8 +168,37 @@ run_category() {
   fi
 }
 
+# discovery_timed_out NAME ERRFILE  A bounded discovery probe hit its limit:
+# verification fails, and the checks that do not depend on it still run.
+discovery_timed_out() {
+  failures=$((failures + 1))
+  info ""
+  grep '^TIMEOUT:' "$2" || :
+  info "FAIL: $1 (exit 124)"
+}
+
+# load_make_targets  Reads the Makefile database once. `make -qp` expands
+# $(shell ...) in the Makefile, so it is project code and runs bounded.
+MAKE_DB_STATE=""
+load_make_targets() {
+  [ -z "$MAKE_DB_STATE" ] || return 0
+  MAKE_DB_STATE=unavailable
+  if [ ! -f Makefile ] || ! has_cmd make; then
+    return 0
+  fi
+  _status=0
+  "$SCRIPT_DIR/with-timeout.sh" "$VERIFY_TIMEOUT" "make:discover" HARNESS_VERIFY_TIMEOUT make -qp > "$VERIFY_TMP/make.db" 2> "$VERIFY_TMP/make.err" </dev/null || _status=$?
+  # `make -qp` exits 1 when a target is out of date; only a timeout is fatal.
+  if [ "$_status" -eq 124 ]; then
+    discovery_timed_out "make:discover" "$VERIFY_TMP/make.err"
+    return 0
+  fi
+  MAKE_DB_STATE=loaded
+}
+
 make_has_target() {
-  [ -f Makefile ] && has_cmd make && make -qp 2>/dev/null | grep -q "^$1:"
+  load_make_targets
+  [ "$MAKE_DB_STATE" = loaded ] && grep -q "^$1:" "$VERIFY_TMP/make.db"
 }
 
 detect_node_pm() {
@@ -153,12 +223,28 @@ detect_node_pm() {
   fi
 }
 
+# load_json_scripts FILE  Lists FILE's non-empty scripts once, with node
+# under the time limit. A file node cannot read has no scripts, as before.
+load_json_scripts() {
+  _cache="$VERIFY_TMP/scripts.$1"
+  [ ! -f "$_cache" ] || return 0
+  : > "$_cache"
+  _status=0
+  "$SCRIPT_DIR/with-timeout.sh" "$VERIFY_TIMEOUT" "$1:discover" HARNESS_VERIFY_TIMEOUT node -e "const p=require('./$1'); for (const [k, v] of Object.entries(p.scripts || {})) if (v) console.log(k)" > "$_cache.out" 2> "$_cache.err" </dev/null || _status=$?
+  if [ "$_status" -eq 0 ]; then
+    mv "$_cache.out" "$_cache"
+  elif [ "$_status" -eq 124 ]; then
+    discovery_timed_out "$1:discover" "$_cache.err"
+  fi
+}
+
 json_has_script() {
   file="$1"
   script="$2"
   [ -f "$file" ] || return 1
   if has_cmd node; then
-    node -e "const p=require('./$file'); process.exit(p.scripts && p.scripts['$script'] ? 0 : 1)"
+    load_json_scripts "$file"
+    grep -q -x -F "$script" "$VERIFY_TMP/scripts.$file"
   else
     grep -q "\"$script\"[[:space:]]*:" "$file"
   fi
@@ -184,7 +270,7 @@ check_go_format() {
     find . \
       -path ./.git -prune \
       -o -path ./vendor -prune \
-      -o -name "*.go" -exec gofmt -l {} +
+      -o -name "*.go" -exec "$SCRIPT_DIR/with-timeout.sh" "$VERIFY_TIMEOUT" "go:fmt" HARNESS_VERIFY_TIMEOUT gofmt -l {} + </dev/null
   )
   test -z "$out"
 }
@@ -203,7 +289,8 @@ run_harness_tests() {
     # Nested harness runs inside tests must not emit real Jev checkpoints, and
     # each fixture declares its own required checks: the outer override applies
     # to this target (already read into REQUIRED_CHECKS), not to the fixtures.
-    if ! (unset HARNESS_REQUIRED_CHECKS; HARNESS_JEV_CHECKPOINTS=0 sh "$test_file"); then
+    # Each file has its own time limit, so a hung test is named and the rest still run.
+    if ! (unset HARNESS_REQUIRED_CHECKS; bounded "$test_file" env HARNESS_JEV_CHECKPOINTS=0 sh "$test_file"); then
       status=1
     fi
   done
@@ -284,7 +371,7 @@ verify_format() {
   fi
 
   if [ -f go.mod ] && has_cmd go; then
-    run_check "go:fmt" check_go_format
+    run_check_steps "go:fmt" check_go_format
     ran_any=1
   elif [ -f go.mod ]; then
     mark_skip "go.mod found, but go is unavailable for format check"
@@ -451,7 +538,7 @@ verify_test() {
   fi
 
   if [ -x scripts/harness ] && ls tests/*.sh >/dev/null 2>&1; then
-    run_check "harness:tests" run_harness_tests
+    run_check_steps "harness:tests" run_harness_tests
     ran_any=1
   fi
 
@@ -513,6 +600,15 @@ else
 fi
 
 jev_checkpoint verify-start
+
+# Project-controlled discovery runs once, bounded, before the checks.
+load_make_targets
+if [ -f package.json ] && has_cmd node; then
+  load_json_scripts package.json
+fi
+if [ -f composer.json ] && has_cmd composer && has_cmd node; then
+  load_json_scripts composer.json
+fi
 
 run_category format verify_format
 run_category lint verify_lint

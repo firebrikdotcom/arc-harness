@@ -1,0 +1,9 @@
+# Tools that verification of this project needs, one per line: TOOL [APT_PACKAGE].
+# scripts/init.sh fails when any of them is missing, and CI installs exactly
+# the packages listed here (scripts/required-tools.sh packages). A package of
+# "-" means the runner image already provides the tool and CI installs nothing.
+git        git
+sh         -
+make       make
+python3    python3
+shellcheck shellcheck

@@ -2,21 +2,38 @@
 
 ## Prerequisites
 
-Required:
+Required for every project:
 
-- POSIX-compatible shell.
+- POSIX-compatible shell (`sh`).
 - `git`.
 
-Optional, depending on project files:
+Required for verifying this harness, listed in `.harness-required-tools` (see [Required tools](#required-tools)):
+
+- `make`, `python3` (which also supervises the time limits), and `shellcheck`, in addition to `git` and `sh`.
+
+Optional for other target projects unless their own `.harness-required-tools` lists them, depending on project files:
 
 - `make` when a `Makefile` exists.
-- Node.js and one of `npm`, `pnpm`, or `yarn` when `package.json` exists.
+- Node.js and one of `npm`, `pnpm`, or `yarn` when `package.json` exists; with a lockfile, the manager that owns it (`bun` for `bun.lock`).
 - `composer` and PHP when `composer.json` exists.
 - Go when `go.mod` exists.
 - Rust and Cargo when `Cargo.toml` exists.
 - `shellcheck` for stronger Bash/shell linting.
+- `python3` or GNU `timeout` (`gtimeout` on macOS) to time-limit bootstrap and verification commands. Without one, `scripts/init.sh` refuses whenever it would run a project command and `scripts/verify.sh` refuses to run.
 - `python3` or `node` to validate proposed action JSON with `scripts/action.sh` and to store `scripts/harness` run state.
 - Other language runtimes as documented by future project code.
+
+### Required tools
+
+`.harness-required-tools` at a project's root is the one list of tools its verification needs. Each line is `TOOL [APT_PACKAGE]`; `#` starts a comment, and a package of `-` (or none) means the environment already provides the tool. `git` and `sh` are required for every project whether listed or not. A project without the file needs only those two.
+
+```sh
+scripts/required-tools.sh check [--quiet] [--project PATH]   # exit 1 names each missing tool; 2 for a malformed list
+scripts/required-tools.sh packages [--project PATH]          # the listed apt packages, one per line
+sh tests/required-tools.sh
+```
+
+`scripts/init.sh` runs `check` before it detects or runs any project command, so a missing tool stops the bootstrap (exit `1`) instead of turning into a `SKIP` during verification; under `--auto` the reason is printed as a `Harness auto-init:` line. CI installs exactly `packages` with `apt-get install --yes --no-upgrade`, which leaves tools the runner already has at their current versions, and then runs the same `init.sh` check. The checker uses only shell builtins, so it reports tools even on a PATH that lacks them; it never installs anything. Tool and package names are limited to letters, digits, and `._+-` and may not start with `-`, so the list cannot inject shell syntax or an `apt-get` option. `tests/required-tools.sh` fails when a harness test gates on a tool (`command -v NAME`) that is not listed (only `npm`, `pnpm`, and `yarn`, which are target-ecosystem tools, and GNU `timeout`/`gtimeout`, the fallback supervisor behind the listed `python3`, are exempt) or when a workflow installs a system tool any other way. To add a tool, add its line; CI and every later `scripts/init.sh` pick it up.
 
 ## Bootstrap
 
@@ -26,7 +43,9 @@ From the repository root:
 scripts/init.sh
 ```
 
-The bootstrap script checks required tools, then detects project-owned setup commands (`make init` or `make setup`, `npm`/`pnpm`/`yarn install`, `composer install`, `go mod download`, `cargo fetch`). It prints that list and runs it only after you answer `y`, or when `--yes` or `HARNESS_INIT_YES=1` is given. Without a terminal and without `--yes` it refuses with exit `3`, so nothing from an unfamiliar repository runs by accident. CI passes `--yes`.
+The bootstrap script checks the required tools (`git`, `sh`, and the project's `.harness-required-tools`; see [Required tools](#required-tools)), then detects project-owned setup commands (`make init` or `make setup`, `npm`/`pnpm`/`yarn install`, `composer install`, `go mod download`, `cargo fetch`). It prints that list and runs it only after you answer `y`, or when `--yes` or `HARNESS_INIT_YES=1` is given. Without a terminal and without `--yes` it refuses with exit `3`, so nothing from an unfamiliar repository runs by accident. CI passes `--yes`.
+
+Each setup command gets `HARNESS_BOOTSTRAP_TIMEOUT` seconds (default `1800`), with stdin from `/dev/null`. A command that runs longer is stopped with every child process in its process group. The bootstrap then prints `TIMEOUT: <command> did not finish within <N>s ...` and `FAIL: <command> (exit 124)`, and exits `1`; `--auto` records `STATUS=failed` and `EXIT=124` with the message in `bootstrap.log`. See [Time limits](#time-limits).
 
 To bootstrap a separate target project directory from this harness:
 
@@ -45,7 +64,7 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 `scripts/install-hooks.sh` registers `scripts/hooks/auto-init.sh` as a Claude Code and Codex `SessionStart` hook (`startup`, `resume`, and `clear`). Every session then initialises the project it starts in, whether that is a linked git worktree, a main checkout, or a plain directory:
 
 1. The project root (the git toplevel when inside a repository, otherwise the directory itself) is registered as a harness target with `scripts/harness-target.sh register`. Registration lives under `HARNESS_DB_ROOT/targets/<name>-<hash>/` and never writes inside the project, so tracked files stay clean. The home directory, `/`, and the harness root are never registered.
-2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, lockfiles, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
+2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, the Node lockfiles listed below, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
 3. The same payload is handed to `scripts/hooks/session-route.sh`, so the shadow task-entry route is recorded for the registered target.
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
@@ -55,7 +74,7 @@ Once registered, `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, an
 Detected bootstrap inputs:
 
 - `Makefile`: runs `make init` or `make setup` when either target exists.
-- `package.json`: installs JavaScript/TypeScript dependencies with `pnpm install`, `yarn install` (`--frozen-lockfile` when locked), or `npm ci` (`npm install` without a lockfile).
+- `package.json`: installs JavaScript/TypeScript dependencies with the package manager that owns the lockfile, frozen to it: `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` or `npm-shrinkwrap.json` → `npm ci`, `bun.lock` or `bun.lockb` → `bun install --frozen-lockfile`. There is no fallback to another manager, because it would resolve a different set of packages than the lockfile records: when the owner is not installed, or lockfiles from different managers are present, the bootstrap prints `REFUSED:` with the lockfiles and the manager, runs nothing (not even `make init`), and exits `1`; `--auto` records that as `STATUS=failed` with the reason in `bootstrap.log`. Without a lockfile it uses the first available of `pnpm install`, `yarn install`, or `npm install`.
 - `composer.json`: installs PHP dependencies with `composer install --no-interaction`, adding `--prefer-dist` when locked.
 - `go.mod`: downloads Go modules with `go mod download`.
 - `Cargo.toml`: fetches Rust dependencies with `cargo fetch`, adding `--locked` when `Cargo.lock` exists.
@@ -70,6 +89,9 @@ Optional harness variables:
 - `HARNESS_INIT_YES`: set to `1` to let `scripts/init.sh` run its previewed project-owned setup commands non-interactively.
 - `HARNESS_AUTO_INIT`: set to `0` to make the `SessionStart` auto-init hook exit without registering or bootstrapping; default on.
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
+- `HARNESS_BOOTSTRAP_TIMEOUT`: seconds each `scripts/init.sh` setup command may run; default `1800`. Must be a whole number above `0`; anything else fails with exit `2`. Safe locally; raise it for a slow first install.
+- `HARNESS_VERIFY_TIMEOUT`: seconds each `scripts/verify.sh` check, and each harness test file, may run; default `1800`. Same validation. Safe locally.
+- `HARNESS_TIMEOUT_GRACE`: seconds between the `TERM` and the `KILL` sent to a timed-out command's process group; default `5`. The regression test sets `1`.
 - `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
 - `HARNESS_DB_ROOT`: harness database root for `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the hooks. Defaults to `HARNESS_ROOT/.harness-db`. Registered targets keep their own state beneath it at `targets/<id>/db/`.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
@@ -453,6 +475,16 @@ sh tests/harness-hook.sh
 ```
 
 `scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`, each without an inherited `HARNESS_REQUIRED_CHECKS` so its fixtures keep their own requirements while the override still applies to the harness itself. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
+
+### Time limits
+
+`scripts/init.sh` and `scripts/verify.sh` run every project command through `scripts/with-timeout.sh SECONDS LABEL VAR CMD...`. The limit applies to each bootstrap command, to each verification check, and to each `tests/*.sh` file inside `harness:tests`, so a hung test is named and the files after it still run. Verification checks get stdin from `/dev/null`: a check that waits for an answer fails at its limit instead of blocking the run.
+
+The command runs in its own process group. At the limit, the whole group gets `TERM`, and after `HARNESS_TIMEOUT_GRACE` seconds `KILL`, so child processes (a watcher, a test server, a package manager's workers) stop as well. The wrapper then prints `TIMEOUT: LABEL did not finish within Ns; it and its child processes were stopped. Set VAR to allow more time.` on stderr and exits `124`. A command that finishes in time keeps its own exit status. A child that starts a new process group or session escapes the group signal.
+
+`python3` supervises the group when it is installed. Otherwise the wrapper uses GNU `timeout -k` (`gtimeout` on macOS with coreutils), which signals the same group. Other `timeout` builds, such as busybox, are not used because they signal only the command. With neither tool the wrapper does not run the command: it prints `FAIL: ... cannot be time-limited: no timeout supervisor ... Nothing was run.` and exits `125` (`scripts/with-timeout.sh --check` asks the same question). `scripts/init.sh` then refuses the whole bootstrap the way it refuses an unowned lockfile, before running any command or probe: exit `1`, or `STATUS=failed` under `--auto`. A project with nothing to run or probe still initialises. `scripts/verify.sh` refuses with exit `2` before any check.
+
+Discovery that runs project code is bounded the same way and runs once per invocation. `make -qp` (it expands `$(shell ...)` in the Makefile) runs under the bootstrap or verification limit, and so does the `node` call that lists `package.json` and `composer.json` scripts. When a probe times out, `scripts/init.sh` refuses and names it. `scripts/verify.sh` reports `FAIL: make:discover (exit 124)` or `FAIL: package.json:discover (exit 124)`, treats the probe as finding nothing, and runs the remaining checks. Other probe exits keep their meaning: `make -qp` exits `1` when a target is out of date, and a file `node` cannot parse has no scripts. Without `node`, the scripts are found by reading the file with `grep`.
 
 Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
 

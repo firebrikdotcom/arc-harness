@@ -7,6 +7,8 @@ ASSUME_YES="${HARNESS_INIT_YES:-0}"
 AUTO=0
 PLAN_FILE=""
 TARGET_DIR=""
+# Set when detection finds a setup the bootstrap must not guess at; nothing runs.
+BOOTSTRAP_REFUSAL=""
 
 info() {
   printf '%s\n' "$*"
@@ -26,6 +28,13 @@ usage() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_positive_int() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -gt 0 ] 2>/dev/null
 }
 
 while [ "$#" -gt 0 ]; do
@@ -66,6 +75,13 @@ fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
 
+# Each project-owned command gets this many seconds before it is stopped.
+BOOTSTRAP_TIMEOUT="${HARNESS_BOOTSTRAP_TIMEOUT:-1800}"
+if ! is_positive_int "$BOOTSTRAP_TIMEOUT"; then
+  info "FAIL: HARNESS_BOOTSTRAP_TIMEOUT must be a whole number of seconds greater than 0, got '$BOOTSTRAP_TIMEOUT'."
+  exit 2
+fi
+
 # Automatic mode initialises the whole project a session starts in: the git
 # worktree or checkout root when PATH is inside one, otherwise PATH itself.
 if [ "$AUTO" = "1" ] && [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
@@ -81,13 +97,25 @@ if [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
 fi
 
 PLAN_FILE=$(mktemp "${TMPDIR:-/tmp}/harness-init-plan.XXXXXX")
-trap 'rm -f "$PLAN_FILE"' EXIT HUP INT TERM
+MAKE_DB="$PLAN_FILE.make"
+trap 'rm -f "$PLAN_FILE" "$MAKE_DB"' EXIT HUP INT TERM
+
+# Project commands and project-controlled probes run only under a timeout
+# supervisor; without one the bootstrap refuses instead of running unbounded.
+SUPERVISED=1
+"$SCRIPT_DIR/with-timeout.sh" --check || SUPERVISED=0
+NO_SUPERVISOR_REFUSAL="no timeout supervisor (python3, GNU timeout, or gtimeout) is installed, so project commands cannot be time-limited; install one and rerun."
+
+refuse_unsupervised() {
+  [ -n "$BOOTSTRAP_REFUSAL" ] || BOOTSTRAP_REFUSAL=$NO_SUPERVISOR_REFUSAL
+}
 
 # run_if_available DESC CMD...  Queues a project-owned command for the preview.
 # Nothing runs until the plan is confirmed.
 run_if_available() {
   desc="$1"
   shift
+  [ "$SUPERVISED" = "1" ] || refuse_unsupervised
   printf '%s\t%s\n' "$desc" "$*" >> "$PLAN_FILE"
 }
 
@@ -120,11 +148,12 @@ confirm_plan() {
   esac
 }
 
-# run_plan  Executes the queued commands in order; returns the first failing exit code.
+# run_plan  Executes the queued commands in order, each under the bootstrap
+# time limit; returns the first failing exit code (124 for a timeout).
 run_plan() {
   while IFS="$(printf '\t')" read -r desc cmd; do
     info "==> $desc"
-    sh -c "$cmd" </dev/null || {
+    "$SCRIPT_DIR/with-timeout.sh" "$BOOTSTRAP_TIMEOUT" "$desc" HARNESS_BOOTSTRAP_TIMEOUT sh -c "$cmd" </dev/null || {
       _status=$?
       info "FAIL: $desc (exit $_status)"
       return "$_status"
@@ -133,7 +162,16 @@ run_plan() {
   return 0
 }
 
+refuse_bootstrap() {
+  info "REFUSED: $BOOTSTRAP_REFUSAL"
+  info "Nothing was run."
+}
+
 confirm_and_run_plan() {
+  if [ -n "$BOOTSTRAP_REFUSAL" ]; then
+    refuse_bootstrap
+    exit 1
+  fi
   if [ ! -s "$PLAN_FILE" ]; then
     info "No project-owned setup commands detected; nothing to run."
     return 0
@@ -176,6 +214,11 @@ run_bootstrap_worker() {
   write_bootstrap_state running 0 "$$"
   info "AI development harness bootstrap (automatic)"
   info "Project root: $PROJECT_ROOT"
+  if [ -n "$BOOTSTRAP_REFUSAL" ]; then
+    refuse_bootstrap
+    write_bootstrap_state failed 1 ""
+    return 1
+  fi
   print_plan
   _status=0
   run_plan || _status=$?
@@ -229,6 +272,12 @@ auto_mode() {
     esac
   fi
 
+  if [ -n "$BOOTSTRAP_REFUSAL" ]; then
+    run_bootstrap_worker > "$BOOTSTRAP_LOG" 2>&1 || :
+    auto_say "target $PROJECT_ROOT registered; bootstrap REFUSED, nothing was run: $BOOTSTRAP_REFUSAL"
+    return 0
+  fi
+
   if [ ! -s "$PLAN_FILE" ]; then
     STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     write_bootstrap_state ok 0 ""
@@ -254,29 +303,81 @@ auto_mode() {
   return 0
 }
 
-make_has_target() {
-  [ -f Makefile ] && has_cmd make && make -qp 2>/dev/null | grep -q "^$1:"
+# load_make_targets  Reads the Makefile database once. `make -qp` expands
+# $(shell ...) in the Makefile, so it is project code and runs bounded; a
+# probe that cannot run bounded, or does not finish, refuses the bootstrap.
+MAKE_DB_STATE=""
+load_make_targets() {
+  [ -z "$MAKE_DB_STATE" ] || return 0
+  MAKE_DB_STATE=unavailable
+  if [ ! -f Makefile ] || ! has_cmd make; then
+    return 0
+  fi
+  if [ "$SUPERVISED" != "1" ]; then
+    refuse_unsupervised
+    return 0
+  fi
+  _status=0
+  "$SCRIPT_DIR/with-timeout.sh" "$BOOTSTRAP_TIMEOUT" "make -qp (Makefile target discovery)" HARNESS_BOOTSTRAP_TIMEOUT make -qp > "$MAKE_DB" 2>/dev/null </dev/null || _status=$?
+  # `make -qp` exits 1 when a target is out of date; only a timeout is fatal.
+  if [ "$_status" -eq 124 ]; then
+    BOOTSTRAP_REFUSAL="discovering Makefile targets with make -qp did not finish within ${BOOTSTRAP_TIMEOUT}s (a \$(shell ...) in the Makefile may hang); fix the Makefile or set HARNESS_BOOTSTRAP_TIMEOUT, then rerun."
+    return 0
+  fi
+  MAKE_DB_STATE=loaded
 }
 
+make_has_target() {
+  load_make_targets
+  [ "$MAKE_DB_STATE" = loaded ] && grep -q "^$1:" "$MAKE_DB"
+}
+
+# Lockfiles and the package manager that wrote each one.
+NODE_LOCKFILES="pnpm-lock.yaml yarn.lock package-lock.json npm-shrinkwrap.json bun.lock bun.lockb"
+
+lockfile_owner() {
+  case "$1" in
+    pnpm-lock.yaml) printf '%s\n' pnpm ;;
+    yarn.lock) printf '%s\n' yarn ;;
+    package-lock.json|npm-shrinkwrap.json) printf '%s\n' npm ;;
+    bun.lock|bun.lockb) printf '%s\n' bun ;;
+  esac
+}
+
+# detect_node_pm  Sets NODE_PM and NODE_LOCKED, or BOOTSTRAP_REFUSAL when the
+# lockfile's package manager cannot be honored. Another manager would resolve a
+# different dependency set than the lockfile records, so there is no fallback.
 detect_node_pm() {
-  if [ -f pnpm-lock.yaml ] && has_cmd pnpm; then
-    printf '%s\n' pnpm
-  elif [ -f yarn.lock ] && has_cmd yarn; then
-    printf '%s\n' yarn
-  elif [ -f package-lock.json ] && has_cmd npm; then
-    printf '%s\n' npm
-  elif [ -f package.json ]; then
-    if has_cmd pnpm; then
-      printf '%s\n' pnpm
-    elif has_cmd yarn; then
-      printf '%s\n' yarn
-    elif has_cmd npm; then
-      printf '%s\n' npm
-    else
-      printf '%s\n' ""
+  NODE_PM=""
+  NODE_LOCKED=0
+  _locks=""
+  _owner=""
+  for _lock in $NODE_LOCKFILES; do
+    [ -f "$_lock" ] || continue
+    _pm=$(lockfile_owner "$_lock")
+    _locks="${_locks:+$_locks, }$_lock"
+    if [ -z "$_owner" ]; then
+      _owner=$_pm
+    elif [ "$_owner" != "$_pm" ]; then
+      _owner=conflict
     fi
-  else
-    printf '%s\n' ""
+  done
+
+  if [ "$_owner" = conflict ]; then
+    BOOTSTRAP_REFUSAL="lockfiles from different package managers are present ($_locks); delete the stale ones so a single package manager owns the install, then rerun."
+  elif [ -n "$_owner" ]; then
+    if has_cmd "$_owner"; then
+      NODE_PM=$_owner
+      NODE_LOCKED=1
+    else
+      BOOTSTRAP_REFUSAL="$_locks was written by $_owner, but $_owner is not installed; install $_owner and rerun (installing with another package manager would give a different set of packages)."
+    fi
+  elif has_cmd pnpm; then
+    NODE_PM=pnpm
+  elif has_cmd yarn; then
+    NODE_PM=yarn
+  elif has_cmd npm; then
+    NODE_PM=npm
   fi
 }
 
@@ -291,32 +392,40 @@ bootstrap_make() {
 }
 
 bootstrap_node() {
-  pm="$(detect_node_pm)"
-  if [ -n "$pm" ]; then
-    case "$pm" in
-      pnpm)
-        run_if_available "installing JavaScript/TypeScript dependencies with pnpm" pnpm install
-        ;;
-      yarn)
-        if [ -f yarn.lock ]; then
-          run_if_available "installing JavaScript/TypeScript dependencies with yarn" yarn install --frozen-lockfile
-        else
-          run_if_available "installing JavaScript/TypeScript dependencies with yarn" yarn install
-        fi
-        ;;
-      npm)
-        if [ -f package-lock.json ]; then
-          run_if_available "installing JavaScript/TypeScript dependencies with npm ci" npm ci
-        else
-          run_if_available "installing JavaScript/TypeScript dependencies with npm install" npm install
-        fi
-        ;;
-    esac
-  elif [ -f package.json ]; then
-    info "package.json found, but npm/pnpm/yarn is unavailable."
-  else
+  if [ ! -f package.json ]; then
     info "No package.json found; skipping JavaScript/TypeScript dependency install."
+    return 0
   fi
+  detect_node_pm
+  if [ -n "$BOOTSTRAP_REFUSAL" ]; then
+    return 0
+  fi
+  case "$NODE_PM:$NODE_LOCKED" in
+    pnpm:1)
+      run_if_available "installing JavaScript/TypeScript dependencies with pnpm" pnpm install --frozen-lockfile
+      ;;
+    pnpm:0)
+      run_if_available "installing JavaScript/TypeScript dependencies with pnpm" pnpm install
+      ;;
+    yarn:1)
+      run_if_available "installing JavaScript/TypeScript dependencies with yarn" yarn install --frozen-lockfile
+      ;;
+    yarn:0)
+      run_if_available "installing JavaScript/TypeScript dependencies with yarn" yarn install
+      ;;
+    npm:1)
+      run_if_available "installing JavaScript/TypeScript dependencies with npm ci" npm ci
+      ;;
+    npm:0)
+      run_if_available "installing JavaScript/TypeScript dependencies with npm install" npm install
+      ;;
+    bun:1)
+      run_if_available "installing JavaScript/TypeScript dependencies with bun" bun install --frozen-lockfile
+      ;;
+    *)
+      info "package.json found, but npm/pnpm/yarn is unavailable."
+      ;;
+  esac
 }
 
 bootstrap_php() {
@@ -372,20 +481,33 @@ if [ "$AUTO" != "1" ]; then
   info ""
 fi
 
-missing=0
-for tool in git sh; do
-  if has_cmd "$tool"; then
-    [ "$AUTO" = "1" ] || info "found: $tool"
-  else
-    info "missing required tool: $tool"
-    missing=1
+# Required tools come from the project's .harness-required-tools (plus git and
+# sh), the same list CI installs, so a missing tool stops the bootstrap here
+# instead of turning into a silent skip during verification.
+REQUIRED_TOOLS="$SCRIPT_DIR/required-tools.sh"
+if [ ! -x "$REQUIRED_TOOLS" ]; then
+  info "FAIL: $REQUIRED_TOOLS is missing or not executable."
+  exit 2
+fi
+tools_status=0
+if [ "$AUTO" = "1" ]; then
+  tools_out=$("$REQUIRED_TOOLS" check --quiet --project "$PROJECT_ROOT" 2>&1) || tools_status=$?
+  if [ "$tools_status" -ne 0 ]; then
+    printf '%s\n' "$tools_out" | while IFS= read -r tools_line; do
+      auto_say "$tools_line"
+    done
+    auto_say "bootstrap not run for $PROJECT_ROOT; fix the required tools, then rerun scripts/init.sh --project $PROJECT_ROOT --yes."
+    exit "$tools_status"
   fi
-done
-
-if [ "$missing" -ne 0 ]; then
-  info ""
-  info "Install missing required tools and rerun scripts/init.sh."
-  exit 1
+else
+  "$REQUIRED_TOOLS" check --project "$PROJECT_ROOT" || tools_status=$?
+  if [ "$tools_status" -eq 1 ]; then
+    info ""
+    info "Install missing required tools and rerun scripts/init.sh."
+    exit 1
+  elif [ "$tools_status" -ne 0 ]; then
+    exit "$tools_status"
+  fi
 fi
 
 bootstrap_make

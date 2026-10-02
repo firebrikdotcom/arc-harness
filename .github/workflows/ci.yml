@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Node if package.json exists
         if: ${{ hashFiles('package.json') != '' }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '20'
 
@@ -28,8 +28,16 @@ jobs:
         if: ${{ hashFiles('package.json') != '' }}
         run: corepack enable
 
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install --yes shellcheck
+      # Exactly the packages in .harness-required-tools, the list scripts/init.sh
+      # checks locally. --no-upgrade keeps tools the runner already has at their
+      # current versions. tests/required-tools.sh fails on any other install here.
+      - name: Install required tools
+        run: |
+          packages=$(scripts/required-tools.sh packages)
+          if [ -n "$packages" ]; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-upgrade $packages
+          fi
 
       - name: Bootstrap
         run: scripts/init.sh --yes
