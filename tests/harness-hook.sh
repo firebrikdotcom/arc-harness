@@ -24,6 +24,10 @@ CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 
 HARNESS_DB_ROOT="$TMP_ROOT/db"
 export HARNESS_DB_ROOT
+# The CLI runs from the caller's directory, often the real checkout; never
+# rotate its tracked progress.md.
+HARNESS_PROGRESS_ROTATE=0
+export HARNESS_PROGRESS_ROTATE
 
 fail() {
   printf '%s\n' "FAIL: $*"

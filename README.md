@@ -20,16 +20,7 @@ scripts/init.sh --project /path/to/project
 
 With the hooks installed (`scripts/install-hooks.sh`), this happens automatically: every Claude Code or Codex session registers the project it starts in as a harness target and bootstraps it once per lockfile fingerprint. See `docs/setup.md`.
 
-Then read:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `docs/architecture.md`
-- `docs/conventions.md`
-- `docs/setup.md`
-- `progress.md`
-
-These files explain how agents and humans should work in this repo.
+Then read [GUIDE.md](GUIDE.md), the one short core guide for agents and humans. `AGENTS.md` and `CLAUDE.md` point to it and add only agent-specific notes. Every other doc is reference, and the guide says when to open each one.
 
 ## Daily Workflow
 
@@ -51,35 +42,31 @@ You cannot build before plan is done. You cannot review before build is done.
 
 `build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start`.
 
-If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
+If it stops you, run `scripts/harness status`. [GUIDE.md](GUIDE.md) says who may continue a paused run, abort one, or approve a `knowledge/` folder. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
 
 The phase guard is a Claude Code hook only. It checks the denylist and knowledge-trust state before requiring an active phase, then counts an allowed tool call as a harness step. Other agents must follow the written workflow themselves.
 
 ## Important Rules
 
-- Do not declare success without running `scripts/verify.sh`.
-- Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`. The same denylist is applied by the guard hook to every real Write, Edit, and Bash call.
+The rules for all work live in [GUIDE.md](GUIDE.md) and are not repeated here. Bootstrap behaviour worth knowing before a first run:
+
 - `scripts/init.sh` previews project-owned setup commands and runs them only after you confirm, or with `--yes`.
 - Bootstrap uses the lockfile-aware install command: `npm ci`, `yarn install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists.
-- A `knowledge/` folder is followed only after a human runs `scripts/knowledge-trust.sh approve`.
-- Keep planning, building, and reviewing as separate phases.
-- Do not assume secrets exist locally or in CI.
-- Do not delete existing files unless the task explicitly requires it.
-- Record commands run and results in `progress.md` and handoff notes.
 
 ## Project Structure
 
 ```text
 .github/workflows/ci.yml  CI verification
 .gitignore                Repo hygiene for local artifacts, secrets, and generated output
-AGENTS.md                 Agent operating guide
+GUIDE.md                  Core guide: the one mandatory read, with pointers to on-demand docs
+AGENTS.md                 Agent entry point: points to GUIDE.md, plus the managed harness block
 Makefile                  Helper targets: make install-guides
-CLAUDE.md                 Claude-specific project instructions
+CLAUDE.md                 Claude Code entry point: points to GUIDE.md, phase guard notes, managed harness block
 SECURITY.md               Security and repository hygiene guidance
 docs/architecture.md      Architecture notes and module boundaries
 docs/conventions.md       Coding, testing, logging, and security conventions
 docs/setup.md             Local setup and command documentation
-progress.md               Current goal, decisions, steps, blockers, verification history
+progress.md               Current run only: goal, plan, decisions, steps, blockers, verification (earlier runs are archived under .harness-db/runs/<id>/)
 schemas/action.schema.json  Proposed-action contract
 scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
@@ -179,7 +166,7 @@ When source code, runtime commands, dependencies, or architecture are added:
 - Update `docs/setup.md` with exact setup and run commands.
 - Update `docs/architecture.md` with module boundaries and dependency rules.
 - Update `docs/conventions.md` if new language/framework conventions are introduced.
-- Keep `progress.md` current as work proceeds.
+- Keep `progress.md` current as work proceeds; it holds only the current run, and `harness plan start` archives the previous page.
 
 ## Local-Only Files
 

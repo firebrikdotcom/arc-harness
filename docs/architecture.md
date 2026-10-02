@@ -6,7 +6,7 @@ This repository currently contains AI-agent configuration and harness files. It 
 
 Known repo items:
 
-- `AGENTS.md`, `CLAUDE.md`, `docs/`, `tasks/`, `scripts/`, `schemas/`, and `progress.md`: AI development harness.
+- `GUIDE.md` (the core guide), `AGENTS.md` and `CLAUDE.md` (entry points to it), `docs/`, `tasks/`, `scripts/`, `schemas/`, and `progress.md`: AI development harness.
 - `.github/workflows/`: CI automation.
 - `.gitignore` and `SECURITY.md`: repository hygiene and security guidance.
 
@@ -30,16 +30,7 @@ Project-related documents are database records, not template source. Store proje
 
 Target projects do not need to contain this harness. When a target project has its own `AGENTS.md`, `CLAUDE.md`, setup docs, or verification scripts, those project-local instructions take precedence for work inside that target root.
 
-Unknown placeholders:
-
-- Product/domain architecture: unknown.
-- Runtime language/framework: unknown.
-- Main application entrypoint: unknown.
-- Persistence layer: unknown.
-- External services: unknown.
-- Deployment target: unknown.
-
-Update this document as soon as source modules or runtime boundaries are introduced.
+The harness has no application of its own. A target's product architecture, runtime, entrypoint, persistence, services, and deployment belong in that target's docs. Update this document when harness modules or runtime boundaries change.
 
 ## Module Boundaries
 
@@ -108,3 +99,5 @@ Add dated decisions here as the system takes shape.
 - 2026-09-28: Adopted jevgrep as the harness's semantic retrieval step. Retrieval is the one Jev path that sends source to the provider, accepted by the operator for now; it is opt-in per target (`.harness-no-upload` refuses), goes only through `scripts/jg.sh`, and leaves only compact private records. The default denylist rejects the two upload-widening `jg` flags, and `plan done` checkpoints report whether retrieval was used so the pilot can compare runs. No gate, permission, or routing behaviour changed.
 - 2026-09-29: Made the Jev pilot counter and cohort report machine-wide: `advise --report` and the `review done` counter sum every registered target's checkpoints (`--scope target|machine`, per-target `by_target` breakdown); cohorts still never pool across question, policy or model versions. Shadow only; no promotion or gate behaviour changed.
 - 2026-09-30: Serialized run-state changes within one target database. Sessions in one checkout share `runs/current`, so every state-changing `scripts/harness` command holds a `runs/.lock` symlink naming its owner pid for the whole command, crashed owners' locks are cleared by the next waiter through a short guard, and the pointer and JSON snapshots are replaced by rename so lock-free readers (`status`, the phase guard) never see a partial file. A per-session run pointer was not adopted: gate records stay per checkout and the guard-protected hooks read the shared pointer, so it would isolate only part of the state; a separate worktree remains the way to give a session its own run.
+- 2026-09-30: Made `progress.md` hold only the current run. `harness plan start` archives the previous page under the run database (`runs/<id>/progress.md`, named by the page's `harness-run` marker, or `progress.previous.md` for unclaimed content) and writes a fresh page for the new run. Rotation happens at the next run's start rather than at `review done`, so the finished run's notes stay in the working tree until they are committed; archives are never overwritten and the page changes only after its copy is verified.
+- 2026-09-30: Replaced the mandatory multi-file reading list with one short core guide, `GUIDE.md`. `AGENTS.md`, `CLAUDE.md`, and `README.md` point to it and no longer restate its rules; the other docs are reference, opened when a task needs them. The managed `harness-cli` block, which the installer owns and writes into targets, is unchanged. `tests/core-guide.sh` keeps the guide short, keeps its mandatory rules present, and fails if an entry file copies a rule back.

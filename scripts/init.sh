@@ -403,6 +403,6 @@ confirm_and_run_plan
 
 info ""
 info "Next steps:"
-info "1. Read AGENTS.md, CLAUDE.md, docs/architecture.md, docs/conventions.md, and docs/setup.md."
+info "1. Read GUIDE.md in the harness root; open the other docs only when the task needs them."
 info "2. Create a task from tasks/task-template.md."
 info "3. Run scripts/verify.sh before declaring work complete."

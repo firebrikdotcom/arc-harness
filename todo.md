@@ -38,15 +38,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
   - Why: checking your own homework does not catch what you did not see.
   - Fix: run review in a fresh session or subagent that only gets the diff and the acceptance criteria.
 
-## Memory gets messy
-
-- [ ] 13. `progress.md` holds many goals and months of history instead of the current run. (Merged #44, #45, #46, #49, #52.)
-  - Why: reading a whole diary to find today's page wastes time and mixes things up.
-  - Fix: keep `progress.md` to the current run's goal, plan, and decisions; archive finished runs under `.harness-db/runs/<id>/`.
-- [ ] 17. Mandatory reading is six or more files that duplicate each other and mostly say "unknown". (Merged #18, #50, #51.)
-  - Why: a huge, repeated instruction pile makes the AI skim, and copies drift apart.
-  - Fix: one short core guide; `README.md`, `CLAUDE.md`, and `AGENTS.md` point to it, and other docs open only when a task needs them.
-
 ## Dropped 2026-09-03
 
 Nitpicks or items that stopped mattering after other fixes: #25 (interpreter-aware syntax check), #26 (non-shell files under `scripts/`), #32 (idempotence definition), #48 (state backup guidance), #54 (graph index scope, external tool).
