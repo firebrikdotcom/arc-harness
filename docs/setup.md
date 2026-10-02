@@ -522,3 +522,23 @@ scripts/install-hooks.sh --uninstall
 ```
 
 The installer only touches hook groups whose command points at these scripts, and writes the Grep/Glob reminder only to the Claude Code settings file. None of these hooks replaces `scripts/hooks/require-phase.sh`, which remains the only enforcement hook.
+
+
+### Audit collection controls and Workflow
+
+The audit workbench at `http://127.0.0.1:18080/` provides persisted, independent Jev and Workflow collection switches. Install the additive collector with `scripts/install-hooks.sh`, then start or restart the audit service. `/workflow` groups newly collected events by native session and task. See `services/harness-audit/README.md` for lifecycle coverage, metadata commands, API contracts, and limitations.
+
+- `HARNESS_AUDIT_SETTINGS`: shared local JSON switches (default harness `.harness-db/audit-settings.json`); use the same path for the service and collectors.
+- `HARNESS_AUDIT_OUTBOX`: durable SQLite delivery queue (default harness `.harness-db/audit-outbox.sqlite`); queued records retry while the service runs and are dropped when their collection category is disabled.
+- `HARNESS_WORKFLOW_STATE`: local session/task bindings (default harness `.harness-db/workflow-state.sqlite`).
+- `HARNESS_SESSION_ID`: exact native session binding for harness child commands; `CODEX_THREAD_ID` and `CLAUDE_SESSION_ID` are also recognized. Hooks use the session ID in their payload. Missing IDs are not guessed.
+- `HARNESS_AUDIT_ENABLED=0`: hard process opt-out. A persisted settings file otherwise controls both categories; before it exists, legacy `=1` enables collection.
+- `HARNESS_AUDIT_URL`: emission destination, now defaulting to `http://127.0.0.1:18080`.
+
+Collection switches do not change Jev's evaluations or routing. The dashboard's **Store user prompts** switch controls `workflow_prompts` (default false). When both it and Workflow are enabled, UserPromptSubmit hooks store complete prompts in UTF-8 chunks and the Workflow page shows them, labeling the first captured prompt as the initial goal. Turning it off stops capture and discards queued prompt records; saved history remains. Older settings files default to prompt capture off. Hook guidance reports the current configuration at session start; hooks re-read settings on every submission. Tool content is excluded; curated task/decision descriptions are explicitly supplied through `harness workflow`. Disabling a category retains stored history. The service delivery worker uses `python3` and the companion harness scripts. Hooks fail open and never alter authorization or required checks.
+
+The installed audit service sets `APP_URL=0.0.0.0` in launchd/systemd and listens on every IPv4 interface at port 18080. Open it through localhost or a machine IP address; telemetry can continue using `127.0.0.1`. The environment example uses the same binding. Existing `.env` files are preserved; installed service configuration overrides their host setting.
+
+Workflow session selectors show a label of at most five words, preferring the first named task, then the native session title, then the first captured prompt. IDs appear in Session metadata alongside the agent, model, and status. Native hooks identify their runtime explicitly and read model/title metadata from the exact matching local transcript or native session metadata database when available; unavailable fields show Unknown. Runtime changes remain in the timeline. `harness workflow refresh-metadata` recovers metadata for already observed sessions without importing prompt or tool content.
+
+Session metadata also displays the full working-directory path (`cwd`). The native hook directory takes precedence over recovered metadata. Directory changes are retained in the timeline; paths preserve case and spaces. Unavailable directories show Unknown.

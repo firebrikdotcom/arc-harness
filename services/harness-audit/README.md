@@ -5,7 +5,7 @@ JEV routing, resolved outcomes, and agent/token measurements as immutable
 `AuditEventRecorded` events, then projects them into an `audit_events_view`
 read model for summaries and review.
 
-It is intentionally local-only by default:
+The service listens on all IPv4 interfaces (`0.0.0.0:18080`); use localhost or this machine's address to open it:
 
 ```sh
 cp .env.example .env
@@ -22,7 +22,7 @@ Browser pages (Arc UI host, same read model as the API):
 
 - `GET /` — audit workbench: a daily accuracy line (labeled checkpoint decisions by UTC day of the checkpoint), headline totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
 - `GET /events[?type=jev.checkpoint&limit=200]` — newest-first event log with a type filter
-- `GET /public/styles.css` — the Arc scaffold stylesheet, embedded at build time
+- `GET /public/styles.css` — the dashboard stylesheet, embedded at build time
 
 Endpoints:
 
@@ -85,10 +85,58 @@ layout, `components/ui.html` macros and `public/styles.css`, all embedded with
 the grouped checkpoint and route summaries from `summary.rs` plus the newest
 events; `GET /events` lists the log. Both pages read `audit_events_view`
 through the same `ReadModelStore` as the JSON endpoints. There is no sign-in:
-the service binds to loopback, and the framework's authenticated navigation is
+the installed service binds to all IPv4 interfaces, and the framework's authenticated navigation is
 replaced by the host's own links. The accuracy chart at the top is inline
 SVG computed server-side by `summary::daily_checkpoint_accuracy` and
 `ui::accuracy_chart`, so it needs no JavaScript; its daily counts sum to the
 headline labeled and correct totals, and it pools families and question
 versions, so use the checkpoint table to compare cohorts. Open http://127.0.0.1:18080/ after
 `scripts/audit-service.sh serve` (a restart rebuilds the binary).
+
+
+## Jev and Workflow collection
+
+The workbench now has two independent **Audit collection** switches:
+
+- **Jev** records the existing routes, checkpoints, outcome labels, completion measurements, and token events. It does not control evaluation, routing, or shadow mode.
+- **Workflow** records correlated session/task lifecycles, accepted harness phase transitions, tool return/failure metadata, verification and review results, curated task descriptions, decisions and options, and explicit final outcomes.
+
+Save the switches on `/`. They persist across restarts and apply to both local collectors and API ingestion. Disabling collection preserves stored history and discards undelivered records of that type. `/workflow` offers a session selector, task summaries, phase states, task filters, and a timeline ordered by source time. Missing metadata is shown as unspecified; a returned tool call does not imply verification success. Historical sessions are not reconstructed.
+
+`GET /api/audit/settings` returns `{ "jev": true, "workflow": true }`.
+`PUT /api/audit/settings` replaces those two booleans (JSON, same-origin browser requests only).
+`GET /api/audit/workflow` returns grouped sessions/tasks/events.
+Both categories default to enabled on service startup. Switches apply to collection only.
+
+Configuration lives at `../../.harness-db/audit-settings.json`; use `HARNESS_AUDIT_SETTINGS` to select another path, with the same value in the service and every collector. `HARNESS_AUDIT_ENABLED=0` remains a process-level hard opt-out; `=1` opts in when no settings file exists. Once the service has created its settings file, it controls collection for local clients even if the legacy variable is unset. Defaults and API ingestion fail closed on a malformed settings file.
+
+Telemetry is first saved in a SQLite outbox (`HARNESS_AUDIT_OUTBOX`, default `../../.harness-db/audit-outbox.sqlite`). The running service retries delivery every two seconds; every explicit emission also attempts a bounded drain. Hook collection only queues locally. Repeated HTTP delivery uses the same event ID and is idempotent; conflicting data with the same ID is rejected. On outages, events remain queued. `scripts/harness workflow flush` manually retries delivery. A failed delivery does not fail a phase, hook, or verification gate. The service worker requires `python3` and the companion harness scripts on this machine. Shared switches and this worker are local-machine features; remote collectors must use the same configured settings through their own deployment configuration.
+
+### Recording tasks and decisions
+
+Run `scripts/install-hooks.sh` to install additive lifecycle hooks. Existing unrelated hooks are preserved and backed up. The collector listens for SessionStart, UserPromptSubmit, PostToolUse and SessionEnd, plus PostToolUseFailure where supported. It uses the native session ID; child harness commands use `CODEX_THREAD_ID`, `CLAUDE_SESSION_ID`, or `HARNESS_SESSION_ID`. On runtimes providing `CLAUDE_ENV_FILE`, the start hook exports that binding. If a direct command has no native ID, phase/sensor telemetry is skipped instead of guessing a session.
+
+The enabled SessionStart hook provides the recording commands as session context, so new sessions can supply curated task summaries, meaningful decisions, and explicit outcomes as they work. A generic task is created when the session is first observed. Supply curated metadata to name it; use `--new` for a subsequent task and `--parent-task-id` for a dependency. Final outcomes require an explicit command. Ending a session does not automatically mark its work complete.
+
+```sh
+scripts/harness workflow task --name "Improve audit dashboard" --description "Add session task timelines and collection switches"
+scripts/harness workflow decision --description "Choose verification scope" --option focused --option full --selected full
+scripts/harness workflow outcome --status completed --description "Required checks and live rendering passed"
+```
+
+Outside a native session, add `--session-id ACTUAL_SESSION_ID`. Workflow context lives in `HARNESS_WORKFLOW_STATE` (default `../../.harness-db/workflow-state.sqlite`). Prompt bodies, transcript contents, tool inputs, command text, and tool output are never copied into Workflow events. Only curated explicit descriptions/options are stored, so do not supply secrets in those fields. Session/tool delivery is observation, not a complete transcript audit.
+
+Offline regression coverage: `sh tests/workflow-audit.sh` from the harness root and `cargo test` from this service directory.
+
+Prompt collection is controlled by **Store user prompts** on the dashboard (`workflow_prompts`, default false). It requires Workflow to be enabled. Future submitted prompts appear on the Workflow page, with the first captured prompt labeled as the initial goal. Existing sessions are not backfilled. Turning capture off retains stored history. Task summaries continue to use `harness workflow task`.
+
+The dashboard uses consistent panel spacing, responsive collection controls and tables, and session cards with status/phase summaries. Expand **Task details** for task IDs, parent relationships, and full outcomes. Session metadata keeps the full ID, runtime, model, and working-directory path visible.
+
+Visual direction follows the original Arc scaffold: warm paper surfaces, ink outlines, amber accents, square components, and monospace labels. Layout refinements preserve those tokens and component treatments.
+
+Workflow uses two-step navigation. `/workflow` lists sessions in a searchable, sortable, paginated table. Filters cover agent, model, session status, full working-directory path, current task phase, captured-prompt availability, and inclusive UTC activity dates. Search matches all words across recorded metadata, tasks, outcomes, decisions, and captured prompts. Open a description for session details; **Back to sessions** retains filters, sorting and page. Existing `?session_id=` links remain supported. Metadata refreshes do not advance the session activity date.
+
+
+### Timeline analysis
+
+Session details explain each event and provide search, type and result filters. Session-wide counts distinguish tool success (explicit exit 0), failures, returns with unknown results, process handles and starts without observed returns. Checks and explicit task outcomes are separate evidence. Expand Event evidence for native tool call ID, source and recorded timestamps, harness run, exit code and paired tool round-trip duration. PreToolUse hooks capture starts; matching native call IDs preserve the original task even if another task begins before the return. Missing IDs/timing stay unavailable. Process handles do not prove final process completion; later tool/check events provide that evidence. Inputs and outputs are not stored. Existing history is enriched from its saved facts without inventing missing details. Reinstall hooks and restart native sessions to enable new start hooks.

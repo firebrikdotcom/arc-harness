@@ -13,8 +13,10 @@ use crate::domain::audit_event::projector::{AuditEventProjector, AUDIT_EVENTS_VI
 
 mod domain;
 mod routes;
+mod settings;
 mod summary;
 mod ui;
+mod workflow;
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations");
 
@@ -83,6 +85,22 @@ fn migrate() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn start_delivery_worker() {
+    let collector = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/workflow_audit.py");
+    if !collector.is_file() {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        let _ = std::process::Command::new("python3")
+            .arg(&collector)
+            .arg("flush")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+}
+
 async fn serve() -> anyhow::Result<()> {
     for key in ["APP_URL", "SECRET_KEY", "DATABASE_URL"] {
         if env::var_os(key).is_none() {
@@ -94,6 +112,9 @@ async fn serve() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "8080".into())
         .parse::<u16>()?;
     info!(url=%format!("http://{host}:{port}"), "Arc audit application starting");
+    // Make the shared switches available to collectors before the server accepts events.
+    settings::save(settings::load()?)?;
+    start_delivery_worker();
     builder().serve(host, port).await?;
     Ok(())
 }

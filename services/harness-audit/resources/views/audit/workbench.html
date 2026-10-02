@@ -1,5 +1,30 @@
 {% extends "layouts/admin.html" %}{% import "components/ui.html" as ui %}{% block content %}
-<header class="page-head"><div><p class="eyebrow">Jev / shadow audit</p><h1>Audit workbench</h1></div>{% if totals.events > 0 %}{{ ui::status(label="LIVE", tone="success") }}{% else %}{{ ui::status(label="EMPTY", tone="warning") }}{% endif %}</header>
+<header class="page-head"><div><p class="eyebrow">Jev + Workflow</p><h1>Audit workbench</h1></div>{% if totals.events > 0 %}{{ ui::status(label="LIVE", tone="success") }}{% else %}{{ ui::status(label="EMPTY", tone="warning") }}{% endif %}</header>
+
+<section class="panel collection-controls" aria-labelledby="collection-title"><div class="panel__head"><h2 id="collection-title">Audit collection</h2><a class="button" href="/workflow">Workflow · {{ workflow_sessions }} sessions</a></div>
+<p class="section-note">Control new records on this machine. Saved history remains available. These switches do not change Jev routing or its shadow mode.</p>
+<form id="collection-settings"><div class="audit-switches">
+<label class="audit-switch"><input type="checkbox" role="switch" id="collect-jev"{% if collection_settings.jev %} checked{% endif %}><span><strong>Jev</strong><small>Routing decisions, checkpoint accuracy, and usage</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="collect-workflow"{% if collection_settings.workflow %} checked{% endif %}><span><strong>Workflow</strong><small>Session tasks, phases, decisions, and results</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="collect-prompts"{% if collection_settings.workflow_prompts %} checked{% endif %}><span><strong>Store user prompts</strong><small>Capture future prompts when Workflow is enabled. Saved prompts remain visible when turned off.</small></span></label>
+</div><div class="settings-actions"><button class="button" type="submit">Save collection settings</button><span id="collection-status" role="status" aria-live="polite">Changes apply after saving.</span></div></form>
+<noscript>Enable JavaScript to save settings, or use the settings API.</noscript>
+</section>
+<script>
+(() => {
+ const form = document.getElementById('collection-settings');
+ const status = document.getElementById('collection-status');
+ form.addEventListener('submit', async event => {
+  event.preventDefault(); const button = form.querySelector('button'); button.disabled = true; status.textContent = 'Saving…';
+  try {
+   const response = await fetch('/api/audit/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jev:document.getElementById('collect-jev').checked,workflow:document.getElementById('collect-workflow').checked,workflow_prompts:document.getElementById('collect-prompts').checked})});
+   if (!response.ok) throw new Error('The settings could not be saved.');
+   status.textContent = 'Saved. Collection settings are active.';
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+ });
+})();
+</script>
 <section class="panel accuracy-chart"><div class="panel__head"><h2>Accuracy over time</h2>{% if accuracy_chart.latest %}<span class="mono">Latest {{ accuracy_chart.latest.date }}: {{ accuracy_chart.latest.percent }}%</span>{% endif %}</div>
 <p class="section-note">Share of labeled checkpoint decisions that were correct, by UTC day of the checkpoint. Unknown labels are left out, gaps are days without labels, and the line pools every family and question version.</p>
 {% if accuracy_chart.points %}<div class="chart-wrap"><svg class="chart" viewBox="0 0 {{ accuracy_chart.width }} {{ accuracy_chart.height }}" role="img" aria-labelledby="accuracy-chart-title"><title id="accuracy-chart-title">Daily Jev accuracy, {{ accuracy_chart.points | length }} days with labeled decisions</title>

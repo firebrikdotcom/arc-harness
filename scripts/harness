@@ -49,6 +49,7 @@ usage() {
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
+  info "  workflow task|decision|outcome|flush  Record session task metadata or retry delivery."
   info "  route --state PATH   Route compact task metadata before an agent starts."
   info "  launch --state PATH --default-command PATH"
   info "                       Select and start an argv command profile."
@@ -947,6 +948,9 @@ case "$COMMAND" in
   status)
     cmd_status "$@"
     ;;
+  workflow)
+    exec python3 "$SCRIPT_DIR/workflow_audit.py" "$@"
+    ;;
   route|launch|advise|budget)
     if ! has_cmd python3; then
       info "FAIL: python3 is required for task-entry routing."
@@ -975,3 +979,9 @@ case "$COMMAND" in
     exit "$EXIT_USAGE"
     ;;
 esac
+
+if [ "$COMMAND" = "plan" ] || [ "$COMMAND" = "build" ] || [ "$COMMAND" = "review" ]; then
+  if has_cmd python3; then
+    python3 "$SCRIPT_DIR/workflow_audit.py" phase --db-root "$DB_ROOT" --phase "$COMMAND" >&2 || :
+  fi
+fi

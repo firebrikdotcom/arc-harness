@@ -136,6 +136,9 @@ if mkdir -p "$records_dir" 2>/dev/null; then
   mv "$record.tmp.$$" "$record"
   info ""
   info "Run record: $record"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$SCRIPT_DIR/workflow_audit.py" check --kind review --record "$record" >&2 || :
+  fi
 else
   info "WARN: could not create $records_dir; no review record written."
 fi
