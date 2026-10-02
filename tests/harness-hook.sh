@@ -55,6 +55,10 @@ record() {
   mkdir -p "$HARNESS_DB_ROOT/records"
   printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$(date +%s)" "GIT_HEAD=fixture" "EXIT=$2" \
     > "$HARNESS_DB_ROOT/records/$1.state"
+  # review done accepts only a passing fresh-session review.
+  if [ "$1" = review ]; then
+    printf '%s\n' "REVIEW_MODE=fresh" "REVIEWER_VERDICT=pass" >> "$HARNESS_DB_ROOT/records/$1.state"
+  fi
 }
 
 steps_used() {

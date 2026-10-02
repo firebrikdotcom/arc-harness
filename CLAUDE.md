@@ -30,12 +30,12 @@ Planning output must include:
 - Goal and non-goals.
 - Relevant files and docs read.
 - Harness root and target project root.
-- Acceptance criteria.
+- Acceptance criteria, written as a list under `## Acceptance Criteria` in the task file (from `tasks/task-template.md`; for cross-project work, under `.harness-db/`).
 - Implementation plan.
 - Verification plan.
 - Known risks or unknowns.
 
-Record the plan in `progress.md` before building.
+Start the run with `scripts/harness plan start --task PATH` so review can find the task. Record the plan in `progress.md` before building.
 
 ## Build Behavior
 
@@ -57,12 +57,16 @@ Review should be a separate run or clearly separated phase.
 Run:
 
 ```sh
-scripts/review.sh
+scripts/review.sh   # with HARNESS_REVIEWER_COMMAND set, or pass --reviewer FILE
 ```
+
+The review prints each acceptance criterion of the task recorded by `plan start --task`; `--task PATH` or `HARNESS_TASK` names a different one. Answer every criterion as met, not met, or not applicable, with evidence.
+
+The session that planned and built a change never reviews it. `scripts/review.sh` runs the review in a fresh session named by `--reviewer FILE` or `HARNESS_REVIEWER_COMMAND`, which receives only the acceptance criteria and the diff and gives the verdict. Without a configured reviewer the review fails as misconfigured; report that gate as blocked rather than approving the change yourself. `--self` is for inspection only, and `harness review done` refuses it. See "Fresh-session review" in `docs/setup.md`.
 
 Review must consider:
 
-- Does the change satisfy acceptance criteria?
+- Does the change satisfy each acceptance criterion?
 - Are tests meaningful?
 - Did the work avoid scope creep?
 - Are docs and `progress.md` updated?
@@ -96,13 +100,17 @@ A task is complete only when:
 Every session runs inside a harness phase. Open one before editing files or running commands. Where the phase guard hook is installed, Write, Edit, and Bash are blocked until a phase is active.
 
 ```sh
-scripts/harness plan start      # read, scope the task, record the plan in progress.md
+scripts/harness plan start --task TASK.md  # read, scope the task, record the plan in progress.md
 scripts/harness plan done
 scripts/harness build start     # implement; run scripts/verify.sh before finishing
 scripts/harness build done
-scripts/harness review start    # run scripts/review.sh and inspect the diff
+scripts/harness review start    # run scripts/review.sh, answer each acceptance criterion it prints, inspect the diff
 scripts/harness review done
 ```
+
+Write `TASK.md` from `tasks/task-template.md` with its criteria as a list under `## Acceptance Criteria`, and keep it in the ignored `.harness-db/tasks/`. `plan start --task` records it for the run, and `scripts/review.sh` prints each criterion for the reviewer to answer.
+
+The session that built a change never reviews it. `scripts/review.sh` hands the criteria and the diff to a fresh reviewer session named by `--reviewer FILE` or `HARNESS_REVIEWER_COMMAND` (a JSON argv file), fails as misconfigured without one, and `review done` accepts only a passing fresh review. See "Fresh-session review" in `docs/setup.md`.
 
 Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
 

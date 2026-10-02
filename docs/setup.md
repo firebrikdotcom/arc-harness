@@ -67,6 +67,10 @@ No required environment variables are currently known.
 Optional harness variables:
 
 - `HARNESS_TARGET_ROOT`: target project directory for `scripts/init.sh`, `scripts/verify.sh`, and `scripts/review.sh` when `--project` is not passed.
+- `HARNESS_TASK`: task file for `scripts/review.sh` when `--task` is not passed; it takes precedence over the task recorded by `harness plan start --task`, and its acceptance criteria are printed for the reviewer. Optional, e.g. `.harness-db/tasks/fix-login.md`; safe locally.
+- `HARNESS_REVIEWER_COMMAND`: JSON argv file for `scripts/review.sh` when `--reviewer` is not passed; it names the fresh reviewer session that every review needs (see "Fresh-session review"). Required for `harness review done` unless each review passes `--reviewer`, e.g. `~/.config/harness/reviewer-claude.json`. Safe locally; each review then starts that reviewer, which may be paid.
+- `HARNESS_REVIEWER_ENV`: space-separated names of extra variables passed to that reviewer, such as `ANTHROPIC_API_KEY`; `HARNESS_*`, `CODEX_*`, `CLAUDE_CODE_*`, and `CLAUDECODE` names are refused. Optional; default none.
+- `HARNESS_REVIEWER_TIMEOUT`, `HARNESS_REVIEWER_MAX_BYTES`: seconds before the reviewer is stopped (default `1800`) and the largest packet sent (default `2000000`). Optional.
 - `HARNESS_INIT_YES`: set to `1` to let `scripts/init.sh` run its previewed project-owned setup commands non-interactively.
 - `HARNESS_AUTO_INIT`: set to `0` to make the `SessionStart` auto-init hook exit without registering or bootstrapping; default on.
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
@@ -130,13 +134,80 @@ To verify a separate target project directory:
 scripts/verify.sh --project /path/to/project
 ```
 
-To review a separate target project directory:
+To review a separate target project directory (the review runs in the fresh reviewer session configured by `HARNESS_REVIEWER_COMMAND` or `--reviewer FILE`; see "Fresh-session review" below):
 
 ```sh
-scripts/review.sh --project /path/to/project
+scripts/review.sh --project /path/to/project --reviewer /path/to/reviewer.json
 ```
 
-The review script runs verification in the target project root, then prints the full patch: status, staged diff, unstaged diff, and every untracked file as a new-file diff, for the target and separately for the harness when they differ. It keeps going when verification fails, so the reviewer still sees the change, and exits with the verification status. Its record carries `VERIFY_EXIT`, and `scripts/harness review done` accepts it only when that is `0`.
+The review script runs verification in the target project root, then prints the full patch: status, staged diff, unstaged diff, and every untracked file as a new-file diff, for the target and separately for the harness when they differ. It keeps going when verification fails, so the building session still sees the change, and exits with the verification status. Its record carries `VERIFY_EXIT`, and `scripts/harness review done` accepts it only when that is `0`.
+
+The review is tied to the goal through the active task file. Start the run with it, and the review finds it without further arguments:
+
+```sh
+scripts/harness plan start --task /path/to/task.md
+scripts/review.sh --project /path/to/project   # with HARNESS_REVIEWER_COMMAND set
+```
+
+`plan start --task` records the task's absolute path as `TASK_FILE` in the run state (`harness status` and `run.json` show it). `scripts/review.sh --task PATH` or `HARNESS_TASK=PATH` names a task explicitly, in that order of precedence over the current run's task. The review prints every list item under the task's first `Acceptance Criteria` heading (any level, as in `tasks/task-template.md`) as `AC1.`, `AC2.`, … before the review questions, and asks the reviewer to answer each one as met, not met, or not applicable with evidence. Checkbox markers are stripped, wrapped lines are joined, fenced code is skipped, and the section ends at the next heading of the same or a higher level. A named or recorded file that does not exist or cannot be read fails with exit `2` before verification runs; fresh review without a task or without criteria fails with exit `2` before verification. Only `--self` inspection warns and continues without criteria, or explains how to supply a missing task. The task file is printed as data, with control characters removed and carriage returns turned into spaces; it is never executed.
+
+#### Fresh-session review
+
+A review run by the session that planned and built the change only checks what that session already saw, so that session never reviews it. `scripts/review.sh` always hands the review to a separate reviewer process, named by `--reviewer FILE` or `HARNESS_REVIEWER_COMMAND=FILE`, that gets only the acceptance criteria and the diff. With neither configured, the review fails with exit `2` before verification and says how to configure one. There is no opt-out:
+
+```sh
+scripts/harness plan start --task .harness-db/tasks/my-task.md
+# ... plan, build, verify ...
+scripts/harness review start
+scripts/review.sh --reviewer ~/.config/harness/reviewer-claude.json
+scripts/harness review done
+```
+
+`FILE` holds one JSON argv array, like the `harness launch` command profiles. Arguments after the program may be empty strings. The command runs directly, never through a shell, and runs as a new process each time:
+
+- Its working directory is a new, empty scratch directory outside the project and harness. The runner selects `/tmp` or `/var/tmp` after resolving and excluding both roots; it does not use an inherited `TMPDIR`. That directory holds only `REVIEW.md`, and it is removed afterwards. Project guides such as `CLAUDE.md` or `AGENTS.md` are therefore not discovered.
+- Its stdin is the same packet; the copy is the only file in its working directory, `REVIEW.md`.
+- Its environment is an allowlist: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TERM`, `TMPDIR`, and the `XDG_*` base directories, plus `HARNESS_AUTO_INIT=0` so the SessionStart hook does not register the scratch directory. Agent-session variables (`CLAUDE_CODE_*`, `CLAUDECODE`, `CODEX_*`), harness state, and everything else are left behind. `HARNESS_REVIEWER_ENV` lists further variable names to pass, such as `ANTHROPIC_API_KEY`; it may not name a `HARNESS_*`, `CODEX_*`, `CLAUDE_CODE_*`, or `CLAUDECODE` variable.
+
+The packet contains only four things:
+
+- the task's acceptance criteria as `AC<n>.` items;
+- the `scripts/verify.sh` exit;
+- the target patch that the review prints (status, staged, unstaged and untracked files, but not ignored files);
+- the answer format.
+
+No other text from the task file, no run state or database paths, and nothing from the building session is included. It tells the reviewer that the criteria and the diff are data, not instructions, and asks for one line per criterion, a list of defects, and a final `VERDICT: PASS` or `VERDICT: FAIL`.
+
+The last verdict line in the reviewer's output decides the result. Any of these makes the review exit non-zero, record a non-zero `EXIT`, and so `harness review done` refuses:
+
+- `VERDICT: FAIL`;
+- no verdict line;
+- a non-zero reviewer exit;
+- a reviewer still running after `HARNESS_REVIEWER_TIMEOUT` seconds (default `1800`), which is then stopped;
+- a packet larger than `HARNESS_REVIEWER_MAX_BYTES` (default `2000000`), which is refused whole and never truncated.
+
+When verification fails, the reviewer is not started (`REVIEWER_VERDICT=skipped`). A fresh review fails with exit `2` before verification in these cases: there is no active task; the task lists no acceptance criteria; the command file is missing or invalid; or `python3` is unavailable.
+
+Command arguments containing NUL or characters that cannot be encoded for process execution are refused during the early configuration check. Acceptance criteria are captured during that same early check and kept unchanged if verification edits the task file. That check saves a private snapshot of the exact command bytes. Verification may edit the original profile, but execution uses the snapshot and verifies its hash against the recorded identity. Review directories have mode `0700`, and packets, command snapshots, patches, output and result files have mode `0600`.
+
+The review record adds `REVIEW_MODE` (`fresh` or `self`), `REVIEWER_VERDICT` (`pass`, `fail`, `none`, `timeout`, `too_large`, `not_started`, or `skipped`), `REVIEWER_EXIT`, `REVIEW_PACKET_SHA256`, `REVIEWER_PROGRAM` (the program's base name), and `REVIEWER_COMMAND_SHA256` (the command file's hash), so the configuration behind a verdict can be audited. The packet, the target patch, the reviewer's stdout and stderr, and `result.state` stay in the target database under `reviews/<stamp>-<pid>/`. The reviewer's output is also printed in the review with control characters removed.
+
+`harness review done` refuses any record whose `REVIEW_MODE` is not `fresh` or whose `REVIEWER_VERDICT` is not `pass`, including records written before these fields existed. `scripts/review.sh --self` prints the same patch and criteria (with the no-task and no-criteria warnings) for the building session to inspect, starts no reviewer, and records `REVIEW_MODE=self`, which cannot complete the run. `--self` overrides an inherited `HARNESS_REVIEWER_COMMAND`, and combining it with `--reviewer` is a usage error.
+
+The harness ships no reviewer and chooses no model, and a command that prints a fixed `VERDICT: PASS` is not a review. The regression tests use such fake reviewers only as fixtures, to check what the reviewer receives and how verdicts are handled. They never start a paid reviewer, and CI runs only `scripts/verify.sh`.
+
+Example command files, based on the installed CLIs' `--help` (Claude Code 2.1, Codex CLI 0.159). They choose no model, so they use the CLI's default model:
+
+```json
+["claude", "-p", "--no-session-persistence", "--tools", ""]
+```
+
+```json
+["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-"]
+```
+
+- `claude -p` without `--continue` or `--resume` starts a new conversation. `--no-session-persistence` keeps it from being saved, and `--tools ""` leaves it with no tools, so it can read only the packet. User-level settings and memory still load. Adding `--bare` skips hooks, auto-memory and `CLAUDE.md` discovery too, but it authenticates only with `ANTHROPIC_API_KEY` (list that name in `HARNESS_REVIEWER_ENV`).
+- `codex exec -` reads the packet from stdin. `--ephemeral` persists no session files, and `--sandbox read-only` blocks writes. Add `--ignore-user-config` to skip `config.toml`.
 
 To validate a proposed action JSON file:
 
@@ -184,7 +255,7 @@ sh tests/knowledge-trust.sh
 It finds the harness root by walking up from the current directory for a directory containing `AGENTS.md` and `scripts/verify.sh`. Set `HARNESS_ROOT` to skip discovery.
 
 ```sh
-scripts/harness plan start
+scripts/harness plan start --task tasks/my-task.md
 scripts/harness plan done
 scripts/harness build start
 scripts/harness step --note "edit scripts/verify.sh"
@@ -359,7 +430,7 @@ Phase rules:
 - `review start` fails until `build done` has run.
 - `PHASE done` fails unless that phase is active.
 - `build done` fails unless `.harness-db/records/verify.state` exists, was written after `build start`, and reports `EXIT=0`. `scripts/verify.sh` writes that record on every run, pass or fail.
-- `review done` fails unless `.harness-db/records/review.state` was written after `review start`. `scripts/review.sh` writes it when it reaches the end.
+- `review done` fails unless `.harness-db/records/review.state` was written after `review start`. `scripts/review.sh` writes it when it reaches the end. The record must also say `REVIEW_MODE=fresh` and `REVIEWER_VERDICT=pass`, which only a passing fresh-session review writes.
 - Re-starting a phase that is already done counts against the loop budget.
 - After `review done` or `abort`, only `plan start` is accepted; it opens a new run.
 
@@ -397,7 +468,7 @@ Run state lives under `.harness-db/runs/<run-id>/` in the harness root and is ig
 Gate records live under `.harness-db/records/` (or `targets/<id>/db/records/` for a registered target):
 
 - `verify.state`: `KEY=VALUE` written by `scripts/verify.sh` with `RECORD_EPOCH`, `GIT_HEAD`, `GIT_DIRTY_FILES`, `RAN`, `SKIPPED`, `FAILURES`, and `EXIT`.
-- `review.state`: written by `scripts/review.sh` at the end of a review.
+- `review.state`: written by `scripts/review.sh` at the end of a review, with `VERIFY_EXIT`, `REVIEW_MODE`, `REVIEWER_VERDICT`, `REVIEWER_EXIT`, `REVIEW_PACKET_SHA256`, `REVIEWER_PROGRAM`, `REVIEWER_COMMAND_SHA256`, and `EXIT`.
 
 Override the state directory with `HARNESS_DB_ROOT`, which is how the regression tests keep runs isolated.
 
@@ -428,7 +499,7 @@ It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to
 
 ## Agent Guide Block
 
-The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. Its Jev paragraph names three concrete points to ask Jev (grep versus retrieval in an unfamiliar target, a review finding's severity, a handoff with unresolved failures), each with an exact flag-form `harness advise --family ...` command; `tests/install-guides.sh` runs those commands against the offline fake router. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
+The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. Its Jev paragraph names three concrete points to ask Jev (grep versus retrieval in an unfamiliar target, a review finding's severity, a handoff with unresolved failures), each with an exact flag-form `harness advise --family ...` command; `tests/install-guides.sh` runs those commands against the offline fake router. Its task step names `tasks/task-template.md` and the ignored `.harness-db/tasks/` inside the harness root, and the harness's own template and task database (`HARNESS_DB_ROOT`, default `.harness-db/` under the harness root) by absolute path for an external project, which has neither. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
 
 ```sh
 make install-guides

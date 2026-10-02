@@ -28,6 +28,8 @@ export HARNESS_AUDIT_ENABLED=0
 export HARNESS_ROOT="$ROOT"
 export HARNESS_DB_ROOT="$TMP_ROOT/db"
 unset HARNESS_BUDGET_STEPS HARNESS_BUDGET_TIME_MIN HARNESS_BUDGET_LOOPS HARNESS_BUDGET_TOKENS || true
+# review.sh below uses this test's fake reviewer, never a caller's reviewer or task.
+unset HARNESS_REVIEWER_COMMAND HARNESS_REVIEWER_ENV HARNESS_TASK || true
 
 # A harness target: a git worktree whose guide carries the harness block.
 TARGET="$TMP_ROOT/target"
@@ -97,7 +99,13 @@ printf '%s\n' "$verify_out" | grep -c 'Jev: labeled evidence_assessment/verify-p
 printf '%s\n' "$verify_out" | grep -c 'Jev: labeled reasoning_allocation/phase-build-2 correct' >/dev/null || fail "verify did not label the allocation"
 scripts/harness build "done" >/dev/null
 scripts/harness review start >/dev/null
-review_out=$(scripts/review.sh --project "$TARGET" 2>&1) || fail "review failed: $review_out"
+# Review runs in a fresh session; a fixture reviewer process that passes stands
+# in for it here, with a fixture task for the criteria it is handed.
+printf '%s\n' '# Task: fixture' '' '## Acceptance Criteria' '' '- The fixture change is reviewed.' > "$TMP_ROOT/task.md"
+printf '%s\n' '#!/usr/bin/env sh' 'cat >/dev/null' "printf '%s\\n' 'AC1: met - fixture' 'VERDICT: PASS'" > "$TMP_ROOT/fake-reviewer.sh"
+printf '["sh", "%s"]\n' "$TMP_ROOT/fake-reviewer.sh" > "$TMP_ROOT/reviewer.json"
+review_out=$(scripts/review.sh --project "$TARGET" --task "$TMP_ROOT/task.md" --reviewer "$TMP_ROOT/reviewer.json" 2>&1) || fail "review failed: $review_out"
+printf '%s\n' "$review_out" | grep -q '^Reviewer verdict: pass' || fail "the fixture reviewer did not pass the review: $review_out"
 printf '%s\n' "$review_out" | grep -c 'Jev: handoff_assessment/review-handoff-2 shadow recommendation ready_for_handoff' >/dev/null || fail "review emitted no handoff checkpoint"
 done_out=$(scripts/harness review "done")
 printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/phase-plan-2 correct' >/dev/null || fail "review done did not label the plan handoff"

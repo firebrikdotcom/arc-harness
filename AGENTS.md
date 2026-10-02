@@ -14,7 +14,7 @@ Before coding:
 - Read `AGENTS.md`, `CLAUDE.md`, `docs/architecture.md`, `docs/conventions.md`, `docs/setup.md`, and the active task file.
 - Identify the harness root and the target project root. For cross-project work, do not assume they are the same directory.
 - Inspect the current tree and relevant files before making assumptions.
-- Decompose work into small tasks with clear acceptance criteria.
+- Decompose work into small tasks with clear acceptance criteria. Write them as a list under `## Acceptance Criteria` in the task file (from `tasks/task-template.md`) and start the run with `scripts/harness plan start --task PATH`; `scripts/review.sh` prints each one for the reviewer to answer.
 - Update `progress.md` with the current goal, plan, and first step.
 - For cross-project work, keep project registries, task notes, run progress, generated indexes, and project-specific documents in the ignored harness database directory such as `.harness-db/`, not in tracked template files.
 
@@ -45,7 +45,7 @@ Use separate runs/processes for distinct responsibilities:
 - Review run: run verification, inspect diff, ask review questions, and record risks.
 - PR run: summarize changes, commands, results, and unresolved risks.
 
-If a single interactive session performs multiple responsibilities, mark the phase transition in `progress.md` and keep the review phase separate from implementation decisions.
+If a single interactive session performs multiple responsibilities, mark the phase transition in `progress.md` and keep the review phase separate from implementation decisions. Review always runs in a fresh reviewer session: `scripts/review.sh --reviewer FILE` (or `HARNESS_REVIEWER_COMMAND`) gives it only the acceptance criteria and the diff, fails as misconfigured without one, and `harness review done` accepts only a passing fresh review (see `docs/setup.md`). If no reviewer can run, record the review gate as blocked; never approve your own change.
 
 ## Task-entry Routing
 
@@ -72,13 +72,17 @@ Verification detects non-rewriting format checks, lint, typecheck, tests, and bu
 Every session runs inside a harness phase. Open one before editing files or running commands. Where the phase guard hook is installed, Write, Edit, and Bash are blocked until a phase is active.
 
 ```sh
-scripts/harness plan start      # read, scope the task, record the plan in progress.md
+scripts/harness plan start --task TASK.md  # read, scope the task, record the plan in progress.md
 scripts/harness plan done
 scripts/harness build start     # implement; run scripts/verify.sh before finishing
 scripts/harness build done
-scripts/harness review start    # run scripts/review.sh and inspect the diff
+scripts/harness review start    # run scripts/review.sh, answer each acceptance criterion it prints, inspect the diff
 scripts/harness review done
 ```
+
+Write `TASK.md` from `tasks/task-template.md` with its criteria as a list under `## Acceptance Criteria`, and keep it in the ignored `.harness-db/tasks/`. `plan start --task` records it for the run, and `scripts/review.sh` prints each criterion for the reviewer to answer.
+
+The session that built a change never reviews it. `scripts/review.sh` hands the criteria and the diff to a fresh reviewer session named by `--reviewer FILE` or `HARNESS_REVIEWER_COMMAND` (a JSON argv file), fails as misconfigured without one, and `review done` accepts only a passing fresh review. See "Fresh-session review" in `docs/setup.md`.
 
 Record work with `scripts/harness step --note "..."`. When blocked, run `scripts/harness status`. After a budget pause, evaluate and run `scripts/harness continue "<evaluation note>"`.
 

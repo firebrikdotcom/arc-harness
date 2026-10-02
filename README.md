@@ -34,8 +34,8 @@ These files explain how agents and humans should work in this repo.
 ## Daily Workflow
 
 ```sh
-scripts/harness plan start
-# plan the work
+scripts/harness plan start --task tasks/my-task.md
+# plan the work; list the acceptance criteria under "## Acceptance Criteria" in the task file
 scripts/harness plan done
 
 scripts/harness build start
@@ -43,13 +43,13 @@ scripts/harness build start
 scripts/harness build done
 
 scripts/harness review start
-# review; run scripts/review.sh
+# review; run scripts/review.sh with a fresh reviewer (HARNESS_REVIEWER_COMMAND or --reviewer FILE)
 scripts/harness review done
 ```
 
 You cannot build before plan is done. You cannot review before build is done.
 
-`build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start`.
+`build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start` in which a fresh-session reviewer passed the change.
 
 If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
 
@@ -107,7 +107,8 @@ scripts/permit.sh           Denylist check for commands and write paths
 scripts/knowledge-trust.sh  Human approval gate for a project's knowledge/ folder
 schemas/denylist.default    Default denylist; a project replaces it with .harness-denylist
 scripts/verify.sh           Local verification sensor (check-only, never rewrites)
-scripts/review.sh           Review helper: full patch, continues after a failing verify
+scripts/review.sh           Review helper: full patch, continues after a failing verify, required fresh-session reviewer
+scripts/fresh_review.py     Runs the fresh-session reviewer isolated, with only the criteria-and-diff packet
 tasks/task-template.md      Reusable task template
 tasks/auditability-wizard.md  Scope and acceptance criteria for the offline auditability planner
 tests/*.sh                  Regression tests; scripts/verify.sh runs them all on the harness root
@@ -145,7 +146,7 @@ The script detects common project tooling:
 
 It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
 
-Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
+Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), prints each acceptance criterion of the active task (recorded by `harness plan start --task PATH`, or named by `--task PATH` or `HARNESS_TASK`) for the reviewer to answer, and writes `.harness-db/records/review.state` even when verification fails. The review itself runs in a fresh session. `--reviewer FILE` or `HARNESS_REVIEWER_COMMAND` names a reviewer command, which receives only those criteria and the target diff, and its `VERDICT:` line decides the record. Without one, the review fails as misconfigured, and `harness review done` accepts only a passing fresh review. `--self` is an inspection that cannot complete a run. See "Fresh-session review" in `docs/setup.md`.
 
 ## Agent Entry Points
 

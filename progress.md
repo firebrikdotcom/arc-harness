@@ -1,5 +1,115 @@
 # Jev checkpoint implementation — 2026-09-22
 
+## TODO #16: review runs in a fresh session that gets only the diff and the acceptance criteria (2026-09-30)
+
+- Harness root and target: `/home/savior/Code/harness-template-todo-16-20260930` (worktree of harness-template, branch `feat/todo-16-20260930`, base e5b148a, same directory). Coder session `ae52206c-07f6-4827-a46a-b02c27612d17`, run `20260930T035905Z-1471394`. Docs read: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/architecture.md`, `docs/conventions.md`, `docs/setup.md`, `todo.md`, `tasks/task-template.md`, `scripts/review.sh`, `scripts/harness` (gates), `tests/review.sh`, `tests/harness-cli.sh`, the frozen #42 patch and its status report.
+- Prerequisite: the frozen TODO #42 round-3 patch was applied with `git apply` after `scripts/action.sh validate`; `git diff --binary HEAD | sha256sum` then matched the root's CI-passing `cb973faa…`.
+- Diagnosis: not resolved. `scripts/review.sh` only prints the patch and questions for the session that built the change, and `harness review done` accepts any passing record, so the same agent plans, builds, and reviews.
+- Goal: `scripts/review.sh --reviewer FILE` (or `HARNESS_REVIEWER_COMMAND`) builds a compact packet (acceptance criteria, verification exit, target patch, answer format) and runs the JSON argv in FILE as a fresh process with an empty scratch working directory, the packet on stdin, and an allowlisted environment. The reviewer's `VERDICT:` line decides the review record. A project with `.harness-fresh-review` at its root must use it, and `review done` checks the record.
+- Non-goals: no real reviewer run, no default model choice, no change to verify, no marker added to this repository, no review of committed history beyond what `review.sh` already shows.
+- Acceptance: AC1–AC8 in the ignored `.harness-db/tasks/todo-16.md`.
+- Plan: `scripts/fresh_review.py` (validate the argv file; run it isolated with a timeout and a size cap; parse the verdict; write `result.state`). `scripts/review.sh` handles the flag, the marker, early checks, the packet, and the record fields. `scripts/harness` gets the `review done` fresh check and a one-line note. `tests/fresh-review.sh` uses a fake reviewer, and `tests/harness-cli.sh` covers the gate. Docs go in `docs/setup.md`, `README.md`, `CLAUDE.md`, and `docs/architecture.md`. #16 is removed from `todo.md`.
+- Verification plan: `sh tests/fresh-review.sh`, `sh tests/review.sh`, `sh tests/harness-cli.sh`, shellcheck, `scripts/init.sh --yes`, `scripts/verify.sh`, `scripts/review.sh --task .harness-db/tasks/todo-16.md`, `git diff --check`.
+- Decision: enforcement is opt-in through the tracked marker. Requiring it everywhere would break every current session that has no reviewer command configured, so the root or user can choose to add the marker later.
+- Risks: the diff is untrusted, so the packet says it is data and the runner never uses a shell. Credentials reach the reviewer only through names the operator lists. User-level CLI memory still loads unless the reviewer command disables it (for example `claude --bare` with an API key), which is documented.
+- Build:
+  - `scripts/fresh_review.py` adds `check` and `run`. It enforces the argv file contract (program first, later empty strings allowed), a scratch `mkdtemp` working directory holding only `REVIEW.md` that is removed afterwards, stdin = packet, the environment allowlist plus `HARNESS_REVIEWER_ENV` (`HARNESS_*` refused), `HARNESS_AUTO_INIT=0`, a process-group kill on timeout, the size cap, the last-`VERDICT:`-line rule, and `result.state`.
+  - `scripts/review.sh` adds `--reviewer`/`HARNESS_REVIEWER_COMMAND` and the `.harness-fresh-review` refusal. The early checks (python3, command file, task, criteria) run before verification. The extractor moved above them.
+  - The target patch is captured once under `reviews/<stamp>-<pid>/` and printed, the packet is built from it, and the reviewer is skipped when verification fails. The reviewer's output is printed without control characters, and the record gains `REVIEW_MODE`, `REVIEWER_VERDICT`, `REVIEWER_EXIT` and `REVIEW_PACKET_SHA256`, with `EXIT` carrying the reviewer's failure.
+  - `scripts/harness` adds `require_fresh_review` for `review done`: the marker requires fresh + pass, and otherwise prints a one-line note.
+  - Tests: `tests/fresh-review.sh` is new. A fake reviewer covers argv, working directory, stdin/packet identity and hash, packet contents and exclusions, the environment, verdict cases, timeout, the cap, a missing program, failed verify, the exit-2 refusals and the marker. `tests/harness-cli.sh` covers the gate, and `tests/review.sh` and `tests/jev-checkpoints.sh` now unset an inherited `HARNESS_REVIEWER_COMMAND`, the same class of leak as #42's R2-Q0.
+  - Docs: `docs/setup.md` (Fresh-session review, variables, gate rule, record fields, and example `claude`/`codex` files from their installed `--help`), `README.md`, `CLAUDE.md`, `AGENTS.md`, and `docs/architecture.md`. #16 and its now-empty section heading were removed from `todo.md`.
+- Build verification so far:
+  - `sh tests/fresh-review.sh`, `sh tests/harness-cli.sh`, `sh tests/review.sh`, `sh tests/jev-checkpoints.sh`: all PASS, including with `HARNESS_REVIEWER_COMMAND=/nonexistent` exported.
+  - `shellcheck` on the six changed shell files is clean, and `py_compile` passes.
+  - A scratch mutation run on a copy of the tree killed 17/17 mutations: runner environment, working directory, verdict rule, reviewer exit, cap, auto-init, `HARNESS_*` names, scratch cleanup, whole-task packet, reviewer on failed verify, `EXIT`, the marker in `review.sh`, the task check, a database path in the packet, the gate, the gate verdict, and the test environment leak. The unmutated copy passed.
+- Gates:
+  - `scripts/init.sh --yes`: exit 0.
+  - `scripts/verify.sh`: exit 0, ran=3 skipped=3 failures=0, with `fresh-review` among the PASS lines.
+  - `dash` is not installed on this machine, so the exact Ubuntu/Dash CI run is left to the root's container.
+- This is the last `progress.md` edit of the round. The review phase runs `scripts/review.sh --task .harness-db/tasks/todo-16.md`, a self-review with no reviewer, because the brief forbids starting a real one. `git diff --check` also runs on these final bytes. The results are in the dispatch status report, and the candidate is frozen for the root's independent panel.
+- Round 1 result: `review done` accepted a self review, and the task and status report were saved. Candidate `7f964239…` (tracked diff).
+- Root feedback (round 2): opt-in enforcement leaves the goal open, because the building session can still finish review. Make independent review required by default, with a clear configuration failure, and use fake reviewers only in test fixtures. Keep the packet isolation and the #42 criteria behavior.
+- Round 2 plan (run `20260930T041959Z-2198145`, started with `plan start --task .harness-db/tasks/todo-16.md`):
+  - `scripts/review.sh`:
+    - Without a reviewer, exit 2 before verification with a configuration message.
+    - Add `--self`, an explicit inspection mode. It keeps the #42 output (criteria, no-task note, warnings) and records `REVIEW_MODE=self`.
+    - `--self` together with `--reviewer` is a usage error.
+    - Drop the `.harness-fresh-review` marker.
+    - The record gains `REVIEWER_PROGRAM` and `REVIEWER_COMMAND_SHA256`.
+  - `scripts/harness`: `review done` always requires `REVIEW_MODE=fresh` and `REVIEWER_VERDICT=pass`, and names the reviewer program in its gate line. The self-review note goes.
+  - `scripts/install-guides.sh`: the block says that review needs a configured fresh reviewer; regenerate `AGENTS.md`/`CLAUDE.md`.
+  - Tests:
+    - `tests/review.sh` uses `--self` for the #42 cases and asserts the configuration failure.
+    - `tests/jev-checkpoints.sh` reviews with a fixture task and a fake fresh reviewer.
+    - `tests/harness-cli.sh` and `tests/harness-hook.sh` fake records of a passing fresh review, plus gate cases for self, fail, and a missing mode.
+    - `tests/fresh-review.sh` drops the marker cases and adds the configuration-failure and `--self` cases.
+    - `tests/install-guides.sh` covers the block sentence.
+  - Docs: `docs/setup.md`, `README.md`, `CLAUDE.md`, `AGENTS.md`, and `docs/architecture.md` say the fresh review is mandatory.
+  - My own review gate: no real reviewer may start while the retained panel is paused, and a canned PASS is not allowed. So this run's review is `scripts/review.sh --self`, and `review done` is expected to refuse it. That blocked gate will be recorded, not bypassed.
+- Round 2 build (done as planned):
+  - `scripts/review.sh` now requires a reviewer by default, adds `--self`, and records the reviewer identity.
+  - `scripts/fresh_review.py`: `check` prints `REVIEWER_PROGRAM` (sanitized) and `REVIEWER_COMMAND_SHA256`.
+  - `scripts/harness`: `review done` always requires a passing fresh review and prints the program and hash, and the usage text says so.
+  - `scripts/install-guides.sh`: new block sentence; `AGENTS.md`/`CLAUDE.md` regenerated.
+  - Tests updated as planned. `tests/review.sh` also anchors its finish-line checks, which would otherwise have matched the printed patch.
+  - Docs updated in `docs/setup.md`, `README.md`, `CLAUDE.md`, `AGENTS.md`, and `docs/architecture.md`.
+- Round 2 verification so far:
+  - `fresh-review`, `review`, `harness-cli`, `harness-hook`, `jev-checkpoints`, `install-guides`: all PASS, both clean and with `HARNESS_REVIEWER_COMMAND=/nonexistent HARNESS_TASK=/nonexistent` exported.
+  - `shellcheck` on `tests/*.sh` and the changed scripts is clean; `py_compile` ok.
+  - Mutation run 25/25 killed, adding: gate removed, gate accepts self, default allows self, default self recorded as fresh, `--self` keeps the env reviewer, `--self` plus `--reviewer`, no program sanitizing, no command hash, the checkpoint test on `--self`, the guide sentence. The unmutated control passed.
+- Round 2 gates:
+  - `scripts/init.sh --yes`: exit 0.
+  - `scripts/verify.sh`: exit 0, ran=3 skipped=3 failures=0, 23 PASS lines.
+  - This machine has no reviewer configured. The retained panel is paused, and a canned PASS would fake independence. So the review phase of run `20260930T041959Z-2198145` runs the default `scripts/review.sh`, expected to fail with exit 2 as misconfigured, then `scripts/review.sh --self` for inspection, then `harness review done`, expected to be refused. The results are recorded as a blocked gate in the status report, not bypassed. This is the last `progress.md` edit of the round.
+
+## TODO #42: review prints the active task's acceptance criteria (2026-09-30)
+
+- Harness root and target: `/home/savior/Code/harness-template-todo-42-20260930` (worktree of harness-template, branch `feat/todo-42-20260930`, base e5b148a, same directory). Docs read: `README.md`, `AGENTS.md`, `CLAUDE.md`, `docs/architecture.md`, `docs/conventions.md`, `docs/setup.md` (review sections), `todo.md`, `tasks/task-template.md`, `scripts/review.sh`, `tests/review.sh`.
+- Diagnosis: not resolved. `scripts/review.sh` ends with a fixed "Does it satisfy acceptance criteria?" question and never reads a task file; the harness has no notion of an active task, so nothing ties the review to the goal.
+- Goal: `scripts/review.sh --task PATH` (or `HARNESS_TASK=PATH`) reads the task file's `## Acceptance Criteria` section and prints each criterion as a numbered item for the reviewer to answer, before the generic review questions.
+- Non-goals: no change to `scripts/harness`, gate records, or `review done`; no automatic task discovery; no fresh-session reviewer (#16).
+- Acceptance: (1) each list item under the heading (checkbox markers stripped, wrapped continuation lines joined, code fences skipped, section ends at the next heading of the same or higher level) prints as `AC<n>. <text>` with an answer prompt; (2) a missing or unreadable task file fails with exit 2 before verification runs; (3) a task without the section or with no items prints a WARN and the review continues; (4) no task prints a note saying how to supply one; (5) `--task` wins over `HARNESS_TASK`; (6) existing review behavior and exit codes are unchanged; `tests/review.sh` covers all of this; `scripts/verify.sh` passes.
+- Plan: add the flag and an awk extractor to `scripts/review.sh`; extend `tests/review.sh`; document in `docs/setup.md` and `README.md`; remove #42 from `todo.md`.
+- Verification plan: `sh tests/review.sh`, `scripts/init.sh --yes`, `scripts/verify.sh`, `scripts/review.sh --task <this task note>`, `git diff --check`.
+- Risks: Markdown variants (other heading levels, `*` or numbered lists) — handled by the extractor and tested; a task file is untrusted data and is printed only, never executed.
+- Build: `scripts/review.sh` gained `--task PATH`/`HARNESS_TASK`, early validation (exit 2), and `acceptance_criteria` (`tr` drops control characters, POSIX `awk` extracts items); question 1 names the listed criteria when they print. `tests/review.sh` covers extraction (fences before and inside the section, lowercase heading with a colon, `-`/`*`/`1.`/`2)` items, checkboxes, wrapping, sub-headings, section end, an ESC byte), `HARNESS_TASK` and precedence, missing file, directory, bare `--task`, no heading, no items, and the no-task note; absence assertions look only past the printed patch because this test file is itself in the harness diff. Docs: `docs/setup.md` (usage and `HARNESS_TASK`), `README.md`, `CLAUDE.md` Review Behavior. #42 removed from `todo.md`. Task note for this run: `.harness-db/tasks/todo-42.md` (ignored).
+- Verification: `sh tests/review.sh` PASS; scratch mutation run (fence handling, `tr`, section-end level, checkbox strip, line join, file validation, empty-section exit, question wording) killed 8/8; `scripts/init.sh --yes` exit 0 (no project-owned setup commands); `scripts/verify.sh` exit 0, ran=3 skipped=3 failures=0.
+- Review (self, pre-panel): `scripts/review.sh --task .harness-db/tasks/todo-42.md` exit 0, verify ran=3 skipped=3 failures=0, and it printed AC1–AC6 of this task; each is met by the tests and docs above. `git diff --check` clean. Candidate frozen for the root coordinator's independent `lothar-panel-review`; no commit until it accepts.
+- Panel round 1 (run `20260930T025919Z-2646738`): not accepted, 3 confirmed findings. F1 High: no documented workflow supplies the task, so a normal review still prints "no active task file". F2 Medium: `tests/review.sh` inherits `HARNESS_TASK`, so `HARNESS_TASK=… scripts/review.sh` on the harness fails its own verify. F3 Minor: a mid-line CR survives the control-character filter.
+- Round 2 plan: F1, `harness plan start --task PATH` validates the file and records its absolute path as `TASK_FILE` in run state (`status` and `run.json` show it). `review.sh` falls back to the current run's task after `--task` and `HARNESS_TASK`, and a recorded file that has gone missing fails with exit 2. The workflow text names `--task`: the generated guide block (`scripts/install-guides.sh`, regenerated into `AGENTS.md`/`CLAUDE.md`), the `CLAUDE.md` planning rule (criteria go under `## Acceptance Criteria` in the task file, not only in `progress.md`), the `AGENTS.md` required workflow, `README.md`, and `docs/setup.md`. Tests go in `tests/harness-cli.sh`, `tests/review.sh`, and `tests/install-guides.sh`. F2, `unset HARNESS_TASK` in `tests/review.sh`. F3, awk replaces every CR with a space, with CR and CRLF test cases. The global `~/.claude/CLAUDE.md` workflow text is outside this worktree and is left for the user.
+- Round 2 build:
+  - F1. `scripts/harness` has `resolve_task_file`, `plan start --task` recording `TASK_FILE` (only on `plan start`, validated before any run is created), and a `Task:` line in `status` plus `task_file` in `run.json`. `scripts/review.sh` falls back to the current run's `TASK_FILE` and labels it `(run <id> task)`; a missing recorded file fails with exit 2. `scripts/install-guides.sh` block now shows `plan start --task TASK.md` and says where criteria go; `AGENTS.md`/`CLAUDE.md` were regenerated. The `CLAUDE.md` planning and review rules, the `AGENTS.md` required workflow, `README.md`, and `docs/setup.md` were updated.
+  - F2. `tests/review.sh` unsets `HARNESS_TASK` and pins `HARNESS_JEV_CHECKPOINTS=0`.
+  - F3. awk turns every CR into a space.
+  - Tests: `tests/harness-cli.sh` task-file cases; `tests/review.sh` CR and CRLF items, run-task fallback end to end through the real CLI, and precedence plus a missing recorded task; `tests/install-guides.sh` block wording and freshness of the root guides.
+- Round 2 verification so far: `sh tests/review.sh`, `sh tests/harness-cli.sh`, and `sh tests/install-guides.sh` PASS; `HARNESS_TASK=<task> sh tests/review.sh` PASS; shellcheck clean on the six changed shell files; scratch mutation run 11/11 killed (run fallback, CR gsub, env unset, state write seen by CLI and by review, file check, backslash guard, absolute path, guide text, missing-file check, precedence).
+- Round 2 gates: `scripts/init.sh --yes` exit 0; `scripts/verify.sh` exit 0 (ran=3 skipped=3 failures=0, 22 PASS lines); `scripts/review.sh --task .harness-db/tasks/todo-42.md` exit 0, which printed AC1–AC7 of the updated task note, all met by the evidence above; `git diff --check` exit 0. Next: close this run and open a new one with `plan start --task` to check that the default review, with no arguments, finds the task. Then freeze for panel round 2.
+- Default-workflow check (run `20260930T032000Z-4001468`, opened with `plan start --task .harness-db/tasks/todo-42.md`). `env -u HARNESS_TASK scripts/review.sh` exited 0 and printed AC1–AC7 labeled `(run … task)`. The round-2 candidate diff sha256 was `214320c5…`.
+- Panel round 2: NOT ACCEPTED. F1–F3 are confirmed fixed, but two new findings came in.
+  - R2-D0 (Medium). The guide block written into an external target names a relative `tasks/task-template.md` and an ambiguous `.harness-db/`.
+  - R2-Q0 (Minor). `tests/review.sh` inherits `HARNESS_BUDGET_*`, so an exported cap pauses its `plan start --task` call.
+- Round 3 plan:
+  - R2-D0. `install-guides.sh` gains `TEMPLATE` and `TASKS_DB`.
+    - Inside the harness root they are `tasks/task-template.md` and `.harness-db/tasks/`.
+    - Outside it they are `$HARNESS_ROOT/tasks/task-template.md` and `${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}/tasks/`.
+    - The review line uses the same `$REVIEW` path treatment as `$CLI`.
+    - `tests/install-guides.sh` asserts for the external temp project that the template path is absolute and exists, the database path is absolute, and no bare relative template remains. It also checks a custom `HARNESS_DB_ROOT`, and that the root guides keep the relative forms. Project-owned lines stay covered by the existing "Keep this line." assertions.
+  - R2-Q0. `tests/review.sh` unsets `HARNESS_BUDGET_STEPS`, `_TIME_MIN`, `_LOOPS`, `_TOKENS` and `_CONTINUES`. Its regression is running it with those caps exported, plus a mutation check.
+- Round 3 build and verification:
+  - R2-D0. `scripts/install-guides.sh` gained `REVIEW`, `TEMPLATE`, `TASKS_DB` and `TASKS_DB_NOTE`. The root guides were regenerated, and the task sentence is unchanged apart from naming `.harness-db/tasks/`. `docs/setup.md` guide paragraph notes the external paths. `tests/install-guides.sh` now unsets `HARNESS_DB_ROOT` and covers the external and root cases described in the plan.
+  - R2-Q0. `tests/review.sh` unsets all five `HARNESS_BUDGET_*` variables.
+  - Results:
+    - `sh tests/install-guides.sh`: PASS.
+    - `HARNESS_BUDGET_STEPS=1 HARNESS_BUDGET_LOOPS=0 HARNESS_BUDGET_TOKENS=1 HARNESS_BUDGET_TIME_MIN=0 HARNESS_BUDGET_CONTINUES=0 sh tests/review.sh`: PASS.
+    - shellcheck: clean.
+    - Scratch mutations: `mutate3.sh` 5/5 killed (cap unset, external template, external database, `HARNESS_DB_ROOT` honored, external review path). `mutate2.sh` 11/11 killed; its env-unset mutation was adapted to the new unset line.
+- Round 3 gates:
+  - `sh tests/review.sh`, `sh tests/harness-cli.sh` and `sh tests/install-guides.sh`: exit 0.
+  - `scripts/init.sh --yes`: exit 0.
+  - `scripts/verify.sh`: exit 0 (ran=3 skipped=3 failures=0, 22 PASS lines).
+  - This is the last `progress.md` edit of the round. The review phase of run `20260930T032000Z-4001468` runs `scripts/review.sh` with no arguments (the task recorded by `plan start --task`) and `git diff --check` on these final bytes. Their results are in the dispatch status report, and then the candidate is frozen for panel round 3.
+
 ## Jev adoption: task-entry history, trigger points, retrieval reminder (2026-09-29)
 
 - Harness root and target: `/Users/savior/Code/harness-jev-adoption` (worktree of harness-template, branch `feat/jev-adoption`, same directory). Docs read: `AGENTS.md`, `CLAUDE.md`, `docs/setup.md`, `docs/jev-checkpoints.md`, `docs/architecture.md`, `scripts/task_route.py`, `scripts/phase_checkpoint.py` (read only, lane 1), `scripts/install-guides.sh`, `scripts/install-jg-skill.sh`, `scripts/install-hooks.sh`, the existing hooks, and their tests.
@@ -548,3 +658,16 @@ Known risks:
 ## Pilot aggregation (feat/jev-pilot-aggregate)
 - 2026-09-29: Lane 2 (pilot aggregation): implemented machine scope in scripts/context_advice.py pilot/report/pending, `--scope` flag, tests in tests/test_context_advice.py, docs updated. Verification recorded below after scripts/verify.sh.
 - 2026-09-29: scripts/verify.sh passed (ran=3 skipped=3 failures=0; required lint and test satisfied). Independent review: round 1 one finding (legacy shared database omitted from machine scope), fixed with a regression test; round 2 zero findings.
+
+## Publication review fixes (2026-10-02)
+
+- Independent review found four defects: in-project TMPDIR, review artifacts without guaranteed private modes, NUL arguments accepted by configuration validation, and a mutable command file whose recorded hash could differ from execution.
+- Fixed: select scratch parents outside both roots, enforce 0700/0600, reject NUL before verification, and run a byte-preserving validated command snapshot with an expected hash check. Added regressions for each scenario. Verification and a new independent review follow before committing.
+
+- Second independent review identified explicit environment overrides that could pass parent session variables and a stale optional qualifier in README. Session variable names are now refused even in explicit overrides; regressions cover all three naming patterns, and documentation states the required reviewer.
+
+- Third independent review found criteria reread after verification and unencodable argv accepted early. Capture the validated criteria once, reject argv that cannot be encoded for process execution, and add regressions that replace the task during a check and provide an invalid Unicode argument.
+
+- Fourth independent review found an extra harness environment variable outside the task acceptance contract and ambiguous no-criteria documentation. Removed the packet-path variable (stdin and REVIEW.md suffice); its absence is regression-checked. Documented that warning-only continuation belongs to self inspection.
+
+- Fifth independent review found an added PWD outside the documented environment contract. Removed it, and added a process-boundary fixture that asserts the exact complete environment supplied to Popen, including exclusion of parent state and unlisted variables.
