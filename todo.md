@@ -16,9 +16,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 - [ ] 31. Bootstrap installs with a different package manager than the lockfile chose.
   - Why: a `yarn.lock` installed by npm gives a different set of packages than the team tested.
   - Fix: honor the lockfile's package manager or refuse with a clear message.
-- [ ] 37. Detection for Node, PHP, Go, and Rust projects has no fixture tests.
-  - Why: the harness's own tests cover the CLI but not the project types it claims to verify.
-  - Fix: add small fixture projects and failure cases under `tests/`.
 - [ ] 38. Local and CI verification need the same tools, but nothing checks that. (Merged #24, #35.)
   - Why: a green CI and a red laptop, or the reverse, means one of them is lying.
   - Fix: list required tools in one place, have `scripts/init.sh` check them, and have CI install exactly that list.

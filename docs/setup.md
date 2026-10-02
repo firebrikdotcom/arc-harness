@@ -465,6 +465,8 @@ Detection order:
 - Rust projects use `cargo fmt --check`, `cargo clippy`, `cargo check`, `cargo test`, and `cargo build`.
 - Bash/shell files use `sh -n`; `shellcheck` runs when available. Both are lint checks: a syntax check proves a script parses, not that it works, so shell files alone never satisfy a required `test` category. `sh -n` runs even when a `make lint` target exists; that target replaces only the other lint detectors, ShellCheck included.
 
+`tests/verify-project-detection.sh` pins the JavaScript/TypeScript, PHP, Go, and Rust rows above. It verifies small fixture projects with a sandboxed `PATH` whose toolchains are recording stubs, then checks the exact commands each category ran, the lockfile's choice of package manager, and the failure cases: a failing command, unformatted Go files, and a missing toolchain that leaves a required category with no checks. It needs none of the real toolchains, with one exception: the cases that read `package.json` through node run only when node is installed. Without node the test prints a `SKIP:` line for them, and only the grep fallback is covered.
+
 Manual command placeholders:
 
 ```sh
