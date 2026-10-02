@@ -79,7 +79,7 @@ SECURITY.md               Security and repository hygiene guidance
 docs/architecture.md      Architecture notes and module boundaries
 docs/conventions.md       Coding, testing, logging, and security conventions
 docs/setup.md             Local setup and command documentation
-progress.md               Current goal, decisions, steps, blockers, verification history
+progress.md               Current run only: goal, plan, decisions, steps, blockers, verification (earlier runs are archived under .harness-db/runs/<id>/)
 schemas/action.schema.json  Proposed-action contract
 scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
@@ -179,7 +179,7 @@ When source code, runtime commands, dependencies, or architecture are added:
 - Update `docs/setup.md` with exact setup and run commands.
 - Update `docs/architecture.md` with module boundaries and dependency rules.
 - Update `docs/conventions.md` if new language/framework conventions are introduced.
-- Keep `progress.md` current as work proceeds.
+- Keep `progress.md` current as work proceeds; it holds only the current run, and `harness plan start` archives the previous page.
 
 ## Local-Only Files
 

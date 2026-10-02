@@ -15,7 +15,7 @@ Before coding:
 - Identify the harness root and the target project root. For cross-project work, do not assume they are the same directory.
 - Inspect the current tree and relevant files before making assumptions.
 - Decompose work into small tasks with clear acceptance criteria.
-- Update `progress.md` with the current goal, plan, and first step.
+- Update `progress.md` with the current goal, plan, and first step. It holds only the current run: `harness plan start` archives the previous run's page under `.harness-db/runs/<id>/` and starts a fresh one, so do not keep history there.
 - For cross-project work, keep project registries, task notes, run progress, generated indexes, and project-specific documents in the ignored harness database directory such as `.harness-db/`, not in tracked template files.
 
 During work:

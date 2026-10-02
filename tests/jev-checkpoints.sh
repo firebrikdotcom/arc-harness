@@ -27,6 +27,8 @@ export FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
 export HARNESS_AUDIT_ENABLED=0
 export HARNESS_ROOT="$ROOT"
 export HARNESS_DB_ROOT="$TMP_ROOT/db"
+# These runs start in the real checkout; never rotate its tracked progress.md.
+export HARNESS_PROGRESS_ROTATE=0
 unset HARNESS_BUDGET_STEPS HARNESS_BUDGET_TIME_MIN HARNESS_BUDGET_LOOPS HARNESS_BUDGET_TOKENS || true
 
 # A harness target: a git worktree whose guide carries the harness block.

@@ -73,6 +73,7 @@ usage() {
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
   info "  HARNESS_DB_ROOT  Override the state directory (default HARNESS_ROOT/.harness-db)."
   info "  HARNESS_LOCK_TIMEOUT  Seconds to wait for the run-state lock (default $DEFAULT_LOCK_TIMEOUT)."
+  info "  HARNESS_PROGRESS_ROTATE  0 keeps the target's progress.md as is when a run starts (default 1: archive and replace)."
   info ""
   info ""
   info "Gates: 'build done' needs a passing scripts/verify.sh record newer than 'build start';"
@@ -451,6 +452,88 @@ create_run() {
   mv "$CURRENT_FILE.tmp.$$" "$CURRENT_FILE"
   info "Run created: $_run_id"
   info "State: $RUN_DIR"
+  rotate_progress "$_run_id"
+}
+
+# --- progress.md rotation ---------------------------------------------------
+# progress.md holds only the current run. When a run is created, the target's
+# existing page is copied into the database and replaced by a fresh page whose
+# first line names the new run. The marker decides where the old page goes:
+# runs/<owner>/progress.md for a run in this database, otherwise
+# runs/<new>/progress.previous.md. No archive is overwritten, and progress.md
+# changes only after its copy is verified, so no content is ever dropped.
+
+progress_owner() {
+  sed -n '1s/^<!-- harness-run: \([A-Za-z0-9._-]*\) -->$/\1/p' "$1"
+}
+
+free_archive_path() {
+  _candidate=$1
+  _n=1
+  while [ -e "$_candidate" ] || [ -L "$_candidate" ]; do
+    _candidate="${1%.md}.$_n.md"
+    _n=$((_n + 1))
+  done
+  printf '%s\n' "$_candidate"
+}
+
+write_progress_page() {
+  cat > "$1" <<EOF
+<!-- harness-run: $2 -->
+# Progress: current run
+
+Run \`$2\`. This file holds only this run's goal, plan, decisions, steps, blockers, and verification. The next \`harness plan start\` archives it as \`runs/$2/progress.md\` in the harness database and starts a fresh page. Earlier runs are in their own \`runs/<id>/\` directories and in git history.
+
+## Goal
+
+## Plan
+
+## Decisions
+
+## Verification
+EOF
+}
+
+rotate_progress() {
+  _new=$1
+  _page="$TARGET_ROOT/progress.md"
+  [ "${HARNESS_PROGRESS_ROTATE:-1}" != "0" ] || return 0
+  if [ -L "$_page" ]; then
+    info "WARN: $_page is a symlink; it was not archived or replaced."
+    return 0
+  fi
+  [ -f "$_page" ] || return 0
+
+  _owner=$(progress_owner "$_page" 2>/dev/null || :)
+  case "$_owner" in
+    ''|.|..) _owner="" ;;
+  esac
+  if [ -n "$_owner" ] && [ "$_owner" != "$_new" ] && [ -d "$RUNS_DIR/$_owner" ] && [ ! -L "$RUNS_DIR/$_owner" ]; then
+    _dest=$(free_archive_path "$RUNS_DIR/$_owner/progress.md")
+  else
+    _dest=$(free_archive_path "$RUNS_DIR/$_new/progress.previous.md")
+  fi
+
+  if [ ! -s "$_page" ]; then
+    _dest=""
+  elif ! cp "$_page" "$_dest" 2>/dev/null || ! cmp -s "$_page" "$_dest"; then
+    # The path was free, so a partial copy is ours to remove.
+    rm -f "$_dest"
+    info "WARN: could not archive $_page to $_dest; progress.md was left unchanged."
+    return 0
+  fi
+  # Rewrite in place so a tracked file keeps its mode and any hard links.
+  if ! write_progress_page "$_page.tmp.$$" "$_new" 2>/dev/null || ! { cat "$_page.tmp.$$" > "$_page"; } 2>/dev/null; then
+    rm -f "$_page.tmp.$$"
+    info "WARN: could not write the new progress.md for run $_new${_dest:+; the previous page is archived at $_dest}."
+    return 0
+  fi
+  rm -f "$_page.tmp.$$"
+  if [ -n "$_dest" ]; then
+    info "Progress: archived the previous page to $_dest; progress.md now holds run $_new."
+  else
+    info "Progress: progress.md was empty; it now holds run $_new."
+  fi
 }
 
 log_event() {

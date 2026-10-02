@@ -35,7 +35,7 @@ Planning output must include:
 - Verification plan.
 - Known risks or unknowns.
 
-Record the plan in `progress.md` before building.
+Record the plan in `progress.md` before building. `progress.md` holds only the current run; `harness plan start` archives the previous run's page under `.harness-db/runs/<id>/`.
 
 ## Build Behavior
 
