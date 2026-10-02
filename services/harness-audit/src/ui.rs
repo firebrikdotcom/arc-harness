@@ -40,6 +40,14 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
         source: include_str!("../resources/views/audit/workbench.html"),
     },
     TemplateDef {
+        name: TemplateName("audit/sessions.html"),
+        source: include_str!("../resources/views/audit/sessions.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/workflow.html"),
+        source: include_str!("../resources/views/audit/workflow.html"),
+    },
+    TemplateDef {
         name: TemplateName("audit/events.html"),
         source: include_str!("../resources/views/audit/events.html"),
     },
@@ -79,6 +87,10 @@ const NAVIGATION: &[NavItem] = &[
     NavItem {
         label: "Workbench",
         href: "/",
+    },
+    NavItem {
+        label: "Workflow",
+        href: "/workflow",
     },
     NavItem {
         label: "Events",
@@ -298,9 +310,7 @@ pub fn accuracy_chart(days: &[grouped::DailyAccuracy]) -> Value {
     let ticks: Vec<Value> = (0..=span)
         .step_by(step.max(1) as usize)
         .map(|offset| first.day + offset)
-        .map(
-            |day| json!({"x": format!("{:.1}", x(day)), "label": day_label(day)[5..].to_owned()}),
-        )
+        .map(|day| json!({"x": format!("{:.1}", x(day)), "label": day_label(day)[5..].to_owned()}))
         .collect();
     json!({
         "width": CHART_WIDTH,
@@ -347,6 +357,12 @@ async fn workbench(
     context.insert("routes", &routes);
     context.insert("recent", &recent);
     context.insert("include_fixtures", &query.include_fixtures);
+    let settings = match crate::settings::load() {
+        Ok(settings) => settings,
+        Err(error) => return unavailable(error),
+    };
+    context.insert("collection_settings", &settings);
+    context.insert("workflow_sessions", &crate::workflow::sessions(&rows).len());
     render(
         &registry,
         &request,
@@ -388,7 +404,11 @@ async fn event_log(
             None => true,
         })
         .collect();
-    let shown: Vec<Value> = matching.iter().take(limit).map(|row| event_row(row)).collect();
+    let shown: Vec<Value> = matching
+        .iter()
+        .take(limit)
+        .map(|row| event_row(row))
+        .collect();
     let mut context = Context::new();
     context.insert("total", &matching.len());
     context.insert("shown", &shown.len());
@@ -409,6 +429,347 @@ async fn event_log(
     )
 }
 
+#[derive(Default, Deserialize, Serialize, Clone)]
+struct WorkflowQuery {
+    session_id: Option<String>,
+    task_id: Option<String>,
+    return_to: Option<String>,
+    q: Option<String>,
+    agent: Option<String>,
+    model: Option<String>,
+    status: Option<String>,
+    path: Option<String>,
+    phase: Option<String>,
+    prompts: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    sort: Option<String>,
+    page: Option<usize>,
+    per_page: Option<usize>,
+}
+
+fn url_component(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+fn directory_url(query: &WorkflowQuery, page: usize) -> String {
+    let mut fields = Vec::new();
+    for key in [
+        "q", "agent", "model", "status", "path", "phase", "prompts", "since", "until", "sort",
+    ] {
+        if let Some(value) = serde_json::to_value(query).unwrap()[key]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            fields.push(format!("{key}={}", url_component(value)));
+        }
+    }
+    fields.push(format!(
+        "per_page={}",
+        query.per_page.unwrap_or(25).clamp(1, 100)
+    ));
+    fields.push(format!("page={page}"));
+    format!("/workflow?{}", fields.join("&"))
+}
+
+fn valid_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != 4 && i != 7 && !b.is_ascii_digit())
+    {
+        return false;
+    }
+    let year: u32 = date[..4].parse().unwrap();
+    let month: u32 = date[5..7].parse().unwrap();
+    let day: u32 = date[8..].parse().unwrap();
+    let max = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => 0,
+    };
+    year > 0 && day > 0 && day <= max
+}
+
+fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
+    let clean = |value: &Option<String>| value.as_deref().unwrap_or("").trim().to_owned();
+    let terms: Vec<String> = clean(&query.q)
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
+    let path = clean(&query.path).to_lowercase();
+    let since = clean(&query.since);
+    let until = clean(&query.until);
+    let mut errors = Vec::new();
+    if (!since.is_empty() && !valid_date(&since)) || (!until.is_empty() && !valid_date(&until)) {
+        errors.push("Use valid YYYY-MM-DD dates for the activity range.");
+    }
+    if !since.is_empty() && !until.is_empty() && since > until {
+        errors.push("Activity from must be on or before activity through.");
+    }
+    let mut facets = serde_json::Map::new();
+    for key in ["agent", "model", "status"] {
+        let values: BTreeSet<&str> = sessions.iter().filter_map(|s| s[key].as_str()).collect();
+        facets.insert(key.into(), json!(values));
+    }
+    let phases: BTreeSet<&str> = sessions
+        .iter()
+        .flat_map(|s| s["tasks"].as_object().into_iter().flat_map(|t| t.values()))
+        .filter_map(|t| t["phase"].as_str().filter(|s| !s.is_empty()))
+        .collect();
+    facets.insert("phase".into(), json!(phases));
+    let mut matching: Vec<Value> = sessions
+        .iter()
+        .filter(|s| {
+            if !errors.is_empty() {
+                return false;
+            }
+            if [
+                (&query.agent, "agent"),
+                (&query.model, "model"),
+                (&query.status, "status"),
+            ]
+            .iter()
+            .any(|(wanted, key)| {
+                !clean(wanted).is_empty() && s[*key].as_str().unwrap_or("") != clean(wanted)
+            }) {
+                return false;
+            }
+            if !s["cwd"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains(&path)
+            {
+                return false;
+            }
+            if !clean(&query.phase).is_empty()
+                && !s["tasks"].as_object().is_some_and(|tasks| {
+                    tasks
+                        .values()
+                        .any(|t| t["phase"].as_str().unwrap_or("") == clean(&query.phase))
+                })
+            {
+                return false;
+            }
+            let prompt_count = s["prompts"].as_array().map_or(0, Vec::len);
+            if (clean(&query.prompts) == "recorded" && prompt_count == 0)
+                || (clean(&query.prompts) == "none" && prompt_count > 0)
+            {
+                return false;
+            }
+            let date = s["last_at"].as_str().unwrap_or("").get(..10).unwrap_or("");
+            if (!since.is_empty() && date < since.as_str())
+                || (!until.is_empty() && date > until.as_str())
+            {
+                return false;
+            }
+            let mut words = Vec::new();
+            for key in [
+                "label",
+                "session_name",
+                "agent",
+                "model",
+                "cwd",
+                "status",
+                "session_id",
+                "initial_goal",
+            ] {
+                if let Some(text) = s[key].as_str() {
+                    words.push(text);
+                }
+            }
+            for task in s["tasks"]
+                .as_object()
+                .into_iter()
+                .flat_map(|tasks| tasks.values())
+            {
+                for key in [
+                    "name",
+                    "description",
+                    "outcome",
+                    "status",
+                    "phase",
+                    "task_id",
+                ] {
+                    if let Some(text) = task[key].as_str() {
+                        words.push(text);
+                    }
+                }
+            }
+            for prompt in s["prompts"].as_array().into_iter().flatten() {
+                if let Some(text) = prompt["text"].as_str() {
+                    words.push(text);
+                }
+            }
+            for event in s["events"].as_array().into_iter().flatten() {
+                for key in ["name", "description", "outcome", "selected", "tool_name"] {
+                    if let Some(text) = event["payload"][key].as_str() {
+                        words.push(text);
+                    }
+                }
+                for option in event["payload"]["options"].as_array().into_iter().flatten() {
+                    if let Some(text) = option.as_str() {
+                        words.push(text);
+                    }
+                }
+            }
+            let searchable = words.join(" ").to_lowercase();
+            terms.iter().all(|term| searchable.contains(term))
+        })
+        .cloned()
+        .collect();
+    for s in &mut matching {
+        let tasks = s["tasks"].as_object().cloned().unwrap_or_default();
+        s["task_count"] = json!(tasks.len());
+        s["completed_tasks"] = json!(tasks
+            .values()
+            .filter(|t| t["status"] == "completed")
+            .count());
+        s["prompt_count"] = json!(s["prompts"].as_array().map_or(0, Vec::len));
+        let description = s["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find_map(|e| {
+                if e["payload"]["name"]
+                    .as_str()
+                    .is_some_and(|n| n != "Session work")
+                {
+                    e["payload"]["description"].as_str()
+                } else {
+                    None
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| s["initial_goal"].as_str().unwrap_or(""));
+        let preview: String = description.chars().take(180).collect();
+        s["preview"] = json!(if description.chars().count() > 180 {
+            format!("{preview}…")
+        } else {
+            preview
+        });
+        for key in ["first_at", "last_at"] {
+            let value = s[key].as_str().unwrap_or("");
+            s[format!("{key}_display")] = json!(value.get(..19).unwrap_or(value).replace('T', " "));
+        }
+    }
+    let sort = clean(&query.sort);
+    matching.sort_by(|a, b| {
+        let comparison = match sort.as_str() {
+            "oldest" => a["last_at"].as_str().cmp(&b["last_at"].as_str()),
+            "name" => a["label"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .cmp(&b["label"].as_str().unwrap_or("").to_lowercase()),
+            "agent" | "model" | "status" => {
+                a[sort.as_str()].as_str().cmp(&b[sort.as_str()].as_str())
+            }
+            "path" => a["cwd"].as_str().cmp(&b["cwd"].as_str()),
+            "tasks" => b["task_count"].as_u64().cmp(&a["task_count"].as_u64()),
+            "prompts" => b["prompt_count"].as_u64().cmp(&a["prompt_count"].as_u64()),
+            _ => b["last_at"].as_str().cmp(&a["last_at"].as_str()),
+        };
+        comparison.then(a["session_id"].as_str().cmp(&b["session_id"].as_str()))
+    });
+    let total = matching.len();
+    let per_page = query.per_page.unwrap_or(25).clamp(1, 100);
+    let pages = total.div_ceil(per_page).max(1);
+    let page = query.page.unwrap_or(1).clamp(1, pages);
+    let offset = (page - 1) * per_page;
+    let rows: Vec<Value> = matching.into_iter().skip(offset).take(per_page).collect();
+    let filters = json!({"q":clean(&query.q),"agent":clean(&query.agent),"model":clean(&query.model),"status":clean(&query.status),"path":clean(&query.path),"phase":clean(&query.phase),"prompts":clean(&query.prompts),"since":since,"until":until,"sort":if sort.is_empty(){"latest"}else{&sort},"per_page":per_page});
+    json!({"rows":rows,"total":total,"all_count":sessions.len(),"facets":facets,"filters":filters,"errors":errors,"page":page,"pages":pages,"start":if total==0{0}else{offset+1},"end":(offset+per_page).min(total),"url":directory_url(query,page),"previous":if page>1{directory_url(query,page-1)}else{String::new()},"next":if page<pages{directory_url(query,page+1)}else{String::new()}})
+}
+
+#[get("/workflow")]
+async fn workflow_page(
+    request: HttpRequest,
+    session: Session,
+    query: web::Query<WorkflowQuery>,
+    store: web::Data<dyn ReadModelStore>,
+    registry: web::Data<UiRegistry>,
+) -> impl Responder {
+    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
+        Ok(rows) => rows,
+        Err(error) => return unavailable(error),
+    };
+    let sessions = crate::workflow::sessions(&rows);
+    if query.session_id.is_none() {
+        let mut context = Context::new();
+        context.insert("directory", &session_directory(&sessions, &query));
+        return render(
+            &registry,
+            &request,
+            &session,
+            "audit/sessions.html",
+            "Workflow sessions",
+            context,
+            vec![
+                Breadcrumb::link("Workbench", "/"),
+                Breadcrumb::current("Workflow"),
+            ],
+        );
+    }
+    let selected = if let Some(id) = query.session_id.as_deref() {
+        sessions.iter().find(|s| s["session_id"] == id)
+    } else {
+        sessions.first()
+    };
+    let events: Vec<&Value> = selected
+        .and_then(|s| s["events"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            query
+                .task_id
+                .as_deref()
+                .is_none_or(|id| e["payload"]["task_id"] == id)
+        })
+        .collect();
+    let mut context = Context::new();
+    context.insert("sessions", &sessions);
+    context.insert("selected", &selected);
+    context.insert("timeline", &events);
+    context.insert("task_filter", &query.task_id);
+    context.insert(
+        "return_to",
+        &query
+            .return_to
+            .as_deref()
+            .filter(|s| *s == "/workflow" || s.starts_with("/workflow?"))
+            .unwrap_or("/workflow"),
+    );
+    render(
+        &registry,
+        &request,
+        &session,
+        "audit/workflow.html",
+        "Workflow session",
+        context,
+        vec![
+            Breadcrumb::link("Workbench", "/"),
+            Breadcrumb::link("Workflow sessions", "/workflow"),
+            Breadcrumb::current("Session details"),
+        ],
+    )
+}
+
 #[get("/public/styles.css")]
 async fn stylesheet() -> impl Responder {
     HttpResponse::Ok()
@@ -418,14 +779,23 @@ async fn stylesheet() -> impl Responder {
 }
 
 pub fn config(cfg: &mut web::ServiceConfig) {
-    cfg.service(workbench).service(event_log).service(stylesheet);
+    cfg.service(workbench)
+        .service(event_log)
+        .service(workflow_page)
+        .service(stylesheet);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn checkpoint(call: &str, family: &str, baseline: &str, recommendation: &str, at: i64) -> Value {
+    fn checkpoint(
+        call: &str,
+        family: &str,
+        baseline: &str,
+        recommendation: &str,
+        at: i64,
+    ) -> Value {
         json!({
             "id": format!("cp-{call}"),
             "event_type": "jev.checkpoint",
@@ -485,7 +855,13 @@ mod tests {
 
     #[test]
     fn event_rows_flatten_payload_fields_and_format_time() {
-        let row = event_row(&checkpoint("abc", "evidence_assessment", "run", "fix", 1_790_629_585_000_000));
+        let row = event_row(&checkpoint(
+            "abc",
+            "evidence_assessment",
+            "run",
+            "fix",
+            1_790_629_585_000_000,
+        ));
         assert_eq!(row["family"], "evidence_assessment");
         assert_eq!(row["baseline_action"], "run");
         assert_eq!(row["recommendation"], "fix");
@@ -509,14 +885,23 @@ mod tests {
 
     #[test]
     fn timestamps_handle_leap_years_and_negatives() {
-        assert_eq!(format_timestamp(951_782_400_000_000), "2000-02-29 00:00:00Z");
+        assert_eq!(
+            format_timestamp(951_782_400_000_000),
+            "2000-02-29 00:00:00Z"
+        );
         assert_eq!(format_timestamp(-1_000_000), "1969-12-31 23:59:59Z");
     }
 
     #[test]
     fn workbench_renders_summary_tables_with_the_arc_layout() {
         let rows = vec![
-            checkpoint("a", "evidence_assessment", "run_full_verification", "run_full_verification", 1),
+            checkpoint(
+                "a",
+                "evidence_assessment",
+                "run_full_verification",
+                "run_full_verification",
+                1,
+            ),
             outcome("a", "correct", 2),
             json!({
                 "id": "r1", "event_type": "jev.route", "recorded_at_us": 3,
@@ -583,7 +968,11 @@ mod tests {
             ["04-11", "04-13", "04-15", "04-17", "04-19", "04-21"]
         );
         let nine_days = accuracy_chart(&[day(0, 1, 1), day(8, 1, 1)]);
-        assert_eq!(nine_days["ticks"].as_array().unwrap().len(), 9, "short spans tick every day");
+        assert_eq!(
+            nine_days["ticks"].as_array().unwrap().len(),
+            9,
+            "short spans tick every day"
+        );
         let single = accuracy_chart(&[day(5, 3, 1)]);
         assert_eq!(single["path"], "M356.0,130.7");
         assert_eq!(single["ticks"].as_array().unwrap().len(), 1);
@@ -605,6 +994,11 @@ mod tests {
         context.insert("routes", &grouped::route_groups(rows, false));
         context.insert("recent", &rows.iter().map(event_row).collect::<Vec<_>>());
         context.insert("include_fixtures", &false);
+        context.insert(
+            "collection_settings",
+            &crate::settings::CollectionSettings::default(),
+        );
+        context.insert("workflow_sessions", &0);
         decorate(&mut context, "Audit workbench");
         // Keys that `UiRegistry::render` injects at request time.
         for key in ["app_name", "environment", "csrf_token", "request_path"] {
@@ -616,6 +1010,194 @@ mod tests {
         registry_tera(&registry)
             .render("audit/workbench.html", &context)
             .expect("renders")
+    }
+
+    fn directory_fixture(id: &str, date: &str, agent: &str, prompt: bool) -> Value {
+        json!({"session_id":id,"label":format!("Repair {id}"),"agent":agent,"model":"model-v1","cwd":"/Projects/Working Tree","status":"running","first_at":format!("{date}T01:00:00Z"),"last_at":format!("{date}T02:00:00Z"),"tasks":{"t":{"name":"Repair parser","description":"Curated summary","status":"completed","outcome":"Regression passed","phase":"build"}},"prompts":if prompt{vec![json!({"text":"Fix Unicode imports"})]}else{vec![]},"initial_goal":"","events":[]})
+    }
+
+    #[test]
+    fn directory_filters_search_across_metadata_tasks_outcomes_and_prompts() {
+        let data = vec![
+            directory_fixture("a", "2026-10-02", "Codex", true),
+            directory_fixture("b", "2026-10-01", "Claude Code", false),
+        ];
+        let query = WorkflowQuery {
+            q: Some("unicode regression".into()),
+            agent: Some("Codex".into()),
+            model: Some("model-v1".into()),
+            path: Some("WORKING tree".into()),
+            status: Some("running".into()),
+            phase: Some("build".into()),
+            prompts: Some("recorded".into()),
+            since: Some("2026-10-02".into()),
+            until: Some("2026-10-02".into()),
+            ..Default::default()
+        };
+        let directory = session_directory(&data, &query);
+        assert_eq!(directory["total"], 1);
+        assert_eq!(directory["rows"][0]["session_id"], "a");
+        assert_eq!(directory["rows"][0]["completed_tasks"], 1);
+        assert_eq!(directory["facets"]["agent"].as_array().unwrap().len(), 2);
+        let none = session_directory(
+            &data,
+            &WorkflowQuery {
+                q: Some("missing term".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(none["total"], 0);
+        let without = session_directory(
+            &data,
+            &WorkflowQuery {
+                prompts: Some("none".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(without["rows"][0]["session_id"], "b");
+    }
+
+    #[test]
+    fn directory_pagination_sorting_dates_and_urls_are_bounded() {
+        let data = vec![
+            directory_fixture("a", "2026-10-02", "Codex", true),
+            directory_fixture("b", "2026-10-01", "Claude Code", false),
+        ];
+        let page = session_directory(
+            &data,
+            &WorkflowQuery {
+                sort: Some("oldest".into()),
+                per_page: Some(1),
+                page: Some(usize::MAX),
+                ..Default::default()
+            },
+        );
+        assert_eq!(page["page"], 2);
+        assert_eq!(page["rows"][0]["session_id"], "a");
+        assert!(page["previous"].as_str().unwrap().contains("sort=oldest"));
+        assert!(page["next"].as_str().unwrap().is_empty());
+        let bad = session_directory(
+            &data,
+            &WorkflowQuery {
+                since: Some("2026-02-30".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(bad["total"], 0);
+        assert!(!bad["errors"].as_array().unwrap().is_empty());
+        assert!(valid_date("2024-02-29"));
+        assert!(!valid_date("2026-02-29"));
+        assert!(!valid_date("9999-99-99"));
+        let url = directory_url(
+            &WorkflowQuery {
+                q: Some("work & café".into()),
+                path: Some("/Working Tree".into()),
+                ..Default::default()
+            },
+            2,
+        );
+        assert!(url.contains("q=work%20%26%20caf%C3%A9"));
+        assert!(url.contains("path=%2FWorking%20Tree"));
+    }
+
+    #[test]
+    fn session_directory_template_renders_rows_filters_and_empty_results() {
+        let mut data = vec![directory_fixture("id-hash", "2026-10-02", "Codex", true)];
+        data[0]["label"] = json!("Repair <script>alert</script>");
+        for query in [
+            WorkflowQuery::default(),
+            WorkflowQuery {
+                q: Some("no-match".into()),
+                ..Default::default()
+            },
+        ] {
+            let mut context = Context::new();
+            context.insert("directory", &session_directory(&data, &query));
+            decorate(&mut context, "Workflow sessions");
+            for key in ["app_name", "environment", "csrf_token", "request_path"] {
+                context.insert(key, "x");
+            }
+            context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
+            context.insert("admin_navigation", &Vec::<Value>::new());
+            context.insert("admin_actions", &Vec::<Value>::new());
+            let registry = UiRegistry::build(Some(&host()), &[contribution()])
+                .unwrap()
+                .unwrap();
+            let html = registry_tera(&registry)
+                .render("audit/sessions.html", &context)
+                .unwrap();
+            assert!(html.contains("Apply filters"));
+            assert!(!html.contains("session-selector"));
+            assert!(!html.contains("<script>alert</script>"));
+            if query.q.is_none() {
+                assert!(html.contains("Repair &lt;script&gt;"));
+                assert!(html.contains("return_to="));
+                assert!(!html.contains(">id-hash<"));
+            } else {
+                assert!(html.contains("No matching sessions"));
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_renders_tasks_with_phase_history() {
+        let rows = vec![
+            json!({"id":"evidence-id","recorded_at_us":123,"event_type":"workflow.tool_completed","payload":{"session_id":"session","task_id":"task","tool_name":"Tool <script>bad</script>","tool_call_id":"call-id","duration_ms":42,"exit_code":0,"outcome":"succeeded","occurred_at":"2026-10-02T00:03:00Z"}}),
+            json!({"event_type":"workflow.session_updated","payload":{"session_id":"session","agent":"Codex","model":"example-model","cwd":"/example/Working Tree","occurred_at":"2026-10-02T00:00:00Z"}}),
+            json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"session","task_id":"task","prompt_id":"p","part_index":0,"part_count":1,"text":"Example goal <script>bad</script>","occurred_at":"2026-10-02T00:00:00Z"}}),
+            json!({"event_type":"workflow.task_started","payload":{"session_id":"session","task_id":"task","name":"Example task","status":"running","occurred_at":"2026-10-02T00:00:00Z"}}),
+            json!({"event_type":"workflow.phase_changed","payload":{"session_id":"session","task_id":"task","phase":"build","phase_status":"active","occurred_at":"2026-10-02T00:01:00Z"}}),
+            json!({"event_type":"workflow.review","payload":{"session_id":"session","task_id":"task","check":"review","exit_code":0,"outcome":"passed","occurred_at":"2026-10-02T00:02:00Z"}}),
+        ];
+        let sessions = crate::workflow::sessions(&rows);
+        let registry = UiRegistry::build(Some(&host()), &[contribution()])
+            .unwrap()
+            .unwrap();
+        let mut context = Context::new();
+        context.insert("sessions", &sessions);
+        context.insert("selected", &sessions[0]);
+        context.insert("timeline", &sessions[0]["events"]);
+        context.insert("task_filter", &Option::<String>::None);
+        decorate(&mut context, "Workflow audit");
+        for key in ["app_name", "environment", "csrf_token", "request_path"] {
+            context.insert(key, "x");
+        }
+        context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
+        context.insert("admin_navigation", &Vec::<Value>::new());
+        context.insert("admin_actions", &Vec::<Value>::new());
+        for selected in &sessions {
+            context.insert("selected", selected);
+            context.insert("timeline", &selected["events"]);
+            let html = registry_tera(&registry)
+                .render("audit/workflow.html", &context)
+                .expect("Workflow with optional review fields renders");
+            assert!(html.contains("Example task"));
+            assert!(html.contains("Back to sessions"));
+            assert!(!html.contains("session-selector"));
+            assert!(!html.contains(">session ·"));
+            assert!(html.contains("Session metadata"));
+            assert!(html.contains("Session analysis"));
+            assert!(html.contains("Tool succeeded"));
+            assert!(html.contains("42 ms"));
+            assert!(html.contains("call-id"));
+            assert!(html.contains("evidence-id"));
+            assert!(html.contains("Tool &lt;script&gt;"));
+            assert!(html.contains("timeline-category"));
+            assert!(html.contains("timeline-status"));
+            assert!(html.contains("<dd>Codex</dd>"));
+            assert!(html.contains("<dd>example-model</dd>"));
+            assert!(html.contains("Working directory"));
+            assert!(
+                html.contains("/example/Working Tree")
+                    || html.contains("&#x2F;example&#x2F;Working Tree")
+            );
+            assert!(html.contains("Initial goal · first captured prompt"));
+            assert!(html.contains("User prompts"));
+            assert!(html.contains("Example goal &lt;script&gt;bad&lt;"));
+            assert!(!html.contains("<script>bad</script>"));
+            assert!(html.contains("build: active"));
+            assert!(html.contains("review · exit 0"));
+        }
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly

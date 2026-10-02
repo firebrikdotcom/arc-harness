@@ -43,8 +43,9 @@ dry_run = dry_run == "1"
 SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
 OBSERVE = str(Path(root) / "scripts/hooks/jev-observe.sh")
 REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
+WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
-           "scripts/retrieval-reminder.sh")
+           "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py")
 SHARED = {
     "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]}],
     "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]}],
@@ -57,7 +58,17 @@ CLAUDE_ONLY = {
 
 def entries_for(index: int) -> dict:
     extra = CLAUDE_ONLY if index == 0 else {}
-    return {event: SHARED[event] + extra.get(event, []) for event in SHARED}
+    entries = {event: SHARED[event] + extra.get(event, []) for event in SHARED}
+    # Use native lifecycle events; Stop is a turn boundary, not a session end.
+    events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse"]
+    if index == 0:
+        events.append("PostToolUseFailure")
+    for event in events:
+        entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {"claude-code" if index == 0 else "codex"}', "timeout": 3 if event == "SessionEnd" else 10}]}
+        if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            entry["matcher"] = ".*"
+        entries.setdefault(event, []).append(entry)
+    return entries
 
 
 def is_ours(group: dict) -> bool:
@@ -103,5 +114,5 @@ for index, target in enumerate(targets):
         backup.write_bytes(path.read_bytes())
         print(f"backup: {backup}")
     path.write_text(rendered, encoding="utf-8")
-    print(f"{mode}ed Jev hooks in {path}")
+    print(f"{mode}ed Jev and Workflow hooks in {path}")
 PY

@@ -7,17 +7,16 @@ import argparse
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
-import urllib.error
-import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any
 
 
+from audit_transport import emit, enabled, audit_url
+
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_URL = "http://127.0.0.1:8080"
 MAX_RECORD_BYTES = 32_000
 
 
@@ -28,38 +27,6 @@ def read_record(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("audit source record must be an object")
     return value
-
-
-def enabled() -> bool:
-    return os.environ.get("HARNESS_AUDIT_ENABLED") == "1"
-
-
-def audit_url() -> str:
-    return os.environ.get("HARNESS_AUDIT_URL", DEFAULT_URL).rstrip("/")
-
-
-def emit(event_type: str, payload: dict[str, Any]) -> bool:
-    if not enabled():
-        return True
-    body = json.dumps(
-        {"id": str(uuid.uuid4()), "event_type": event_type, "payload": payload},
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    if len(body) > MAX_RECORD_BYTES:
-        raise ValueError("audit event is too large")
-    request = urllib.request.Request(
-        f"{audit_url()}/api/audit/events",
-        data=body,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=2) as response:
-            return 200 <= response.status < 300
-    except (OSError, urllib.error.URLError, urllib.error.HTTPError) as error:
-        print(f"AUDIT TELEMETRY UNAVAILABLE: {type(error).__name__}", file=sys.stderr)
-        return False
 
 
 def scalar(value: Any) -> Any:
@@ -295,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (OSError, ValueError, json.JSONDecodeError) as error:
+    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as error:
         print(f"AUDIT TELEMETRY SKIPPED: {error}", file=sys.stderr)
         return 0
 

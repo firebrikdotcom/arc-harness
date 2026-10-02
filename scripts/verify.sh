@@ -246,6 +246,9 @@ write_run_record() {
   } > "$record.tmp.$$"
   mv "$record.tmp.$$" "$record"
   info "Run record: $record"
+  if has_cmd python3; then
+    python3 "$SCRIPT_DIR/workflow_audit.py" check --kind verify --record "$record" >&2 || :
+  fi
 }
 
 run_make_or_skip() {
