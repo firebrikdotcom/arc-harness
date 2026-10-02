@@ -61,3 +61,14 @@ h1, h2, p { margin-top: 0; } h1 { font-size: clamp(2.2rem, 6vw, 4.4rem); line-he
 .section-note { margin: 0; padding: .75rem 1rem; color: var(--ink-muted); font-size: .8rem; border-bottom: 1px solid var(--border-subtle); }
 .panel__head form { display: inline-flex; gap: .5rem; align-items: center; margin: 0; }
 .panel__head form label { font: 700 .68rem var(--mono); text-transform: uppercase; }
+.chart-wrap { overflow-x: auto; padding: .75rem 1rem 0; }
+.chart { display: block; width: 100%; min-width: 30rem; height: auto; }
+.chart__grid { stroke: var(--border-subtle); stroke-width: 1; }
+.chart__axis { fill: var(--ink-muted); font: 11px var(--mono); }
+.chart__line { fill: none; stroke: var(--warning); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart__dot { fill: var(--warning); stroke: var(--panel); stroke-width: 2; }
+.chart__hit { fill: transparent; }
+.chart__point:hover .chart__dot { r: 6; }
+.chart__label { fill: var(--ink); font: 700 12px var(--mono); }
+.chart-data { padding: .5rem 1rem 1rem; }
+.chart-data summary { cursor: pointer; font: 700 .68rem var(--mono); text-transform: uppercase; }

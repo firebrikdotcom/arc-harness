@@ -1,5 +1,15 @@
 # Jev checkpoint implementation — 2026-09-22
 
+## Audit workbench accuracy chart (2026-10-02)
+
+- Goal: add an "Accuracy over time" chart at the top of the harness-audit workbench (`GET /`). User request in chat; branch `feat/audit-accuracy-chart`. The run resumed from a loops pause on explicit user instruction (continue 3/3).
+- Plan: `summary::daily_checkpoint_accuracy` buckets labeled checkpoint decisions by UTC day of the checkpoint with the same latest-label join and fixture rule as `checkpoint_groups`; `ui.rs` turns it into server-rendered inline SVG geometry (one 2px line, gaps on unlabeled days, hover titles, direct label on the latest point) plus a collapsible data table; no JavaScript or new assets.
+- Acceptance: daily counts sum to the workbench totals; chart renders above the metric grid and an empty state when nothing is labeled; `cargo test` and `scripts/verify.sh` pass; the live page at 127.0.0.1:18080 shows the chart.
+- Caveat surfaced to the user: the daily line pools question versions and families.
+- Build: `summary::daily_checkpoint_accuracy` + `DailyAccuracy`; `ui::accuracy_chart` (evenly spaced day ticks, up to ten); chart panel above the metric grid in `audit/workbench.html` with a collapsible daily table and empty state; chart styles in `public/styles.css`; README notes. `cargo fmt` reflowed untouched lines, which were reverted to keep the diff scoped.
+- Verification: `cargo test` 17 passed (new: daily bucketing matches group totals and uses the checkpoint day and latest label; geometry breaks on gaps; empty state; chart above metrics). `scripts/verify.sh` passed (ran=3 skipped=3 failures=0; it does not run the service's cargo tests, so those ran separately). Restarted the LaunchAgent; the live page shows the chart, and its daily table sums to 177 of 257, matching the headline accuracy tile. Screenshots checked at 1280px and 390px.
+- Review: `scripts/review.sh` finished. Pre-existing, out of scope: at 390px the rail navigation and top bar overflow the viewport on every page (the events page too); the chart itself scrolls inside its panel.
+
 ## Explicit lease pushes (2026-09-30)
 
 - Goal: permit an authorized task-branch rebase push when an explicit expected remote commit protects the update. The user explicitly requested maintenance of the harness denylist after it rejected both requested pushes.

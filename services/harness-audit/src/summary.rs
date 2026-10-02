@@ -272,6 +272,56 @@ pub fn route_groups(rows: &[Value], include_fixtures: bool) -> Value {
     summarize(rows, Kind::Route, include_fixtures)
 }
 
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// Labeled checkpoint decisions on one UTC day of the checkpoint itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyAccuracy {
+    /// Days since the Unix epoch.
+    pub day: i64,
+    pub labeled: usize,
+    pub correct: usize,
+}
+
+/// Labeled checkpoint decisions per UTC day, oldest first, using the same
+/// latest-label join, fixture rule and `unknown` exclusion as
+/// `checkpoint_groups`, so the days sum to its `labeled` and `correct`.
+pub fn daily_checkpoint_accuracy(rows: &[Value], include_fixtures: bool) -> Vec<DailyAccuracy> {
+    let outcomes = latest_outcomes(rows, Kind::Checkpoint);
+    let mut days = BTreeMap::<i64, (usize, usize)>::new();
+    for row in rows {
+        if row.get("event_type").and_then(Value::as_str) != Some(Kind::Checkpoint.event_type()) {
+            continue;
+        }
+        let Some(payload) = payload(row) else {
+            continue;
+        };
+        if !include_fixtures && is_fixture(payload) {
+            continue;
+        }
+        let Some(outcome) = text(payload, "call_id").and_then(|call| outcomes.get(&call)) else {
+            continue;
+        };
+        if outcome == "unknown" {
+            continue;
+        }
+        let at = row
+            .get("recorded_at_us")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let day = days.entry(at.div_euclid(MICROS_PER_DAY)).or_default();
+        day.0 += 1;
+        day.1 += usize::from(outcome == "correct");
+    }
+    days.into_iter()
+        .map(|(day, (labeled, correct))| DailyAccuracy {
+            day,
+            labeled,
+            correct,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +495,51 @@ mod tests {
         assert_eq!(group["tokens"], json!({"total": 10, "samples": 2}));
         assert!(group.get("agreement_rate").is_none());
         assert_eq!(summary["excluded_fixture_events"], 1);
+    }
+
+    #[test]
+    fn daily_accuracy_buckets_by_checkpoint_day_and_matches_groups() {
+        let day = MICROS_PER_DAY;
+        let rows = vec![
+            checkpoint(1, "a", "proceed", "proceed", "m"),
+            checkpoint(2, "b", "proceed", "hold", "m"),
+            checkpoint(day + 1, "c", "proceed", "proceed", "m"),
+            checkpoint(day + 2, "d", "proceed", "proceed", "m"),
+            checkpoint(3 * day, "e", "proceed", "proceed", "fixture"),
+            label(5, "a", "correct"),
+            label(6, "b", "correct"),
+            // A later label replaces the earlier one, and is bucketed by the
+            // checkpoint's day rather than the label's.
+            label(4 * day, "b", "over_escalated"),
+            label(day + 5, "c", "correct"),
+            label(day + 6, "d", "unknown"),
+            label(3 * day + 1, "e", "correct"),
+        ];
+        let daily = daily_checkpoint_accuracy(&rows, false);
+        assert_eq!(
+            daily,
+            vec![
+                DailyAccuracy {
+                    day: 0,
+                    labeled: 2,
+                    correct: 1
+                },
+                DailyAccuracy {
+                    day: 1,
+                    labeled: 1,
+                    correct: 1
+                },
+            ]
+        );
+        let group = only_group(&checkpoint_groups(&rows, false)).clone();
+        assert_eq!(
+            daily.iter().map(|d| d.labeled).sum::<usize>(),
+            group["labeled"].as_u64().unwrap() as usize
+        );
+        assert_eq!(
+            daily.iter().map(|d| d.correct).sum::<usize>(),
+            group["correct"].as_u64().unwrap() as usize
+        );
+        assert_eq!(daily_checkpoint_accuracy(&rows, true).len(), 3);
     }
 }
