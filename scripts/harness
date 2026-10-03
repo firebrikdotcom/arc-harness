@@ -49,7 +49,7 @@ usage() {
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
-  info "  workflow task|decision|outcome|flush  Record session task metadata or retry delivery."
+  info "  workflow task|todo|decision|outcome|flush  Record session task metadata or retry delivery."
   info "  route --state PATH   Route compact task metadata before an agent starts."
   info "  launch --state PATH --default-command PATH"
   info "                       Select and start an argv command profile."
@@ -630,6 +630,9 @@ cmd_phase_start() {
     exit "$EXIT_PHASE"
   fi
 
+  if [ "$_phase" = "build" ] && [ -f "$SCRIPT_DIR/workflow_todos.py" ]; then
+    python3 "$SCRIPT_DIR/workflow_audit.py" gate --check active || exit "$EXIT_PHASE"
+  fi
   _status=$(phase_status "$_phase")
   if [ "$_status" = "active" ]; then
     info "FAIL: $_phase is already started in run $(state_get RUN_ID)."
@@ -672,6 +675,9 @@ cmd_phase_done() {
   fi
 
   require_gate_record "$_phase"
+  if [ "$_phase" = "review" ] && [ -f "$SCRIPT_DIR/workflow_todos.py" ]; then
+    python3 "$SCRIPT_DIR/workflow_audit.py" gate --check plan || exit "$EXIT_PHASE"
+  fi
 
   state_set "$(phase_key "$_phase")" "done"
   state_set CURRENT_PHASE "$_phase"

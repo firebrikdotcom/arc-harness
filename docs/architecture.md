@@ -110,3 +110,6 @@ Add dated decisions here as the system takes shape.
 
 
 - 2026-10-02: Split audit collection into independently configurable Jev and Workflow categories. The Arc API gates ingestion using atomic local persisted settings shared with collectors. `scripts/audit_transport.py` queues stable-ID events in SQLite, and a service worker retries them without blocking harness gates. `scripts/workflow_audit.py` maintains exact native session/task bindings, collects selected lifecycle metadata and phase/sensor outcomes, and exposes explicit task/decision/outcome recording. Workflow rejects raw-prompt fields and does not infer final completion. `/workflow` presents source-time session timelines. This local collection layer does not change routing policy or shadow mode.
+
+- `scripts/workflow_todos.py`: deterministic, machine-local plan state and completion criteria independent of collection switches.
+- `scripts/workflow_gate.py`: additive native prompt/tool/Stop gate; resets prompt confirmation, requires an active todo for covered execution, and blocks completion without resolved required items and fresh passing checks. Workflow events preserve revision reasons and correlate tool/check facts to todo IDs.

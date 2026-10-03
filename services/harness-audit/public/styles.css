@@ -204,3 +204,11 @@ summary { cursor:pointer; }
 @media(max-width:520px) { .timeline-controls, .event-evidence dl { grid-template-columns:1fr; } }
 
 .timeline-controls input[type=search] { width:100%; min-width:0; min-height:2.7rem; padding:.7rem .8rem; border:2px solid var(--border); border-radius:0; background:var(--panel); color:var(--ink); font:.75rem var(--mono); }
+
+.todo-plan { margin:1rem 0; padding-top:1rem; border-top:1px solid var(--border-subtle); }
+.todo-plan h4 { margin:.2rem 0 .8rem; font:700 .75rem var(--mono); text-transform:uppercase; }
+.todo-items { margin:0; padding-left:1.3rem; }
+.todo-items > li { padding:.7rem 0; border-bottom:1px solid var(--border-subtle); }
+.todo-items p, .todo-history p { font-size:.8rem; overflow-wrap:anywhere; }
+.todo-history { margin:.5rem 0; }
+.todo-history summary { cursor:pointer; font:700 .65rem var(--mono); text-transform:uppercase; }

@@ -122,3 +122,8 @@ For an unfamiliar target, start discovery with one semantic retrieval before bro
 ## Jev consideration during work
 
 The Harness Phases block above lists the three points at which to ask Jev and the exact flag-form commands. See [Jev checkpoints](docs/jev-checkpoints.md) for input formats and the 30-decision pilot. Jev stays in shadow mode and never overrides authorization, required verification, failures, or completion gates.
+
+
+## Audited todo plans
+
+Before execution, register the complete current plan with `scripts/harness workflow todo plan --items '[{"id":"implementation","description":"Work item","criterion":"Observable completion condition"}]' --reason "Initial plan"` (supply `--session-id` if needed). Every actionable prompt requires a new plan or `todo confirm --reason SUMMARY` after evaluating its effect on the existing plan. Preserve stable IDs when revising; omissions are audited removals. Set one item `in_progress` with `todo update --id ID --status in_progress --reason SUMMARY` before local execution tools. `todo show` prints IDs and current state. Completed items require `--evidence SUMMARY`; blockers require a reason. Questions needing no execution use `todo exempt --reason SUMMARY`, which cannot erase unresolved work. Record explicit blocked task outcomes when work cannot continue. A completed task requires resolved required todos and passing verify/review after the latest plan scope or execution. Do not claim tools are universally intercepted: specialized runtime paths can bypass native hooks. The existing phase, action validation, knowledge and verification gates remain mandatory. Audit collection switches do not disable todo enforcement.
