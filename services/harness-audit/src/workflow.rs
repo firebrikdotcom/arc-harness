@@ -2,6 +2,14 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 const TYPES: &[&str] = &[
+    "plan_required",
+    "plan_registered",
+    "plan_revised",
+    "plan_confirmed",
+    "plan_exempted",
+    "todo_created",
+    "todo_updated",
+    "todo_removed",
     "prompt_recorded",
     "session_updated",
     "session_started",
@@ -19,6 +27,17 @@ const TYPES: &[&str] = &[
     "review",
 ];
 const KEYS: &[&str] = &[
+    "todo_id",
+    "request_id",
+    "criterion",
+    "todo_required",
+    "reason",
+    "revision",
+    "todo_count",
+    "evidence",
+    "previous_status",
+    "previous_description",
+    "previous_criterion",
     "prompt_id",
     "part_index",
     "part_count",
@@ -144,6 +163,28 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
     {
         return Err("exit code must be an integer");
     }
+    if event_type.starts_with("workflow.todo_") {
+        for key in ["todo_id", "description", "criterion", "reason"] {
+            if payload[key].as_str().is_none_or(|s| s.trim().is_empty()) {
+                return Err("todo identity, criterion and reason required");
+            }
+        }
+        if !["pending", "in_progress", "completed", "blocked", "removed"]
+            .contains(&payload["status"].as_str().unwrap_or(""))
+        {
+            return Err("invalid todo status");
+        }
+        if payload["status"] == "completed"
+            && payload["evidence"]
+                .as_str()
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err("completion evidence required");
+        }
+        if payload["revision"].as_u64().is_none_or(|n| n == 0) {
+            return Err("positive todo revision required");
+        }
+    }
     if event_type == "workflow.decision" {
         let selected = payload["selected"]
             .as_str()
@@ -185,6 +226,10 @@ fn annotate_timeline(session: &mut Value) {
             .unwrap_or("")
             .trim_start_matches("workflow.");
         let (title, category, status, explanation) = match kind {
+            "todo_created" | "todo_updated" | "todo_removed" => ("Todo changed", "todo", p["status"].as_str().unwrap_or("unknown"), "The plan item changed. Its criterion, reason, prior state and evidence preserve the revision history."),
+            "plan_required" => ("Plan confirmation required", "plan", "required", "A new prompt requires confirmation or revision before execution can continue."),
+            "plan_registered" | "plan_revised" | "plan_confirmed" => ("Todo plan registered or revised", "plan", "confirmed", "The agent supplied or confirmed the complete current todo plan and the reason for this revision."),
+            "plan_exempted" => ("No execution needed", "plan", "question", "An explicit, audited exemption allows an answer without execution tools."),
             "tool_started" => ("Tool started", "tool", "started", "The runtime dispatched this tool. A later return records the result when available."),
             "tool_completed" => match p["outcome"].as_str() {
                 Some("succeeded") => ("Tool succeeded", "tool", "succeeded", "The tool returned exit code 0. This does not prove that the overall task is complete."),
@@ -295,7 +340,7 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
         }
         if let Some(task_id) = p["task_id"].as_str() {
             let tasks = session["tasks"].as_object_mut().unwrap();
-            let task = tasks.entry(task_id.to_owned()).or_insert_with(|| json!({"task_id": task_id, "name": "Session work", "description": "", "status": "observed", "outcome": "", "phase": "", "parent_task_id": "", "phases": {}}));
+            let task = tasks.entry(task_id.to_owned()).or_insert_with(|| json!({"task_id": task_id, "name": "Session work", "description": "", "status": "observed", "outcome": "", "phase": "", "parent_task_id": "", "phases": {}, "todos": {}, "plan_revisions": [], "plan_status":"not_registered"}));
             if row["event_type"]
                 .as_str()
                 .is_some_and(|s| s.starts_with("workflow.task_"))
@@ -304,6 +349,38 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
                     if !p[key].is_null() {
                         task[key] = p[key].clone();
                     }
+                }
+            }
+            let kind = row["event_type"].as_str().unwrap_or("");
+            if kind.starts_with("workflow.plan_") {
+                task["plan_revisions"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(p.clone());
+                task["plan_status"] = json!(if kind == "workflow.plan_required" {
+                    "required"
+                } else if kind == "workflow.plan_exempted" {
+                    "question"
+                } else {
+                    "confirmed"
+                });
+            }
+            if kind.starts_with("workflow.todo_") {
+                if let Some(todo_id) = p["todo_id"].as_str() {
+                    let todo = task["todos"].as_object_mut().unwrap().entry(todo_id.to_owned()).or_insert_with(|| json!({"id":todo_id,"description":"","criterion":"","status":"pending","evidence":"","history":[]}));
+                    for key in [
+                        "description",
+                        "criterion",
+                        "status",
+                        "evidence",
+                        "todo_required",
+                        "revision",
+                    ] {
+                        if !p[key].is_null() {
+                            todo[key] = p[key].clone();
+                        }
+                    }
+                    todo["history"].as_array_mut().unwrap().push(p.clone());
                 }
             }
             if let Some(phase) = p["phase"].as_str() {
@@ -418,6 +495,32 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn todo_projection_retains_criteria_revision_history_and_tool_links() {
+        let base = json!({"schema_version":1,"session_id":"s","task_id":"t","todo_id":"a","description":"Repair <script>","criterion":"Test passes","reason":"Initial plan","revision":1,"status":"pending","occurred_at":"01"});
+        assert!(validate("workflow.todo_created", &base).is_ok());
+        let mut done = base.clone();
+        done["status"] = json!("completed");
+        assert!(validate("workflow.todo_updated", &done).is_err());
+        done["evidence"] = json!("Regression passed");
+        done["previous_status"] = json!("pending");
+        done["occurred_at"] = json!("03");
+        done["revision"] = json!(2);
+        assert!(validate("workflow.todo_updated", &done).is_ok());
+        let rows = vec![
+            json!({"event_type":"workflow.todo_created","payload":base}),
+            json!({"event_type":"workflow.plan_registered","payload":{"session_id":"s","task_id":"t","description":"Initial","occurred_at":"02"}}),
+            json!({"event_type":"workflow.todo_updated","payload":done}),
+            json!({"event_type":"workflow.tool_completed","payload":{"session_id":"s","task_id":"t","todo_id":"a","outcome":"succeeded","occurred_at":"04"}}),
+        ];
+        let grouped = sessions(&rows);
+        let todo = &grouped[0]["tasks"]["t"]["todos"]["a"];
+        assert_eq!(todo["status"], "completed");
+        assert_eq!(todo["criterion"], "Test passes");
+        assert_eq!(todo["history"].as_array().unwrap().len(), 2);
+        assert_eq!(grouped[0]["tasks"]["t"]["plan_status"], "confirmed");
+        assert_eq!(grouped[0]["events"][3]["payload"]["todo_id"], "a");
+    }
     #[test]
     fn tool_analysis_keeps_unknown_returns_separate_from_success_and_unmatched_starts() {
         let rows = vec![

@@ -535,10 +535,33 @@ The audit workbench at `http://127.0.0.1:18080/` provides persisted, independent
 - `HARNESS_AUDIT_ENABLED=0`: hard process opt-out. A persisted settings file otherwise controls both categories; before it exists, legacy `=1` enables collection.
 - `HARNESS_AUDIT_URL`: emission destination, now defaulting to `http://127.0.0.1:18080`.
 
-Collection switches do not change Jev's evaluations or routing. The dashboard's **Store user prompts** switch controls `workflow_prompts` (default false). When both it and Workflow are enabled, UserPromptSubmit hooks store complete prompts in UTF-8 chunks and the Workflow page shows them, labeling the first captured prompt as the initial goal. Turning it off stops capture and discards queued prompt records; saved history remains. Older settings files default to prompt capture off. Hook guidance reports the current configuration at session start; hooks re-read settings on every submission. Tool content is excluded; curated task/decision descriptions are explicitly supplied through `harness workflow`. Disabling a category retains stored history. The service delivery worker uses `python3` and the companion harness scripts. Hooks fail open and never alter authorization or required checks.
+Collection switches do not change Jev's evaluations or routing. The dashboard's **Store user prompts** switch controls `workflow_prompts` (default false). When both it and Workflow are enabled, UserPromptSubmit hooks store complete prompts in UTF-8 chunks and the Workflow page shows them, labeling the first captured prompt as the initial goal. Turning it off stops capture and discards queued prompt records; saved history remains. Older settings files default to prompt capture off. Hook guidance reports the current configuration at session start; hooks re-read settings on every submission. Tool content is excluded; curated task/decision descriptions are explicitly supplied through `harness workflow`. Disabling a category retains stored history. The service delivery worker uses `python3` and the companion harness scripts. Telemetry delivery fails open. The separate todo gate blocks covered local execution tools and premature turn completion; it remains active even when collection is disabled. Existing authorization and phase checks still apply.
 
 The installed audit service sets `APP_URL=0.0.0.0` in launchd/systemd and listens on every IPv4 interface at port 18080. Open it through localhost or a machine IP address; telemetry can continue using `127.0.0.1`. The environment example uses the same binding. Existing `.env` files are preserved; installed service configuration overrides their host setting.
 
 Workflow session selectors show a label of at most five words, preferring the first named task, then the native session title, then the first captured prompt. IDs appear in Session metadata alongside the agent, model, and status. Native hooks identify their runtime explicitly and read model/title metadata from the exact matching local transcript or native session metadata database when available; unavailable fields show Unknown. Runtime changes remain in the timeline. `harness workflow refresh-metadata` recovers metadata for already observed sessions without importing prompt or tool content.
 
 Session metadata also displays the full working-directory path (`cwd`). The native hook directory takes precedence over recovered metadata. Directory changes are retained in the timeline; paths preserve case and spaces. Unavailable directories show Unknown.
+
+
+## Audited todo enforcement
+
+Install or update native hooks with `scripts/install-hooks.sh` on each machine, then restart existing native sessions to load them. The additive `scripts/workflow_gate.py` hook requires a structured plan, reconfirmation or revision for every prompt, and one active todo before covered local execution. `scripts/workflow_todos.py` keeps policy state in the local Workflow database even when audit collection is disabled. Collection settings control visibility and storage of emitted events, not this policy.
+
+```sh
+scripts/harness workflow task --name "Repair session navigation" --description "Fix navigation and verify the served dashboard"
+scripts/harness workflow todo plan --items '[{"id":"repair","description":"Repair navigation","criterion":"Navigation regression passes"},{"id":"checks","description":"Verify and review","criterion":"Fresh full verification and review pass"}]' --reason "Complete initial plan"
+scripts/harness workflow todo update --id repair --status in_progress --reason "Start repair"
+scripts/harness workflow todo update --id repair --status completed --evidence "Navigation regression passes" --reason "Repair verified"
+scripts/harness workflow todo update --id checks --status in_progress --reason "Run required checks"
+scripts/verify.sh --project /absolute/path/to/project
+scripts/review.sh --project /absolute/path/to/project
+scripts/harness workflow todo update --id checks --status completed --evidence "Full verification and review passed" --reason "Checks complete"
+scripts/harness workflow outcome --status completed --description "Navigation repaired and reviewed"
+```
+
+Add `--session-id ACTUAL_SESSION_ID` to Workflow commands outside a native session. `todo show` displays IDs, criteria, state and confirmation. For a new prompt, use `todo confirm --reason SUMMARY` or submit the complete revised list with `todo plan`. Keep IDs for retained items; omissions are audited removals with a reason. Changed criteria reset the item and require fresh checks. Completion requires evidence on each completed item, all required items resolved, and passing verify/review records after the latest execution and scope revision. Switching to a new task cannot silently discard unfinished required todos. Questions that require no execution use `todo exempt --reason SUMMARY`; unfinished execution plans must first be resolved or explicitly reported blocked.
+
+The task card displays criteria, status, evidence, and revision history. Select a todo to filter its timeline, including correlated tools and checks. Historical tasks have no fabricated todo list.
+
+The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return exit 2 with guidance. Telemetry outages do not bypass it. This enforces declared plans on covered native tools, not semantic completeness or a security sandbox: specialized tools outside native hook coverage, hook timeouts, and runtime configuration can bypass enforcement. Codex hosted WebSearch has no PreToolUse; a returned process handle is not tool completion. Stop may request another continuation rather than cancel a session. Existing phase/denylist gates and permissions remain authoritative. Review phase completion may precede deployment todos; explicit completed outcomes and Stop enforce the full task criteria.

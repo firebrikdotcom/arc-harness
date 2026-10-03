@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -84,6 +85,7 @@ class WorkflowTests(unittest.TestCase):
         self.run_cli("hook", payload={"hook_event_name":"PostToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"PRIVATE COMMAND"},"tool_response":{"stdout":"PRIVATE OUTPUT","exit_code":7}})
         self.run_cli("task", "--session-id", "s", "--name", "Repair example", "--description", "Curated summary")
         self.run_cli("decision", "--session-id", "s", "--description", "Choose verification", "--option", "full", "--option", "focused", "--selected", "full")
+        self.run_cli("todo", "exempt", "--session-id", "s", "--reason", "Metadata-only fixture with no gated execution")
         self.run_cli("outcome", "--session-id", "s", "--status", "completed", "--description", "All checks passed")
         events = Handler.events + self.queued()
         self.assertNotIn("PRIVATE", json.dumps(events))
@@ -114,6 +116,70 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotIn("duration_ms", rows[2])
         self.assertEqual(rows[2]["process_id"], "123")
         self.assertNotIn("PRIVATE", json.dumps(self.queued()))
+
+    def gate(self, event, code=0, **fields):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py"), "codex"], input=json.dumps({"session_id":"policy-session","hook_event_name":event,"cwd":str(ROOT),**fields}), env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, code, result.stderr)
+        return result
+
+    def policy(self, *args, code=0):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_audit.py"), "todo", *args, "--session-id", "policy-session"], env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, code, result.stderr)
+        return result
+
+    def test_todo_gate_blocks_execution_until_plan_and_active_item_and_rechecks_each_prompt(self):
+        self.gate("UserPromptSubmit", prompt="PRIVATE PROMPT")
+        self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"touch PRIVATE_PATH"})
+        self.gate("PreToolUse",tool_name="Read",tool_input={"file_path":"PRIVATE_PATH"})
+        self.gate("PreToolUse",tool_name="Bash",tool_input={"command":str(ROOT/"scripts/harness")+" workflow todo show"})
+        for suffix in (";touch PRIVATE_PATH", " && touch PRIVATE_PATH", " | cat", " $(touch PRIVATE_PATH)", " `touch PRIVATE_PATH`"):
+            self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":str(ROOT/"scripts/harness")+" workflow todo show"+suffix})
+        self.policy("plan","--items",json.dumps([{"id":"a","description":"Repair parser","criterion":"Regression passes"}]),"--reason","Initial plan")
+        self.gate("PreToolUse",2,tool_name="Write",tool_input={"file_path":"PRIVATE_PATH"})
+        self.policy("update","--id","a","--status","in_progress","--reason","Working on parser")
+        self.gate("PreToolUse",tool_name="Bash",tool_use_id="call-a",tool_input={"command":"PRIVATE COMMAND"})
+        self.run_cli("hook",payload={"session_id":"policy-session","hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"call-a","tool_response":{"exit_code":0}})
+        completed=next(e for e in self.queued() if e["event_type"]=="workflow.tool_completed")
+        self.assertEqual(completed["payload"]["todo_id"],"a")
+        self.gate("UserPromptSubmit",prompt="Steering prompt")
+        self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"touch PRIVATE_PATH"})
+        self.policy("confirm","--reason","Steering does not change the work")
+        self.gate("PreToolUse",tool_name="Bash",tool_input={"command":"PRIVATE COMMAND"})
+        self.assertNotIn("PRIVATE",json.dumps(self.queued()))
+        self.gate("Stop",2)
+
+    def test_plan_revisions_remove_items_with_reasons_and_completion_needs_fresh_checks(self):
+        self.gate("UserPromptSubmit",prompt="Work")
+        self.policy("plan","--items",json.dumps([{"id":"a","description":"Repair parser","criterion":"Regression passes"},{"id":"b","description":"Other work","criterion":"Other result"}]),"--reason","Initial plan")
+        self.policy("plan","--items",json.dumps([{"id":"a","description":"Repair Unicode parser","criterion":"Unicode regression passes"}]),"--reason","Discovery changed scope")
+        removed=next(e for e in Handler.events+self.queued() if e["event_type"]=="workflow.todo_removed")
+        self.assertEqual(removed["payload"]["reason"],"Discovery changed scope")
+        revised=next(e for e in Handler.events+self.queued() if e["event_type"]=="workflow.todo_updated")
+        self.assertEqual(revised["payload"]["previous_description"],"Repair parser")
+        self.policy("exempt","--reason","Cannot erase unfinished work",code=1)
+        self.policy("update","--id","a","--status","completed","--reason","Done",code=1)
+        self.policy("update","--id","a","--status","completed","--evidence","Unicode regression passed","--reason","Implementation checked")
+        self.gate("Stop",2)
+        for kind in ("verify","review"):
+            path=self.base/(kind+".state")
+            path.write_text("EXIT=0\nFAILURES=0\nRECORD_AT="+datetime.now(timezone.utc).isoformat().replace("+00:00","Z")+"\n")
+            self.run_cli("check","--kind",kind,"--record",str(path),"--session-id","policy-session")
+        self.gate("Stop")
+        self.run_cli("outcome","--session-id","policy-session","--status","completed","--description","Checks passed")
+        self.policy("plan","--items",json.dumps([{"id":"a","description":"New scope","criterion":"New check"}]),"--reason","New discovery")
+        self.policy("update","--id","a","--status","completed","--evidence","Evidence supplied","--reason","Updated")
+        self.gate("Stop",2)
+
+    def test_policy_is_independent_of_collection_and_question_exemption_cannot_execute(self):
+        self.config(False,False)
+        self.gate("UserPromptSubmit",prompt="Question")
+        self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"echo question"})
+        self.policy("exempt","--reason","Answer needs no local execution")
+        self.gate("Stop")
+        self.gate("PreToolUse",2,tool_name="Write",tool_input={"file_path":"file"})
+        self.assertEqual(self.queued(),[])
+        result=subprocess.run([sys.executable,str(ROOT/"scripts/workflow_gate.py")],input="{invalid",env=self.env,text=True,capture_output=True)
+        self.assertEqual(result.returncode,2)
 
     def test_resumed_session_emits_a_new_start_without_replacing_its_task(self):
         self.run_cli("hook", payload={"hook_event_name":"SessionStart", "session_id":"s"})

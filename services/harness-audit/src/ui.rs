@@ -481,6 +481,7 @@ async fn event_log(
 struct WorkflowQuery {
     session_id: Option<String>,
     task_id: Option<String>,
+    todo_id: Option<String>,
     return_to: Option<String>,
     q: Option<String>,
     agent: Option<String>,
@@ -797,6 +798,10 @@ async fn workflow_page(
                 .task_id
                 .as_deref()
                 .is_none_or(|id| e["payload"]["task_id"] == id)
+                && query
+                    .todo_id
+                    .as_deref()
+                    .is_none_or(|id| e["payload"]["todo_id"] == id)
         })
         .collect();
     let mut context = Context::new();
@@ -1273,6 +1278,9 @@ mod tests {
             json!({"event_type":"workflow.task_started","payload":{"session_id":"session","task_id":"task","name":"Example task","status":"running","occurred_at":"2026-10-02T00:00:00Z"}}),
             json!({"event_type":"workflow.phase_changed","payload":{"session_id":"session","task_id":"task","phase":"build","phase_status":"active","occurred_at":"2026-10-02T00:01:00Z"}}),
             json!({"event_type":"workflow.review","payload":{"session_id":"session","task_id":"task","check":"review","exit_code":0,"outcome":"passed","occurred_at":"2026-10-02T00:02:00Z"}}),
+            json!({"event_type":"workflow.todo_created","payload":{"session_id":"session","task_id":"task","todo_id":"item-a","description":"Repair <script>bad</script>","criterion":"Navigation regression passes","reason":"Initial scope","revision":1,"status":"pending","occurred_at":"2026-10-02T00:00:00Z"}}),
+            json!({"event_type":"workflow.plan_registered","payload":{"session_id":"session","task_id":"task","description":"Complete initial scope","revision":1,"occurred_at":"2026-10-02T00:00:00Z"}}),
+            json!({"event_type":"workflow.todo_updated","payload":{"session_id":"session","task_id":"task","todo_id":"item-a","description":"Repair <script>bad</script>","criterion":"Navigation regression passes","reason":"Regression confirmed","revision":2,"status":"completed","previous_status":"pending","evidence":"Navigation regression succeeded","occurred_at":"2026-10-02T00:02:00Z"}}),
         ];
         let sessions = crate::workflow::sessions(&rows);
         let registry = UiRegistry::build(Some(&host()), &[contribution()])
@@ -1296,6 +1304,13 @@ mod tests {
             let html = registry_tera(&registry)
                 .render("audit/workflow.html", &context)
                 .expect("Workflow with optional review fields renders");
+            assert!(html.contains("Navigation regression passes"));
+            assert!(html.contains("Navigation regression succeeded"));
+            assert!(html.contains("Revision history · 2"));
+            assert!(html.contains("Plan history · 1"));
+            assert!(html.contains("todo_id=item-a"));
+            assert!(html.contains("Repair &lt;script&gt;"));
+            assert!(!html.contains("<script>bad</script>"));
             assert!(html.contains("Example task"));
             assert!(html.contains("Back to sessions"));
             assert!(!html.contains("session-selector"));

@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import uuid
 from audit_transport import ROOT, emit, enabled, flush
+import workflow_todos as todos
 
 
 def now() -> str:
@@ -40,6 +41,10 @@ def record(kind: str, sid: str, context: dict, **facts) -> None:
     payload = {"schema_version": 1, "session_id": sid, "occurred_at": now(), **facts}
     if context.get("task_id"):
         payload["task_id"] = context["task_id"]
+    if context.get("active_todo_id") and "todo_id" not in payload:
+        payload["todo_id"] = context["active_todo_id"]
+    if context.get("request_id"):
+        payload["request_id"] = context["request_id"]
     emit("workflow." + kind, payload, flush_now=False)
 
 
@@ -174,6 +179,7 @@ def check_record(sid: str, context: dict, kind: str, path: Path) -> None:
            check=kind, exit_code=exit_code, outcome="passed" if exit_code == 0 else "failed",
            **{k.lower(): int(facts[k]) for k in ("RAN", "SKIPPED", "FAILURES") if facts.get(k, "").isdigit()})
     context[key] = digest
+    context.setdefault("checks", {})[kind] = {"exit_code":exit_code,"failures":int(facts.get("FAILURES", "0")),"at":facts.get("RECORD_AT", "")}
 
 
 def hook(agent: str | None = None) -> int:
@@ -210,7 +216,7 @@ def hook(agent: str | None = None) -> int:
                   "Record meaningful decisions with workflow decision --description SUMMARY --option OPTION "
                   "--option OPTION --selected OPTION, and explicit final results with workflow outcome "
                   "--status completed|blocked|running --description RESULT, using the same --session-id. "
-                  "Only mark completed after required checks pass. Supply curated task and outcome summaries. "
+                  "Register a complete todo plan before execution using workflow todo plan --items JSON --reason SUMMARY; select an in_progress item, audit revisions, and record completion evidence. Questions use todo exempt. Only mark completed after required todos and fresh verify/review checks pass. Supply curated task and outcome summaries. "
                   f"Automatic user-prompt collection is {'enabled' if enabled('workflow.prompt_recorded') else 'disabled'}; "
                   "manage it in the dashboard collection settings.")
         elif event == "UserPromptSubmit" and enabled("workflow.prompt_recorded"):
@@ -242,7 +248,7 @@ def hook(agent: str | None = None) -> int:
                 pending = context.setdefault("pending_tools", {})
                 if event == "PreToolUse":
                     if call_id:
-                        pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "tool_name": tool}
+                        pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "todo_id": context.get("active_todo_id"), "tool_name": tool}
                         # Bound state when a runtime never emits completion hooks.
                         while len(pending) > 1000:
                             pending.pop(next(iter(pending)))
@@ -262,6 +268,8 @@ def hook(agent: str | None = None) -> int:
                         facts["started_at"] = start["started_at"]
                         facts["duration_ms"] = max(0, round((time.monotonic() - start["clock"]) * 1000))
                         binding = {"task_id": start["task_id"]}
+                        if start.get("todo_id"):
+                            facts["todo_id"] = start["todo_id"]
                     if active_process:
                         facts["process_id"] = str(process)
                     record("tool_failed" if failed else "tool_completed", sid, binding,
@@ -278,6 +286,15 @@ def main() -> int:
     hook_parser.add_argument("--agent", choices=("codex", "claude-code"))
     sub.add_parser("refresh-metadata", help="Recover runtime metadata for already observed sessions")
     sub.add_parser("flush")
+    gate = sub.add_parser("gate")
+    gate.add_argument("--check", choices=("plan", "active", "complete"), required=True)
+    todo = sub.add_parser("todo")
+    todo.add_argument("todo_action", choices=("plan", "confirm", "update", "exempt", "show"))
+    todo.add_argument("--items")
+    todo.add_argument("--reason")
+    todo.add_argument("--id")
+    todo.add_argument("--status", choices=sorted(todos.STATUSES))
+    todo.add_argument("--evidence")
     task = sub.add_parser("task", help="Supply a curated name and summary for the current task")
     task.add_argument("--name", required=True)
     task.add_argument("--description", required=True)
@@ -296,7 +313,7 @@ def main() -> int:
     check = sub.add_parser("check")
     check.add_argument("--kind", choices=("verify", "review"), required=True)
     check.add_argument("--record", type=Path, required=True)
-    for command in (task, decision, outcome, phase, check):
+    for command in (task, decision, outcome, phase, check, todo, gate):
         command.add_argument("--session-id")
     args = parser.parse_args()
     if args.command == "hook":
@@ -317,7 +334,7 @@ def main() -> int:
         return 0
     sid = session_id(args.session_id)
     if not sid:
-        if args.command in ("phase", "check"):
+        if args.command in ("phase", "check", "gate"):
             return 0
         parser.error("--session-id is required when no native session environment is available")
     for key in ("name", "description", "parent_task_id"):
@@ -327,23 +344,31 @@ def main() -> int:
     if args.command == "decision":
         if len(args.option) > 20 or any(len(s.encode()) > 200 or not s.strip() for s in args.option) or args.selected not in args.option:
             parser.error("selected option must be one of up to 20 short, nonempty options")
-    if not enabled("workflow.task_started"):
-        if args.command not in ("phase", "check"):
-            print("Workflow collection is disabled; nothing recorded.")
-        return 0
+    if args.command == "todo" and ((args.todo_action == "plan" and not args.items) or (args.todo_action == "update" and (not args.id or not args.status))):
+        parser.error("plan needs --items; update needs --id and --status")
     with context_db() as db:
         db.execute("BEGIN IMMEDIATE")
         context = load(db, sid)
         ensure_session(sid, context)
         runtime_metadata(sid, context)
-        if args.command == "task":
+        if args.command == "todo":
+            todos.handle(args, sid, context, record)
+        elif args.command == "gate":
+            if args.check == "complete": todos.assert_complete(context)
+            else: todos.assert_plan(context, active=args.check == "active")
+        elif args.command == "task":
             if args.new:
+                if todos.unresolved(context) and context.get("task_status") != "blocked":
+                    raise ValueError("Resolve the current plan or explicitly record a blocked task before starting another")
                 context["task_id"] = str(uuid.uuid4())
+                todos.reset_task(context)
             record("task_started" if args.new else "task_updated", sid, context,
                    name=args.name, description=args.description, parent_task_id=args.parent_task_id, status="running")
         elif args.command == "decision":
             record("decision", sid, context, description=args.description, options=args.option, selected=args.selected)
         elif args.command == "outcome":
+            if args.status == "completed": todos.assert_complete(context)
+            context["task_status"] = args.status
             record("task_completed" if args.status == "completed" else "task_blocked" if args.status == "blocked" else "task_updated",
                    sid, context, status=args.status, outcome=args.description)
         elif args.command == "phase":
@@ -355,6 +380,8 @@ def main() -> int:
             check_record(sid, context, args.kind, args.record)
         save(db, sid, context)
     flush()
+    if args.command == "todo":
+        print(json.dumps({"session_id":sid,"task_id":context["task_id"],"todos":list(context.get("todos",{}).values()),"revision":context.get("plan_revision",0),"confirmed":context.get("confirmed_request")==context.get("request_seq",0)}))
     if args.command in ("task", "decision", "outcome"):
         print(json.dumps({"session_id": sid, "task_id": context["task_id"], "recorded": True}))
     return 0

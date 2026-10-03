@@ -44,8 +44,9 @@ SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
 OBSERVE = str(Path(root) / "scripts/hooks/jev-observe.sh")
 REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
 WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
+TODO_GATE = str(Path(root) / "scripts/workflow_gate.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
-           "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py")
+           "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py")
 SHARED = {
     "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]}],
     "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]}],
@@ -60,11 +61,13 @@ def entries_for(index: int) -> dict:
     extra = CLAUDE_ONLY if index == 0 else {}
     entries = {event: SHARED[event] + extra.get(event, []) for event in SHARED}
     # Use native lifecycle events; Stop is a turn boundary, not a session end.
-    events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse"]
+    events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
     if index == 0:
         events.append("PostToolUseFailure")
     for event in events:
         entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {"claude-code" if index == 0 else "codex"}', "timeout": 3 if event == "SessionEnd" else 10}]}
+        if event in ("PreToolUse", "UserPromptSubmit", "Stop"):
+            entry["hooks"][0]["command"] = f'python3 "{TODO_GATE}" {"claude-code" if index == 0 else "codex"}'
         if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
             entry["matcher"] = ".*"
         entries.setdefault(event, []).append(entry)

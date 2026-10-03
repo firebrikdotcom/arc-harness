@@ -124,7 +124,7 @@ scripts/harness workflow decision --description "Choose verification scope" --op
 scripts/harness workflow outcome --status completed --description "Required checks and live rendering passed"
 ```
 
-Outside a native session, add `--session-id ACTUAL_SESSION_ID`. Workflow context lives in `HARNESS_WORKFLOW_STATE` (default `../../.harness-db/workflow-state.sqlite`). Prompt bodies, transcript contents, tool inputs, command text, and tool output are never copied into Workflow events. Only curated explicit descriptions/options are stored, so do not supply secrets in those fields. Session/tool delivery is observation, not a complete transcript audit.
+Outside a native session, add `--session-id ACTUAL_SESSION_ID`. Workflow context lives in `HARNESS_WORKFLOW_STATE` (default `../../.harness-db/workflow-state.sqlite`). Prompt bodies are collected only through the separately enabled prompt switch. Transcript contents, tool inputs, command text, and tool output are never copied into Workflow events. Only curated explicit descriptions/options are stored, so do not supply secrets in those fields. Session/tool delivery is observation, not a complete transcript audit.
 
 Offline regression coverage: `sh tests/workflow-audit.sh` from the harness root and `cargo test` from this service directory.
 
@@ -145,3 +145,26 @@ Session details explain each event and provide search, type and result filters. 
 ### Browser timezone
 
 All displayed instants use the browser's current IANA timezone and locale. A session-only `audit_timezone` cookie shares that timezone with server-rendered calendar grouping and activity-date filters. An initial page load or timezone change refreshes the current URL once; filter/navigation state is retained. Daily accuracy and inclusive activity dates use the client's calendar, including historical daylight-saving offsets. Tool durations remain elapsed milliseconds. Stored event timestamps and API responses retain their original UTC/epoch representation. Without cookies, instants still localize but calendar grouping is hidden and date filters are disabled instead of presenting a different timezone. The service reuses the existing chrono and chrono-tz dependencies for calendar conversion.
+
+
+## Audited todo enforcement
+
+Install or update native hooks with `scripts/install-hooks.sh` on each machine, then restart existing native sessions to load them. The additive `scripts/workflow_gate.py` hook requires a structured plan, reconfirmation or revision for every prompt, and one active todo before covered local execution. `scripts/workflow_todos.py` keeps policy state in the local Workflow database even when audit collection is disabled. Collection settings control visibility and storage of emitted events, not this policy.
+
+```sh
+scripts/harness workflow task --name "Repair session navigation" --description "Fix navigation and verify the served dashboard"
+scripts/harness workflow todo plan --items '[{"id":"repair","description":"Repair navigation","criterion":"Navigation regression passes"},{"id":"checks","description":"Verify and review","criterion":"Fresh full verification and review pass"}]' --reason "Complete initial plan"
+scripts/harness workflow todo update --id repair --status in_progress --reason "Start repair"
+scripts/harness workflow todo update --id repair --status completed --evidence "Navigation regression passes" --reason "Repair verified"
+scripts/harness workflow todo update --id checks --status in_progress --reason "Run required checks"
+scripts/verify.sh --project /absolute/path/to/project
+scripts/review.sh --project /absolute/path/to/project
+scripts/harness workflow todo update --id checks --status completed --evidence "Full verification and review passed" --reason "Checks complete"
+scripts/harness workflow outcome --status completed --description "Navigation repaired and reviewed"
+```
+
+Add `--session-id ACTUAL_SESSION_ID` to Workflow commands outside a native session. `todo show` displays IDs, criteria, state and confirmation. For a new prompt, use `todo confirm --reason SUMMARY` or submit the complete revised list with `todo plan`. Keep IDs for retained items; omissions are audited removals with a reason. Changed criteria reset the item and require fresh checks. Completion requires evidence on each completed item, all required items resolved, and passing verify/review records after the latest execution and scope revision. Switching to a new task cannot silently discard unfinished required todos. Questions that require no execution use `todo exempt --reason SUMMARY`; unfinished execution plans must first be resolved or explicitly reported blocked.
+
+The task card displays criteria, status, evidence, and revision history. Select a todo to filter its timeline, including correlated tools and checks. Historical tasks have no fabricated todo list.
+
+The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return exit 2 with guidance. Telemetry outages do not bypass it. This enforces declared plans on covered native tools, not semantic completeness or a security sandbox: specialized tools outside native hook coverage, hook timeouts, and runtime configuration can bypass enforcement. Codex hosted WebSearch has no PreToolUse; a returned process handle is not tool completion. Stop may request another continuation rather than cancel a session. Existing phase/denylist gates and permissions remain authoritative. Review phase completion may precede deployment todos; explicit completed outcomes and Stop enforce the full task criteria.
