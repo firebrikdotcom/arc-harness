@@ -41,6 +41,7 @@ info() {
 
 usage() {
   info "Usage: harness COMMAND [ARGS]"
+  info "       harness --session-id ID COMMAND [ARGS]"
   info ""
   info "Commands:"
   info "  plan start|done      Open or close the planning phase."
@@ -70,6 +71,7 @@ usage() {
   info "Other environment variables:"
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
   info "  HARNESS_DB_ROOT  Override the state directory (default HARNESS_ROOT/.harness-db)."
+  info "  HARNESS_SESSION_ID  Select a session run (otherwise CODEX_THREAD_ID or CLAUDE_SESSION_ID)."
   info ""
   info ""
   info "Gates: 'build done' needs a passing scripts/verify.sh record newer than 'build start';"
@@ -157,7 +159,8 @@ setup_paths() {
   fi
   RUNS_DIR=$DB_ROOT/runs
   RECORDS_DIR=$DB_ROOT/records
-  CURRENT_FILE=$RUNS_DIR/current
+  CURRENT_FILE=$(sh "$SCRIPT_DIR/run-paths.sh" current "$DB_ROOT")
+  RECORDS_DIR=$(sh "$SCRIPT_DIR/run-paths.sh" records "$DB_ROOT")
 }
 
 # --- JSON output ------------------------------------------------------------
@@ -315,6 +318,7 @@ create_run() {
   : > "$STATE_FILE"
 
   state_set RUN_ID "$_run_id"
+  state_set SESSION_KEY "$(sh "$SCRIPT_DIR/run-paths.sh" key "$DB_ROOT")"
   state_set RUN_STARTED_AT "$(now_iso)"
   state_set RUN_STARTED_EPOCH "$(now_epoch)"
   state_set RUN_STATUS active
@@ -340,7 +344,9 @@ create_run() {
   state_set PAUSE_SEQ 0
   state_set PAUSE_BUDGET none
 
-  printf '%s\n' "$_run_id" > "$CURRENT_FILE"
+  mkdir -p "$(dirname "$CURRENT_FILE")"
+  printf '%s\n' "$_run_id" > "$CURRENT_FILE.tmp.$$"
+  mv "$CURRENT_FILE.tmp.$$" "$CURRENT_FILE"
   info "Run created: $_run_id"
   info "State: $RUN_DIR"
 }
@@ -533,6 +539,12 @@ require_gate_record() {
   if [ ! -f "$_file" ]; then
     info "FAIL: cannot mark $1 done: no $_kind record at $_file."
     info "Run $_cmd first; it writes the record."
+    exit "$EXIT_PHASE"
+  fi
+
+  if [ -n "$(state_get SESSION_KEY)" ] && [ "$(record_get "$_file" RUN_ID)" != "$(state_get RUN_ID)" ]; then
+    info "FAIL: cannot mark $1 done: the last $_kind record belongs to another run."
+    info "Run $_cmd again for this session."
     exit "$EXIT_PHASE"
   fi
 
@@ -919,6 +931,13 @@ case "$1" in
     exit 0
     ;;
 esac
+
+if [ "$1" = "--session-id" ]; then
+  [ "$#" -ge 3 ] || { usage; exit "$EXIT_USAGE"; }
+  HARNESS_SESSION_ID=$2
+  export HARNESS_SESSION_ID
+  shift 2
+fi
 
 setup_paths
 

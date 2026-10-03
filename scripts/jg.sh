@@ -191,7 +191,7 @@ fi
 
 run_id=""
 phase="none"
-current_file="$HARNESS_DB_ROOT/runs/current"
+current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
 if [ -f "$current_file" ]; then
   run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
   if [ -n "$run_id" ] && [ -f "$HARNESS_DB_ROOT/runs/$run_id/state" ]; then

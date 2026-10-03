@@ -53,6 +53,8 @@ You cannot build before plan is done. You cannot review before build is done.
 
 If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
 
+Native sessions keep separate run pointers and check records within each target database. Resuming the same session preserves its budgets; a new session starts independently of older paused runs. Manual commands without session identity keep the legacy directory-wide pointer. See `docs/setup.md` for identity selection and hook installation.
+
 The phase guard is a Claude Code hook only. It checks the denylist and knowledge-trust state before requiring an active phase, then counts an allowed tool call as a harness step. Other agents must follow the written workflow themselves.
 
 ## Important Rules
@@ -96,7 +98,9 @@ scripts/harness-target.sh   Machine-local target registry: project root, registe
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, then runs the session route
 scripts/hooks/session-route.sh  SessionStart hook: one shadow task-entry route per interactive session in a harness target
-scripts/hooks/jev-observe.sh    PreToolUse hook: progress checkpoint on the third identical shell command; never blocks
+scripts/observe_commands.py    Session-scoped PreToolUse command-repeat observer; never blocks
+scripts/session_hook.py        Native SessionStart identity binding before bootstrap/routing
+scripts/run_paths.py           Shared session-owned current-pointer and check-record selector
 scripts/retrieval-reminder.sh   PreToolUse hook (Grep/Glob, Claude Code): one jg.sh reminder on a session's first search without a retrieval; never blocks
 .claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Bootstrap: registers the target, previews project-owned commands, runs them after confirmation (or automatically with --auto)
@@ -143,7 +147,7 @@ The script detects common project tooling:
 - `Cargo.toml` for Rust projects.
 - Bash/shell files, including `scripts/*.sh`.
 
-It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
+It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to its session-owned records directory (legacy manual runs use `.harness-db/records/verify.state`).
 
 Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
 

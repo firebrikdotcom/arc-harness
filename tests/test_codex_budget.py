@@ -88,7 +88,7 @@ import json
 import os
 import sys
 with open(os.environ["FAKE_HARNESS_LOG"], "a", encoding="utf-8") as stream:
-    stream.write(json.dumps({"argv": sys.argv[1:], "db": os.environ.get("HARNESS_DB_ROOT")}) + "\n")
+    stream.write(json.dumps({"argv": sys.argv[1:], "db": os.environ.get("HARNESS_DB_ROOT"), "session": os.environ.get("HARNESS_SESSION_ID")}) + "\n")
 sys.exit(int(os.environ.get("FAKE_HARNESS_EXIT", "0")))
 '''
 
@@ -144,6 +144,7 @@ class CodexBudgetTests(unittest.TestCase):
         self.assertEqual(updates, [{
             "argv": ["step", "--tokens", "7", "--note", "Codex token-budget meter"],
             "db": str(self.db),
+            "session": "thr-new",
         }])
 
     def test_active_turn_falls_back_to_thread_read(self) -> None:
@@ -156,13 +157,15 @@ class CodexBudgetTests(unittest.TestCase):
         self.assertIn("thread/read", [item.get("method") for item in self.requests()])
 
     def test_harness_pause_interrupts_without_rewriting_goal_status(self) -> None:
-        environment = {**self.env, "FAKE_HARNESS_EXIT": "3"}
+        environment = {**self.env, "FAKE_HARNESS_EXIT": "3", "HARNESS_SESSION_ID": "caller-session"}
         result = self.run_budget(
             "--thread", "thr-new", "--tokens", "9", "--watch", "--interval", "0.01",
             "--harness", str(self.harness), "--db-root", str(self.db), expected=3,
             env=environment,
         )
         self.assertEqual(json.loads(result.stdout)["status"], "harnessPaused")
+        updates = [json.loads(line) for line in self.harness_log.read_text().splitlines()]
+        self.assertEqual(updates[-1]["session"], "thr-new")
         self.assertIn("turn/interrupt", [item.get("method") for item in self.requests()])
         self.assertEqual(len([item for item in self.requests() if item.get("method") == "thread/goal/set"]), 1)
 

@@ -15,17 +15,11 @@ import sys
 import uuid
 from audit_transport import ROOT, emit, enabled, flush
 import workflow_todos as todos
+from run_paths import current_file, session_id
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def session_id(value: str | None = None) -> str | None:
-    result = value or os.environ.get("HARNESS_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_SESSION_ID")
-    if result and (len(result) > 256 or not result.strip()):
-        raise ValueError("invalid session ID")
-    return result
 
 
 def context_db() -> sqlite3.Connection:
@@ -372,7 +366,7 @@ def main() -> int:
             record("task_completed" if args.status == "completed" else "task_blocked" if args.status == "blocked" else "task_updated",
                    sid, context, status=args.status, outcome=args.description)
         elif args.command == "phase":
-            run_id = (args.db_root / "runs/current").read_text().strip()
+            run_id = current_file(args.db_root, sid).read_text().strip()
             state = dict(line.split("=", 1) for line in (args.db_root / "runs" / run_id / "state").read_text().splitlines() if "=" in line)
             record("phase_changed", sid, context, run_id=run_id, phase=args.phase,
                    phase_status=state.get("PHASE_" + args.phase.upper(), "unknown"))

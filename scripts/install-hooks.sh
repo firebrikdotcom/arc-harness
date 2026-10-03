@@ -41,15 +41,17 @@ from pathlib import Path
 root, mode, dry_run, *targets = sys.argv[1:]
 dry_run = dry_run == "1"
 SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
-OBSERVE = str(Path(root) / "scripts/hooks/jev-observe.sh")
+OBSERVE = str(Path(root) / "scripts/observe_commands.py")
+SESSION_BIND = str(Path(root) / "scripts/session_hook.py")
 REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
 WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
 TODO_GATE = str(Path(root) / "scripts/workflow_gate.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
-           "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py")
+           "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py",
+           "scripts/session_hook.py", "scripts/observe_commands.py")
 SHARED = {
-    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]}],
-    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]}],
+    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}],
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}],
 }
 # Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only.
 CLAUDE_ONLY = {
