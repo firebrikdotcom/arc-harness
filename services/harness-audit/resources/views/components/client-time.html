@@ -1,0 +1,35 @@
+<script>
+(() => {
+ const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+ const cookieZone = () => document.cookie.split('; ').find(cookie => cookie.startsWith('audit_timezone='))?.slice('audit_timezone='.length);
+ if (cookieZone() !== zone) {
+  document.cookie = `audit_timezone=${zone}; Path=/; SameSite=Lax`;
+  if (cookieZone() === zone) { location.reload(); return; }
+ }
+ const format = new Intl.DateTimeFormat(undefined, {timeZone:zone, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZoneName:'short'});
+ function localize() {
+  document.querySelectorAll('[data-client-zone]').forEach(node => { node.textContent = zone; });
+  document.querySelectorAll('[data-client-time], [data-client-micros]').forEach(node => {
+   const raw = node.dataset.clientTime;
+   const value = node.dataset.clientMicros;
+   const date = new Date(value !== undefined && value !== '' ? Number(value) / 1000 : raw || NaN);
+   node.textContent = Number.isFinite(date.getTime()) ? format.format(date) : 'Not captured';
+   if (node.tagName === 'TIME' && Number.isFinite(date.getTime())) node.dateTime = date.toISOString();
+  });
+  document.querySelectorAll('[data-client-calendar]').forEach(node => {
+   const available = node.dataset.clientCalendar === zone && cookieZone() === zone;
+   node.hidden = !available;
+   if (!available) {
+    const notice = document.createElement('p'); notice.className = 'section-note';
+    notice.textContent = 'Enable cookies to show calendar dates and date filters in your timezone.';
+    node.before(notice);
+   }
+  });
+  document.querySelectorAll('[data-client-date-filter]').forEach(node => { node.disabled = cookieZone() !== zone; });
+  document.documentElement.classList.add('client-time-ready');
+ }
+ document.addEventListener('DOMContentLoaded', localize, {once:true});
+ document.addEventListener('visibilitychange', () => { if (!document.hidden && Intl.DateTimeFormat().resolvedOptions().timeZone !== zone) location.reload(); });
+ window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
+})();
+</script><style>html:not(.client-time-ready) [data-client-calendar] { visibility:hidden; }</style>
