@@ -113,3 +113,5 @@ Add dated decisions here as the system takes shape.
 
 - `scripts/workflow_todos.py`: deterministic, machine-local plan state and completion criteria independent of collection switches.
 - `scripts/workflow_gate.py`: additive native prompt/tool/Stop gate; resets prompt confirmation, requires an active todo for covered execution, and blocks completion without resolved required items and fresh passing checks. Workflow events preserve revision reasons and correlate tool/check facts to todo IDs.
+
+- 2026-10-03: Run selection and verification records are scoped by native session identity within each target database. `scripts/run_paths.py` and its shell/Node adapter own hashed pointers and record paths; native hook adapters propagate identity independently of collection settings. Runs retain shared target history, while resumes preserve budgets and new sessions never adopt legacy paused runs. Sensor records carry run ownership, and pending checkpoint resolution does not consume another session's oracles.

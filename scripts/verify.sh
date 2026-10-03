@@ -224,7 +224,7 @@ jev_checkpoint() {
 # Write a KEY=VALUE run record that `scripts/harness build done` requires.
 write_run_record() {
   exit_code="$1"
-  records_dir="$HARNESS_DB_ROOT/records"
+  records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
   if ! mkdir -p "$records_dir" 2>/dev/null; then
     info "WARN: could not create $records_dir; no run record written."
     return 0
@@ -232,8 +232,11 @@ write_run_record() {
   git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
   git_dirty=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | grep -c . || true)
   record="$records_dir/verify.state"
+  current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
+  run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
   {
     printf 'RECORD_KIND=verify\n'
+    printf 'RUN_ID=%s\n' "$run_id"
     printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
     printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"

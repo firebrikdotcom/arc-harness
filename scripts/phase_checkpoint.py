@@ -35,6 +35,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import context_advice as advice  # noqa: E402
 import task_route  # noqa: E402
+from run_paths import current_file, records_dir  # noqa: E402
 
 ENABLE_ENV = "HARNESS_JEV_CHECKPOINTS"
 POLICY_VERSION = "shadow-1"
@@ -276,7 +277,7 @@ def read_kv(path: Path) -> dict[str, str]:
 
 
 def run_state(db_root: Path) -> dict[str, str] | None:
-    current = db_root / "runs" / "current"
+    current = current_file(db_root)
     if not current.is_file():
         return None
     run_id = current.read_text(encoding="utf-8").splitlines()[0].strip() if current.read_text(encoding="utf-8").strip() else ""
@@ -306,7 +307,7 @@ def int_value(state: dict[str, str], key: str) -> int:
 
 
 def last_verify(db_root: Path) -> dict[str, str]:
-    return read_kv(db_root / "records" / "verify.state")
+    return read_kv(records_dir(db_root) / "verify.state")
 
 
 def verify_history(db_root: Path) -> list[dict[str, Any]]:
@@ -316,7 +317,7 @@ def verify_history(db_root: Path) -> list[dict[str, Any]]:
     is appended when it is newer than the history's last line: databases from before the
     history existed, or verifications that ran with checkpoints disabled.
     """
-    path = db_root / "records" / VERIFY_HISTORY
+    path = records_dir(db_root) / VERIFY_HISTORY
     entries: list[dict[str, Any]] = []
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -339,7 +340,7 @@ def verify_history(db_root: Path) -> list[dict[str, Any]]:
 def append_verify_history(db_root: Path, project: Path, state: dict[str, str], exit_code: int) -> None:
     """Append one private history line; only exit, counts, run id, and a local tree hash are kept."""
     record = last_verify(db_root)
-    directory = db_root / "records"
+    directory = records_dir(db_root)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / VERIFY_HISTORY
 
@@ -766,6 +767,8 @@ def resolve_tool_repeats(db_root: Path, router: Any, current: dict[str, str], en
     lines = []
     current_run = current.get("RUN_ID")
     for path, item in pending_items(db_root, "tool_repeat"):
+        if item_run_state(db_root, item).get("SESSION_KEY", "") != current.get("SESSION_KEY", ""):
+            continue
         def compute(item: dict[str, Any] = item) -> tuple[str, str] | None:
             same = item.get("run_id") == current_run
             state = current if same else item_run_state(db_root, item)
@@ -790,6 +793,8 @@ def resolve_stale(db_root: Path, router: Any, current: dict[str, str]) -> list[s
     for resolver in ("verify_result", "first_verify", "run_complete"):
         for path, item in pending_items(db_root, resolver):
             if not item.get("run_id") or item.get("run_id") == current_run:
+                continue
+            if item_run_state(db_root, item).get("SESSION_KEY", "") != current.get("SESSION_KEY", ""):
                 continue
 
             def compute(item: dict[str, Any] = item, resolver: str = resolver) -> tuple[str, str]:

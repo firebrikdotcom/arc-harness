@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import audit_transport
+from run_paths import current_file
 from unittest.mock import patch
 
 class Handler(BaseHTTPRequestHandler):
@@ -201,7 +202,9 @@ class WorkflowTests(unittest.TestCase):
     def test_phase_and_verification_use_actual_session_id_and_deduplicate_sensor_records(self):
         db = self.base / "harness"
         (db / "runs/r1").mkdir(parents=True)
-        (db / "runs/current").write_text("r1")
+        pointer = current_file(db, "test-session")
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text("r1")
         (db / "runs/r1/state").write_text("PHASE_BUILD=active\n")
         self.run_cli("phase", "--db-root", str(db), "--phase", "build")
         record = self.base / "verify.state"

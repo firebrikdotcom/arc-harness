@@ -120,12 +120,15 @@ info "4. Are docs/progress updated?"
 info "5. Are there security or performance risks?"
 
 # Write the KEY=VALUE record that `scripts/harness review done` requires.
-records_dir="$HARNESS_DB_ROOT/records"
+records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
 if mkdir -p "$records_dir" 2>/dev/null; then
   git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
   record="$records_dir/review.state"
+  current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
+  run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
   {
     printf 'RECORD_KIND=review\n'
+    printf 'RUN_ID=%s\n' "$run_id"
     printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
     printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"

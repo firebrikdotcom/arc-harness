@@ -50,7 +50,11 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
 
-Once registered, `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the Jev hooks resolve the target from the current directory or `--project` and use its private database at `targets/<id>/db/`: runs, `runs/current`, gate records, routes, advice, and pending oracles are per target, so parallel worktrees never share one active run. `scripts/harness-target.sh list` shows the registered targets. Manual `scripts/init.sh --project PATH` registers the target as well.
+Once registered, harness commands use the target database at `targets/<id>/db/`. Run directories and aggregate routing history remain per target, but each native session owns its current pointer at `runs/sessions/<sha256-session-id>/current` and its check records at `records/sessions/<sha256-session-id>/`. Session selection uses `HARNESS_SESSION_ID`, then `CODEX_THREAD_ID`, then `CLAUDE_SESSION_ID`. Commands may instead use `harness --session-id ID COMMAND`. A new session never adopts the legacy directory-wide run. Resume, clear, and compaction with the same native ID preserve the run, phase, budget, and pause. Completing review closes that run; the next `plan start` in the same session creates a fresh run. Genuine pauses within a session still require explicit user continuation.
+
+Without a native identity, manual commands retain `runs/current` and `records/` for compatibility. Set `HARNESS_SESSION_ID` consistently on phase commands, verification, review, and child processes when working manually across separate terminals. Existing legacy runs remain available to manual commands and are neither reset nor aborted. Check records include their run ID; an earlier run's record cannot satisfy a new session run's gate.
+
+The installed SessionStart adapter binds the payload identity before bootstrap and routing, and writes the native environment file independently of audit collection. Terminal commands use their native `CODEX_THREAD_ID`. The installed command observer selects the payload session's run. Run `scripts/install-hooks.sh` after updating to install these adapters; existing unrelated hook groups are preserved. New native sessions load the updated hook configuration; already running sessions keep their loaded hooks. `scripts/harness-target.sh list` shows registered targets.
 
 Detected bootstrap inputs:
 
@@ -72,6 +76,7 @@ Optional harness variables:
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
 - `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
 - `HARNESS_DB_ROOT`: harness database root for `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the hooks. Defaults to `HARNESS_ROOT/.harness-db`. Registered targets keep their own state beneath it at `targets/<id>/db/`.
+- `HARNESS_SESSION_ID`: explicit run identity, ahead of `CODEX_THREAD_ID` and `CLAUDE_SESSION_ID`; hashed for on-disk pointer and record paths. Native resumes preserve identity.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
 - `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
 - `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
@@ -243,7 +248,7 @@ scripts/harness launch --state /tmp/task-metadata.json --project /path/to/projec
 
 #### Target history in the routed state
 
-Every call that reaches TypeSafe also carries `signals.history`, seven bucketed enums that `scripts/task_route.py` computes from the target's own database (the 20 most recent runs under `runs/`, their `state` and `log`, and `records/verify.state`):
+Every call that reaches TypeSafe also carries `signals.history`, seven bucketed enums that `scripts/task_route.py` computes from the target's own database (the 20 most recent runs under `runs/`, their `state` and `log`, and the selected session's `verify.state`):
 
 | Fact | Meaning | Values |
 | --- | --- | --- |
@@ -369,8 +374,8 @@ Phase rules:
 - `build start` fails until `plan done` has run.
 - `review start` fails until `build done` has run.
 - `PHASE done` fails unless that phase is active.
-- `build done` fails unless `.harness-db/records/verify.state` exists, was written after `build start`, and reports `EXIT=0`. `scripts/verify.sh` writes that record on every run, pass or fail.
-- `review done` fails unless `.harness-db/records/review.state` was written after `review start`. `scripts/review.sh` writes it when it reaches the end.
+- `build done` fails unless the selected session's `verify.state` exists, was written after `build start`, and reports `EXIT=0`. `scripts/verify.sh` writes that record on every run, pass or fail.
+- `review done` fails unless the selected session's `review.state` was written after `review start`, belongs to this run, and reports a passing verification. `scripts/review.sh` writes it when it reaches the end.
 - Re-starting a phase that is already done counts against the loop budget.
 - After `review done` or `abort`, only `plan start` is accepted; it opens a new run.
 
@@ -463,7 +468,7 @@ The hook is enforcement for Claude Code only. Other agents still rely on the wri
 sh tests/harness-hook.sh
 ```
 
-`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
+`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing its selected session's `verify.state` (legacy manual runs use `.harness-db/records/verify.state`), which `scripts/harness build done` requires.
 
 Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
 
@@ -513,7 +518,7 @@ With `HARNESS_JEV_CHECKPOINTS=1`, `harness plan done`, `harness build start`, `s
 
 ### Jev hooks for interactive sessions
 
-Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/hooks/jev-observe.sh` (PreToolUse for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. That checkpoint is labeled mechanically at a later checkpoint event: stuck when the same command recurs or the run loops afterwards, not stuck when its phase and run end without either. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
+Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/observe_commands.py` (installed PreToolUse observer for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. That checkpoint is labeled mechanically at a later checkpoint event: stuck when the same command recurs or the run loops afterwards, not stuck when its phase and run end without either. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
 
 ```sh
 scripts/install-hooks.sh            # ~/.claude/settings.json and ~/.codex/hooks.json, with backups

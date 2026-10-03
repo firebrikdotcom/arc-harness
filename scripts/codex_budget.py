@@ -234,11 +234,12 @@ def active_turn(server: AppServer, thread_id: str) -> str | None:
     return None
 
 
-def report_tokens(harness: Path, db_root: Path, delta: int) -> bool:
+def report_tokens(harness: Path, db_root: Path, delta: int, thread_id: str) -> bool:
     if delta <= 0:
         return False
     environment = os.environ.copy()
     environment["HARNESS_DB_ROOT"] = str(db_root)
+    environment["HARNESS_SESSION_ID"] = thread_id
     result = subprocess.run(
         [str(harness), "step", "--tokens", str(delta), "--note", "Codex token-budget meter"],
         env=environment,
@@ -282,7 +283,7 @@ def watch_budget(
             raise BudgetError("Codex App Server returned an invalid tokensUsed value")
         harness_paused = False
         if harness is not None and db_root is not None:
-            harness_paused = report_tokens(harness, db_root, max(0, used - previous))
+            harness_paused = report_tokens(harness, db_root, max(0, used - previous), thread_id)
         previous = max(previous, used)
         if harness_paused or used >= token_budget or goal.get("status") == "budgetLimited":
             turn_id = active_turn(server, thread_id)
