@@ -10,6 +10,8 @@ anyhow = "1"
 arc-core = "0.8.5"
 arc-web = "0.8.5"
 async-trait = "0.1"
+chrono = "0.4"
+chrono-tz = "0.9"
 diesel = { version = "2.2", features = ["sqlite", "r2d2"] }
 diesel_migrations = "2.2"
 dotenv = "0.15"

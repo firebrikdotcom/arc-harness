@@ -15,6 +15,8 @@ use arc_web::ui::{
     Breadcrumb, TemplateBundle, TemplateDef, TemplateName, UiContribution, UiHost, UiPage,
 };
 use arc_web::UiRegistry;
+use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -23,6 +25,10 @@ use tera::Context;
 const STYLESHEET: &str = include_str!("../public/styles.css");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
+    TemplateDef {
+        name: TemplateName("components/client-time.html"),
+        source: include_str!("../resources/views/components/client-time.html"),
+    },
     TemplateDef {
         name: TemplateName("layouts/admin.html"),
         source: include_str!("../resources/views/layouts/admin.html"),
@@ -121,6 +127,7 @@ fn render(
     breadcrumbs: Vec<Breadcrumb>,
 ) -> HttpResponse {
     decorate(&mut context, title);
+    context.insert("client_timezone", &client_timezone(request).name());
     registry.render(
         UiPage {
             template: TemplateName(template),
@@ -144,6 +151,45 @@ fn decorate(context: &mut Context, title: &str) {
     context.insert("service_name", "Harness audit");
     context.insert("local_navigation", NAVIGATION);
     context.insert("app_version", env!("CARGO_PKG_VERSION"));
+}
+
+fn client_timezone(request: &HttpRequest) -> Tz {
+    request
+        .cookie("audit_timezone")
+        .and_then(|cookie| cookie.value().parse().ok())
+        .unwrap_or(chrono_tz::UTC)
+}
+
+fn local_activity_date(value: &str, timezone: Tz) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|date| date.with_timezone(&timezone).format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+fn local_accuracy_days(
+    rows: &[Value],
+    include_fixtures: bool,
+    timezone: Tz,
+) -> Vec<grouped::DailyAccuracy> {
+    let mut calendar_rows = rows.to_vec();
+    // Shift checkpoint calendar coordinates only. Outcome ordering retains its original instants.
+    for row in &mut calendar_rows {
+        if row["event_type"] != "jev.checkpoint" {
+            continue;
+        }
+        if let Some(date) = row["recorded_at_us"]
+            .as_i64()
+            .and_then(DateTime::<Utc>::from_timestamp_micros)
+        {
+            row["recorded_at_us"] = json!(date
+                .with_timezone(&timezone)
+                .naive_local()
+                .and_utc()
+                .timestamp_micros());
+        }
+    }
+    grouped::daily_checkpoint_accuracy(&calendar_rows, include_fixtures)
 }
 
 fn unavailable(error: impl std::fmt::Display) -> HttpResponse {
@@ -173,6 +219,7 @@ pub fn event_row(row: &Value) -> Value {
         "id": row.get("id"),
         "event_type": row.get("event_type"),
         "recorded_at": recorded_at_us.map(format_timestamp),
+        "recorded_at_us": recorded_at_us,
         "call_id": text(&payload, "call_id"),
         "family": text(&payload, "family"),
         "question_version": text(&payload, "question_version"),
@@ -346,9 +393,10 @@ async fn workbench(
         .take(RECENT_EVENTS)
         .map(event_row)
         .collect();
-    let chart = accuracy_chart(&grouped::daily_checkpoint_accuracy(
+    let chart = accuracy_chart(&local_accuracy_days(
         &rows,
         query.include_fixtures,
+        client_timezone(&request),
     ));
     let mut context = Context::new();
     context.insert("totals", &totals(rows.len(), &checkpoints));
@@ -446,6 +494,8 @@ struct WorkflowQuery {
     sort: Option<String>,
     page: Option<usize>,
     per_page: Option<usize>,
+    #[serde(skip)]
+    timezone: Option<String>,
 }
 
 fn url_component(text: &str) -> String {
@@ -572,9 +622,14 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
             {
                 return false;
             }
-            let date = s["last_at"].as_str().unwrap_or("").get(..10).unwrap_or("");
-            if (!since.is_empty() && date < since.as_str())
-                || (!until.is_empty() && date > until.as_str())
+            let timezone = query
+                .timezone
+                .as_deref()
+                .and_then(|zone| zone.parse().ok())
+                .unwrap_or(chrono_tz::UTC);
+            let date = local_activity_date(s["last_at"].as_str().unwrap_or(""), timezone);
+            if (!since.is_empty() && date.as_str() < since.as_str())
+                || (!until.is_empty() && date.as_str() > until.as_str())
             {
                 return false;
             }
@@ -709,6 +764,8 @@ async fn workflow_page(
         Ok(rows) => rows,
         Err(error) => return unavailable(error),
     };
+    let mut query = query.into_inner();
+    query.timezone = Some(client_timezone(&request).name().to_owned());
     let sessions = crate::workflow::sessions(&rows);
     if query.session_id.is_none() {
         let mut context = Context::new();
@@ -824,6 +881,74 @@ mod tests {
             "recorded_at_us": at,
             "payload": {"call_id": call, "family": "evidence_assessment", "outcome": outcome}
         })
+    }
+
+    #[test]
+    fn client_calendar_handles_midnight_dst_and_keeps_stored_instants() {
+        let timezone = chrono_tz::America::New_York;
+        assert_eq!(
+            local_activity_date("2026-03-08T04:30:00Z", timezone),
+            "2026-03-07"
+        );
+        assert_eq!(
+            local_activity_date("2026-03-08T07:30:00Z", timezone),
+            "2026-03-08"
+        );
+        let micros = |value: &str| {
+            DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .timestamp_micros()
+        };
+        let rows = vec![
+            checkpoint("a", "test", "run", "run", micros("2026-03-08T04:30:00Z")),
+            checkpoint("b", "test", "run", "run", micros("2026-03-08T07:30:00Z")),
+            outcome("a", "correct", micros("2026-03-08T08:00:00Z")),
+            outcome("b", "correct", micros("2026-03-08T08:01:00Z")),
+        ];
+        let original = rows.clone();
+        let chart = accuracy_chart(&local_accuracy_days(&rows, false, timezone));
+        assert_eq!(chart["points"][0]["date"], "2026-03-07");
+        assert_eq!(chart["points"][1]["date"], "2026-03-08");
+        assert_eq!(rows, original);
+        let sessions = vec![directory_fixture("s", "2026-10-02", "Codex", false)];
+        let query = WorkflowQuery {
+            since: Some("2026-10-01".into()),
+            until: Some("2026-10-01".into()),
+            timezone: Some("America/New_York".into()),
+            ..Default::default()
+        };
+        assert_eq!(session_directory(&sessions, &query)["total"], 1);
+        assert_eq!(
+            session_directory(
+                &sessions,
+                &WorkflowQuery {
+                    timezone: Some("Asia/Kolkata".into()),
+                    ..query
+                }
+            )["total"],
+            0
+        );
+        let before = DateTime::parse_from_rfc3339("2026-03-08T06:59:00Z")
+            .unwrap()
+            .with_timezone(&timezone);
+        let after = DateTime::parse_from_rfc3339("2026-03-08T07:00:00Z")
+            .unwrap()
+            .with_timezone(&timezone);
+        assert_eq!(before.format("%H:%M %Z").to_string(), "01:59 EST");
+        assert_eq!(after.format("%H:%M %Z").to_string(), "03:00 EDT");
+    }
+
+    #[test]
+    fn timezone_cookie_is_validated() {
+        use actix_web::{cookie::Cookie, test::TestRequest};
+        let request = TestRequest::default()
+            .cookie(Cookie::new("audit_timezone", "Asia/Kolkata"))
+            .to_http_request();
+        assert_eq!(client_timezone(&request), chrono_tz::Asia::Kolkata);
+        let invalid = TestRequest::default()
+            .cookie(Cookie::new("audit_timezone", "invalid"))
+            .to_http_request();
+        assert_eq!(client_timezone(&invalid), chrono_tz::UTC);
     }
 
     #[test]
