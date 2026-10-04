@@ -7,7 +7,7 @@
   if (cookieZone() === zone) { location.reload(); return; }
  }
  const format = new Intl.DateTimeFormat(undefined, {timeZone:zone, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZoneName:'short'});
- function localize() {
+ function localizeTimes() {
   document.querySelectorAll('[data-client-zone]').forEach(node => { node.textContent = zone; });
   document.querySelectorAll('[data-client-time], [data-client-micros]').forEach(node => {
    const raw = node.dataset.clientTime;
@@ -16,6 +16,11 @@
    node.textContent = Number.isFinite(date.getTime()) ? format.format(date) : 'Not captured';
    if (node.tagName === 'TIME' && Number.isFinite(date.getTime())) node.dateTime = date.toISOString();
   });
+ }
+ // Rows loaded after the page (show more, task details) reuse the time formatting only.
+ window.localizeClientTimes = localizeTimes;
+ function localize() {
+  localizeTimes();
   document.querySelectorAll('[data-client-calendar]').forEach(node => {
    const available = node.dataset.clientCalendar === zone && cookieZone() === zone;
    node.hidden = !available;

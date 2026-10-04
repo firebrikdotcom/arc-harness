@@ -57,7 +57,39 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
         name: TemplateName("audit/events.html"),
         source: include_str!("../resources/views/audit/events.html"),
     },
+    TemplateDef {
+        name: TemplateName("audit/partials/prompt-items.html"),
+        source: include_str!("../resources/views/audit/partials/prompt-items.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/partials/task-items.html"),
+        source: include_str!("../resources/views/audit/partials/task-items.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/partials/task-detail.html"),
+        source: include_str!("../resources/views/audit/partials/task-detail.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/partials/todo-item.html"),
+        source: include_str!("../resources/views/audit/partials/todo-item.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/partials/timeline-items.html"),
+        source: include_str!("../resources/views/audit/partials/timeline-items.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/partials/more.html"),
+        source: include_str!("../resources/views/audit/partials/more.html"),
+    },
 ];
+
+/// Session lists open with a few rows and grow on request instead of rendering
+/// every prompt, task and event up front.
+const FIRST_ROWS: usize = 2;
+const MORE_ROWS: usize = 5;
+const FIRST_EVENTS: usize = 10;
+const MORE_EVENTS: usize = 20;
+const MAX_PAGE: usize = 1000;
 
 const RECENT_EVENTS: usize = 25;
 const MAX_EVENTS: usize = 500;
@@ -495,6 +527,16 @@ struct WorkflowQuery {
     sort: Option<String>,
     page: Option<usize>,
     per_page: Option<usize>,
+    show_prompts: Option<usize>,
+    show_tasks: Option<usize>,
+    show_events: Option<usize>,
+    event_q: Option<String>,
+    event_category: Option<String>,
+    event_status: Option<String>,
+    /// `/workflow/items` only: which list to page and the slice to return.
+    list: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
     #[serde(skip)]
     timezone: Option<String>,
 }
@@ -784,39 +826,16 @@ async fn workflow_page(
             ],
         );
     }
-    let selected = if let Some(id) = query.session_id.as_deref() {
-        sessions.iter().find(|s| s["session_id"] == id)
-    } else {
-        sessions.first()
-    };
-    let events: Vec<&Value> = selected
-        .and_then(|s| s["events"].as_array())
-        .into_iter()
-        .flatten()
-        .filter(|e| {
-            query
-                .task_id
-                .as_deref()
-                .is_none_or(|id| e["payload"]["task_id"] == id)
-                && query
-                    .todo_id
-                    .as_deref()
-                    .is_none_or(|id| e["payload"]["todo_id"] == id)
-        })
-        .collect();
+    let selected = query
+        .session_id
+        .as_deref()
+        .and_then(|id| sessions.iter().find(|s| s["session_id"] == id));
     let mut context = Context::new();
-    context.insert("sessions", &sessions);
+    context.insert("sessions", &!sessions.is_empty());
     context.insert("selected", &selected);
-    context.insert("timeline", &events);
-    context.insert("task_filter", &query.task_id);
-    context.insert(
-        "return_to",
-        &query
-            .return_to
-            .as_deref()
-            .filter(|s| *s == "/workflow" || s.starts_with("/workflow?"))
-            .unwrap_or("/workflow"),
-    );
+    if let Some(session) = selected {
+        session_view(session, &query, &mut context);
+    }
     render(
         &registry,
         &request,
@@ -832,6 +851,289 @@ async fn workflow_page(
     )
 }
 
+fn trimmed(value: &Option<String>) -> String {
+    value.as_deref().unwrap_or("").trim().to_owned()
+}
+
+fn return_to(query: &WorkflowQuery) -> &str {
+    query
+        .return_to
+        .as_deref()
+        .filter(|s| *s == "/workflow" || s.starts_with("/workflow?"))
+        .unwrap_or("/workflow")
+}
+
+/// A session-page URL that keeps the selected session, task scope and timeline
+/// filters, plus `extra` fields such as list sizes or a fragment slice.
+fn session_url(query: &WorkflowQuery, base: &str, extra: &[(&str, String)]) -> String {
+    let scope = [
+        ("session_id", &query.session_id),
+        ("task_id", &query.task_id),
+        ("todo_id", &query.todo_id),
+        ("event_q", &query.event_q),
+        ("event_category", &query.event_category),
+        ("event_status", &query.event_status),
+    ];
+    let fields: Vec<String> = scope
+        .iter()
+        .map(|(key, value)| (*key, trimmed(value)))
+        .chain(extra.iter().cloned())
+        .chain([("return_to", return_to(query).to_owned())])
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(key, value)| format!("{key}={}", url_component(&value)))
+        .collect();
+    format!("{base}?{}", fields.join("&"))
+}
+
+/// Timeline events for the selected task or todo that match the search words,
+/// category and result. Filtering here keeps counts and paging true for the
+/// whole session rather than only the rows already on the page.
+fn timeline<'a>(session: &'a Value, query: &WorkflowQuery) -> Vec<&'a Value> {
+    let words: Vec<String> = trimmed(&query.event_q)
+        .to_lowercase()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let category = trimmed(&query.event_category);
+    let status = trimmed(&query.event_status);
+    session["events"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            let p = &e["payload"];
+            // A long prompt arrives in parts; the timeline shows it once.
+            (e["event_type"] != "workflow.prompt_recorded"
+                || p["part_index"].as_u64().unwrap_or(0) == 0)
+                && query.task_id.as_deref().is_none_or(|id| p["task_id"] == id)
+                && query.todo_id.as_deref().is_none_or(|id| p["todo_id"] == id)
+                && (category.is_empty() || e["category"] == category.as_str())
+                && (status.is_empty() || e["result_status"] == status.as_str())
+        })
+        .filter(|e| {
+            if words.is_empty() {
+                return true;
+            }
+            let mut text = String::new();
+            for key in [
+                "title",
+                "task_name",
+                "explanation",
+                "result_status",
+                "event_type",
+            ] {
+                text.push_str(e[key].as_str().unwrap_or(""));
+                text.push(' ');
+            }
+            for (key, value) in e["payload"].as_object().into_iter().flatten() {
+                match value {
+                    Value::String(s) if key != "text" => text.push_str(s),
+                    Value::Number(n) => text.push_str(&n.to_string()),
+                    Value::Array(items) => items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .for_each(|s| text.push_str(s)),
+                    _ => {}
+                }
+                text.push(' ');
+            }
+            let text = text.to_lowercase();
+            words.iter().all(|word| text.contains(word))
+        })
+        .collect()
+}
+
+/// The list-size field that keeps a list's length across a full page load.
+fn show_key(list: &str) -> (&'static str, &'static str, usize) {
+    match list {
+        "prompts" => ("show_prompts", "prompts", MORE_ROWS),
+        "tasks" => ("show_tasks", "tasks", MORE_ROWS),
+        _ => ("show_events", "events", MORE_EVENTS),
+    }
+}
+
+/// The "Showing n of m · Show more" control under a list. `url` reloads the page
+/// with a longer list when scripts are off; `src` returns just the next rows.
+fn more(query: &WorkflowQuery, list: &str, shown: usize, total: usize) -> Value {
+    let (key, noun, step) = show_key(list);
+    let shown = shown.min(total);
+    let next = (shown + step).min(total);
+    let mut sizes: Vec<(&str, String)> = [
+        ("show_prompts", query.show_prompts),
+        ("show_tasks", query.show_tasks),
+        ("show_events", query.show_events),
+    ]
+    .into_iter()
+    .filter(|(field, _)| *field != key)
+    .filter_map(|(field, size)| size.map(|size| (field, size.to_string())))
+    .collect();
+    sizes.push((key, next.to_string()));
+    let slice = [
+        ("list", list.to_owned()),
+        ("offset", shown.to_string()),
+        ("limit", step.to_string()),
+    ];
+    json!({
+        "list": list, "noun": noun, "shown": shown, "total": total, "step": next - shown,
+        "url": format!("{}#{list}", session_url(query, "/workflow", &sizes)),
+        "src": session_url(query, "/workflow/items", &slice),
+    })
+}
+
+fn page(items: &[Value], offset: usize, limit: usize) -> &[Value] {
+    let start = offset.min(items.len());
+    &items[start..(start + limit).min(items.len())]
+}
+
+fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
+    let size =
+        |requested: Option<usize>, first: usize| requested.unwrap_or(first).clamp(1, MAX_PAGE);
+    let prompts = session["prompts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let tasks = session["task_list"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let expanded = query
+        .task_id
+        .as_deref()
+        .and_then(|id| tasks.iter().find(|t| t["task_id"] == id));
+    // A task opened from a link stays visible even when it is past the first rows.
+    let task_rows = size(query.show_tasks, FIRST_ROWS)
+        .max(expanded.and_then(|t| t["sequence"].as_u64()).unwrap_or(0) as usize);
+    let prompt_rows = size(query.show_prompts, FIRST_ROWS);
+    let event_rows = size(query.show_events, FIRST_EVENTS);
+    let events: Vec<Value> = timeline(session, query).into_iter().cloned().collect();
+    context.insert("prompt_page", page(prompts, 0, prompt_rows));
+    context.insert(
+        "prompts_more",
+        &more(query, "prompts", prompt_rows, prompts.len()),
+    );
+    context.insert("task_page", page(tasks, 0, task_rows));
+    context.insert("tasks_more", &more(query, "tasks", task_rows, tasks.len()));
+    context.insert("expanded_task", &expanded);
+    context.insert("timeline_page", page(&events, 0, event_rows));
+    context.insert(
+        "timeline_more",
+        &more(query, "timeline", event_rows, events.len()),
+    );
+    context.insert("task_filter", &query.task_id);
+    context.insert("todo_filter", &query.todo_id);
+    context.insert(
+        "event_filters",
+        &json!({"q": trimmed(&query.event_q), "category": trimmed(&query.event_category), "status": trimmed(&query.event_status)}),
+    );
+    context.insert("return_to", return_to(query));
+}
+
+/// Embedded templates for list fragments, which render without the page layout.
+fn fragments() -> &'static tera::Tera {
+    static TERA: std::sync::OnceLock<tera::Tera> = std::sync::OnceLock::new();
+    TERA.get_or_init(|| {
+        let mut tera = tera::Tera::default();
+        tera.add_raw_templates(HOST_TEMPLATES.iter().map(|def| (def.name.0, def.source)))
+            .expect("embedded templates parse");
+        tera
+    })
+}
+
+/// Rows for one session list, returned as `{html, more_html}` so the page can
+/// append them in place. `list=task` returns one task's details instead.
+fn workflow_fragment(session: &Value, query: &WorkflowQuery) -> Result<Value, String> {
+    let list = query.list.as_deref().unwrap_or("");
+    let offset = query.offset.unwrap_or(0);
+    let mut context = Context::new();
+    context.insert("selected", session);
+    context.insert("return_to", return_to(query));
+    context.insert("expanded_task", &Value::Null);
+    let render = |name: &str, context: &Context| {
+        fragments()
+            .render(name, context)
+            .map_err(|error| format!("{error:?}"))
+    };
+    if list == "task" {
+        let task = session["task_list"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| {
+                query
+                    .task_id
+                    .as_deref()
+                    .is_some_and(|id| t["task_id"] == id)
+            })
+            .ok_or("task not found")?;
+        context.insert("expanded_task", task);
+        return Ok(
+            json!({"html": render("audit/partials/task-detail.html", &context)?, "more_html": ""}),
+        );
+    }
+    let (template, field, items): (&str, &str, Vec<Value>) = match list {
+        "prompts" => (
+            "prompt-items",
+            "prompt_page",
+            session["prompts"].as_array().cloned().unwrap_or_default(),
+        ),
+        "tasks" => (
+            "task-items",
+            "task_page",
+            session["task_list"].as_array().cloned().unwrap_or_default(),
+        ),
+        "timeline" => (
+            "timeline-items",
+            "timeline_page",
+            timeline(session, query).into_iter().cloned().collect(),
+        ),
+        _ => return Err("unknown list".to_owned()),
+    };
+    // A list reloaded from the start (a new timeline filter) opens at its first size.
+    let (_, _, step) = show_key(list);
+    let first = if list == "timeline" {
+        FIRST_EVENTS
+    } else {
+        FIRST_ROWS
+    };
+    let rows = page(
+        &items,
+        offset,
+        query
+            .limit
+            .unwrap_or(if offset == 0 { first } else { step })
+            .clamp(1, MAX_PAGE),
+    );
+    context.insert(field, rows);
+    context.insert("more", &more(query, list, offset + rows.len(), items.len()));
+    Ok(json!({
+        "html": render(&format!("audit/partials/{template}.html"), &context)?,
+        "more_html": render("audit/partials/more.html", &context)?,
+    }))
+}
+
+#[get("/workflow/items")]
+async fn workflow_items(
+    query: web::Query<WorkflowQuery>,
+    store: web::Data<dyn ReadModelStore>,
+) -> impl Responder {
+    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
+        Ok(rows) => rows,
+        Err(error) => return unavailable(error),
+    };
+    let sessions = crate::workflow::sessions(&rows);
+    let Some(session) = query
+        .session_id
+        .as_deref()
+        .and_then(|id| sessions.iter().find(|s| s["session_id"] == id))
+    else {
+        return HttpResponse::NotFound().json(json!({"error": "session not found"}));
+    };
+    match workflow_fragment(session, &query) {
+        Ok(body) => HttpResponse::Ok().json(body),
+        Err(error) => HttpResponse::BadRequest().json(json!({"error": error})),
+    }
+}
+
 #[get("/public/styles.css")]
 async fn stylesheet() -> impl Responder {
     HttpResponse::Ok()
@@ -844,6 +1146,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(workbench)
         .service(event_log)
         .service(workflow_page)
+        .service(workflow_items)
         .service(stylesheet);
 }
 
@@ -1283,27 +1586,14 @@ mod tests {
             json!({"event_type":"workflow.todo_updated","payload":{"session_id":"session","task_id":"task","todo_id":"item-a","description":"Repair <script>bad</script>","criterion":"Navigation regression passes","reason":"Regression confirmed","revision":2,"status":"completed","previous_status":"pending","evidence":"Navigation regression succeeded","occurred_at":"2026-10-02T00:02:00Z"}}),
         ];
         let sessions = crate::workflow::sessions(&rows);
-        let registry = UiRegistry::build(Some(&host()), &[contribution()])
-            .unwrap()
-            .unwrap();
-        let mut context = Context::new();
-        context.insert("sessions", &sessions);
-        context.insert("selected", &sessions[0]);
-        context.insert("timeline", &sessions[0]["events"]);
-        context.insert("task_filter", &Option::<String>::None);
-        decorate(&mut context, "Workflow audit");
-        for key in ["app_name", "environment", "csrf_token", "request_path"] {
-            context.insert(key, "x");
-        }
-        context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
-        context.insert("admin_navigation", &Vec::<Value>::new());
-        context.insert("admin_actions", &Vec::<Value>::new());
+        // Opening the task from a link renders its details inline.
+        let query = WorkflowQuery {
+            session_id: Some("session".into()),
+            task_id: Some("task".into()),
+            ..WorkflowQuery::default()
+        };
         for selected in &sessions {
-            context.insert("selected", selected);
-            context.insert("timeline", &selected["events"]);
-            let html = registry_tera(&registry)
-                .render("audit/workflow.html", &context)
-                .expect("Workflow with optional review fields renders");
+            let html = render_session(selected, &query);
             assert!(html.contains("Navigation regression passes"));
             assert!(html.contains("Navigation regression succeeded"));
             assert!(html.contains("Revision history · 2"));
@@ -1331,13 +1621,178 @@ mod tests {
                 html.contains("/example/Working Tree")
                     || html.contains("&#x2F;example&#x2F;Working Tree")
             );
-            assert!(html.contains("Initial goal · first captured prompt"));
             assert!(html.contains("User prompts"));
             assert!(html.contains("Example goal &lt;script&gt;bad&lt;"));
             assert!(!html.contains("<script>bad</script>"));
             assert!(html.contains("build: active"));
             assert!(html.contains("review · exit 0"));
+            assert!(
+                !html.contains("workflow-tasks"),
+                "tasks are a list, not a card grid"
+            );
+            assert!(html.contains("Started <time data-client-time=\"2026-10-02T00:00:00Z\">"));
+            assert!(html.contains("Added <time data-client-time=\"2026-10-02T00:00:00Z\">"));
+            assert!(html.contains("Updated <time data-client-time=\"2026-10-02T00:02:00Z\">"));
+            assert!(html.contains("1/1 todos"));
         }
+    }
+
+    fn render_session(session: &Value, query: &WorkflowQuery) -> String {
+        let registry = UiRegistry::build(Some(&host()), &[contribution()])
+            .unwrap()
+            .unwrap();
+        let mut context = Context::new();
+        decorate(&mut context, "Workflow audit");
+        for key in ["app_name", "environment", "csrf_token", "request_path"] {
+            context.insert(key, "x");
+        }
+        context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
+        context.insert("admin_navigation", &Vec::<Value>::new());
+        context.insert("admin_actions", &Vec::<Value>::new());
+        context.insert("sessions", &true);
+        context.insert("selected", session);
+        session_view(session, query, &mut context);
+        registry_tera(&registry)
+            .render("audit/workflow.html", &context)
+            .expect("Workflow session renders")
+    }
+
+    fn busy_session() -> Value {
+        let at = |minute: usize| format!("2026-10-02T00:{minute:02}:00Z");
+        let mut rows = Vec::new();
+        for n in 1..=5 {
+            rows.push(json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t1","prompt_id":format!("p{n}"),"part_index":0,"part_count":1,"text":format!("Prompt number {n}"),"occurred_at":at(n)}}));
+        }
+        for n in 1..=4 {
+            rows.push(json!({"event_type":"workflow.task_started","payload":{"session_id":"s","task_id":format!("t{n}"),"name":format!("Task {n}"),"status":"running","occurred_at":at(10 + n)}}));
+            rows.push(json!({"event_type":"workflow.todo_created","payload":{"session_id":"s","task_id":format!("t{n}"),"todo_id":format!("d{n}"),"description":format!("Todo of task {n}"),"criterion":"Done","reason":"Plan","revision":1,"status":"pending","occurred_at":at(10 + n)}}));
+        }
+        for n in 0..16 {
+            rows.push(json!({"event_type":"workflow.tool_completed","payload":{"session_id":"s","task_id":"t2","tool_name":"Bash","outcome":"succeeded","exit_code":0,"occurred_at":at(20 + n)}}));
+        }
+        crate::workflow::sessions(&rows).remove(0)
+    }
+
+    fn count(html: &str, needle: &str) -> usize {
+        html.matches(needle).count()
+    }
+
+    #[test]
+    fn session_lists_open_with_two_rows_and_a_show_more_control() {
+        let session = busy_session();
+        let query = WorkflowQuery {
+            session_id: Some("s".into()),
+            ..WorkflowQuery::default()
+        };
+        let html = render_session(&session, &query);
+        assert_eq!(count(&html, "class=\"row-item prompt-row\""), 2);
+        assert_eq!(count(&html, "class=\"row-item task-row"), 2);
+        // 5 prompts + 4 task starts + 4 todos + 16 tools, first 10 shown.
+        assert_eq!(count(&html, "<li data-category="), 10);
+        assert!(html.contains("Showing 2 of 5 prompts"));
+        assert!(html.contains("Showing 2 of 4 tasks"));
+        assert!(html.contains("Showing 10 of 29 events"));
+        // Attribute values are escaped (`/` as `&#x2F;`); compare the decoded URLs.
+        let decoded = html.replace("&#x2F;", "/").replace("&amp;", "&");
+        assert!(decoded.contains(
+            "data-more-src=\"/workflow/items?session_id=s&list=prompts&offset=2&limit=5"
+        ));
+        // Without scripts the control reloads with a longer list and keeps the other sizes.
+        assert!(decoded.contains(
+            "href=\"/workflow?session_id=s&show_prompts=5&return_to=%2Fworkflow#prompts\""
+        ));
+        // Tasks are numbered in the order they started, and details wait until opened.
+        let tasks =
+            &html[html.find("id=\"tasks\"").unwrap()..html.find("id=\"timeline\"").unwrap()];
+        assert!(tasks.find("Task 1").unwrap() < tasks.find("Task 2").unwrap());
+        assert!(!tasks.contains("Task 3"));
+        assert!(tasks.contains("Open task details"));
+        assert!(!html.contains("Revision history"));
+    }
+
+    #[test]
+    fn show_more_returns_the_next_rows_and_task_details_on_request() {
+        let session = busy_session();
+        let mut query = WorkflowQuery {
+            session_id: Some("s".into()),
+            list: Some("prompts".into()),
+            offset: Some(2),
+            ..WorkflowQuery::default()
+        };
+        let body = workflow_fragment(&session, &query).unwrap();
+        let html = body["html"].as_str().unwrap();
+        assert_eq!(count(html, "class=\"row-item prompt-row\""), 3);
+        assert!(html.contains("Prompt number 3") && !html.contains("Prompt number 2"));
+        let more = body["more_html"].as_str().unwrap();
+        assert!(more.contains("Showing 5 of 5 prompts") && !more.contains("Show "));
+
+        query.list = Some("timeline".into());
+        query.offset = Some(10);
+        let body = workflow_fragment(&session, &query).unwrap();
+        assert_eq!(
+            count(body["html"].as_str().unwrap(), "<li data-category="),
+            19
+        );
+
+        query.list = Some("task".into());
+        query.task_id = Some("t3".into());
+        let body = workflow_fragment(&session, &query).unwrap();
+        let html = body["html"].as_str().unwrap();
+        assert!(html.contains("Todo of task 3") && html.contains("Revision history · 1"));
+        assert!(html.contains("Added <time"));
+
+        query.list = Some("other".into());
+        assert!(workflow_fragment(&session, &query).is_err());
+        query.list = Some("task".into());
+        query.task_id = Some("missing".into());
+        assert!(workflow_fragment(&session, &query).is_err());
+    }
+
+    #[test]
+    fn timeline_filters_page_the_whole_session_and_linked_tasks_stay_visible() {
+        let session = busy_session();
+        let mut query = WorkflowQuery {
+            session_id: Some("s".into()),
+            event_category: Some("todo".into()),
+            ..WorkflowQuery::default()
+        };
+        assert_eq!(timeline(&session, &query).len(), 4);
+        query.event_category = None;
+        query.event_q = Some("task 4 todo".into());
+        assert_eq!(timeline(&session, &query).len(), 1);
+        query.event_q = Some("bash".into());
+        query.event_status = Some("succeeded".into());
+        assert_eq!(timeline(&session, &query).len(), 16);
+        let html = render_session(&session, &query);
+        assert!(html.contains("Showing 10 of 16 events"));
+        assert!(html.contains("event_q=bash"), "paging keeps the filter");
+        assert!(html.contains("value=\"bash\""));
+        // A filter change reloads the timeline from the start at its first size.
+        let mut reload = query.clone();
+        reload.list = Some("timeline".into());
+        let body = workflow_fragment(&session, &reload).unwrap();
+        assert_eq!(
+            count(body["html"].as_str().unwrap(), "<li data-category="),
+            10
+        );
+        assert!(body["more_html"]
+            .as_str()
+            .unwrap()
+            .contains("Showing 10 of 16 events"));
+
+        // A task opened from a link past the first rows is listed and expanded.
+        let query = WorkflowQuery {
+            session_id: Some("s".into()),
+            task_id: Some("t4".into()),
+            ..WorkflowQuery::default()
+        };
+        let html = render_session(&session, &query);
+        assert_eq!(count(&html, "class=\"row-item task-row"), 4);
+        assert!(
+            html.contains("class=\"row-item task-row is-selected\" id=\"task-t4\"><details open")
+        );
+        assert!(html.contains("Todo of task 4"));
+        assert!(html.contains("Showing 4 of 4 tasks"));
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly
