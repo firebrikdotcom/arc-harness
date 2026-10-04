@@ -293,6 +293,43 @@ fn annotate_timeline(session: &mut Value) {
     session["analysis"] = json!(counts);
 }
 
+/// One line of a prompt for its collapsed list row.
+fn preview(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(120) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line,
+    }
+}
+
+fn by_sequence(map: &Value) -> Vec<Value> {
+    let mut items: Vec<Value> = map
+        .as_object()
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default();
+    items.sort_by_key(|item| item["sequence"].as_u64());
+    items
+}
+
+/// Tasks in the order they were first seen, each carrying its todos in plan order
+/// and a count of completed, still-planned todos for the compact list row.
+fn ordered_tasks(tasks: &Value) -> Vec<Value> {
+    by_sequence(tasks)
+        .into_iter()
+        .map(|mut task| {
+            let todos = by_sequence(&task["todos"]);
+            let planned = todos.iter().filter(|t| t["status"] != "removed");
+            let (done, total) = planned.fold((0, 0), |(done, total), t| {
+                (done + usize::from(t["status"] == "completed"), total + 1)
+            });
+            task["todo_list"] = json!(todos);
+            task["todos_done"] = json!(done);
+            task["todos_total"] = json!(total);
+            task
+        })
+        .collect()
+}
+
 pub fn sessions(rows: &[Value]) -> Vec<Value> {
     let mut matching: Vec<&Value> = rows
         .iter()
@@ -340,7 +377,10 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
         }
         if let Some(task_id) = p["task_id"].as_str() {
             let tasks = session["tasks"].as_object_mut().unwrap();
-            let task = tasks.entry(task_id.to_owned()).or_insert_with(|| json!({"task_id": task_id, "name": "Session work", "description": "", "status": "observed", "outcome": "", "phase": "", "parent_task_id": "", "phases": {}, "todos": {}, "plan_revisions": [], "plan_status":"not_registered"}));
+            // JSON objects are keyed maps, so first-seen order is kept explicitly.
+            let sequence = tasks.len() + 1;
+            let task = tasks.entry(task_id.to_owned()).or_insert_with(|| json!({"task_id": task_id, "sequence": sequence, "first_at": p["occurred_at"], "name": "Session work", "description": "", "status": "observed", "outcome": "", "phase": "", "parent_task_id": "", "phases": {}, "todos": {}, "plan_revisions": [], "plan_status":"not_registered"}));
+            task["last_at"] = p["occurred_at"].clone();
             if row["event_type"]
                 .as_str()
                 .is_some_and(|s| s.starts_with("workflow.task_"))
@@ -367,7 +407,10 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
             }
             if kind.starts_with("workflow.todo_") {
                 if let Some(todo_id) = p["todo_id"].as_str() {
-                    let todo = task["todos"].as_object_mut().unwrap().entry(todo_id.to_owned()).or_insert_with(|| json!({"id":todo_id,"description":"","criterion":"","status":"pending","evidence":"","history":[]}));
+                    let todos = task["todos"].as_object_mut().unwrap();
+                    let sequence = todos.len() + 1;
+                    let todo = todos.entry(todo_id.to_owned()).or_insert_with(|| json!({"id":todo_id,"sequence":sequence,"first_at":p["occurred_at"],"description":"","criterion":"","status":"pending","evidence":"","history":[]}));
+                    todo["last_at"] = p["occurred_at"].clone();
                     for key in [
                         "description",
                         "criterion",
@@ -449,10 +492,29 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
             if session["prompts"].as_array().unwrap().is_empty() {
                 session["initial_goal"] = json!(text);
             }
-            session["prompts"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"prompt_id":id,"text":text,"occurred_at":time}));
+            let prompts = session["prompts"].as_array_mut().unwrap();
+            let number = prompts.len() + 1;
+            prompts.push(json!({"prompt_id":id,"number":number,"preview":preview(&text),"text":text,"occurred_at":time}));
+        }
+        // Timeline rows link to their prompt by position, since prompts load in pages.
+        let numbers: BTreeMap<String, Value> = session["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (
+                    p["prompt_id"].as_str().unwrap_or("").to_owned(),
+                    p["number"].clone(),
+                )
+            })
+            .collect();
+        for event in session["events"].as_array_mut().unwrap() {
+            if let Some(number) = event["payload"]["prompt_id"]
+                .as_str()
+                .and_then(|id| numbers.get(id))
+            {
+                event["prompt_number"] = number.clone();
+            }
         }
     }
     for session in sessions.values_mut() {
@@ -486,6 +548,7 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
     }
     for session in sessions.values_mut() {
         annotate_timeline(session);
+        session["task_list"] = json!(ordered_tasks(&session["tasks"]));
     }
     let mut values: Vec<Value> = sessions.into_values().collect();
     values.sort_by(|a, b| b["last_at"].as_str().cmp(&a["last_at"].as_str()));
@@ -628,6 +691,50 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn tasks_and_todos_keep_first_seen_order_with_their_own_timestamps() {
+        // IDs sort the other way round, so map order alone would reverse them.
+        let todo = |task: &str, id: &str, status: &str, at: &str| json!({"event_type":"workflow.todo_updated","payload":{"session_id":"s","task_id":task,"todo_id":id,"description":id,"status":status,"occurred_at":at}});
+        let rows = vec![
+            json!({"event_type":"workflow.task_started","payload":{"session_id":"s","task_id":"z","name":"First","occurred_at":"2026-10-02T01:00:00Z"}}),
+            todo("z", "y", "pending", "2026-10-02T01:01:00Z"),
+            todo("z", "b", "completed", "2026-10-02T01:02:00Z"),
+            todo("z", "a", "removed", "2026-10-02T01:03:00Z"),
+            json!({"event_type":"workflow.task_started","payload":{"session_id":"s","task_id":"a","name":"Second","occurred_at":"2026-10-02T02:00:00Z"}}),
+            todo("z", "y", "completed", "2026-10-02T03:00:00Z"),
+            json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"a","prompt_id":"p","part_index":0,"part_count":1,"text":format!("line one\n\n{}", "word ".repeat(40)),"occurred_at":"2026-10-02T04:00:00Z"}}),
+        ];
+        let session = &sessions(&rows)[0];
+        let tasks = session["task_list"].as_array().unwrap();
+        assert_eq!(tasks[0]["name"], "First");
+        assert_eq!(tasks[0]["sequence"], 1);
+        assert_eq!(tasks[0]["first_at"], "2026-10-02T01:00:00Z");
+        assert_eq!(tasks[0]["last_at"], "2026-10-02T03:00:00Z");
+        assert_eq!(tasks[1]["name"], "Second");
+        assert_eq!(tasks[1]["last_at"], "2026-10-02T04:00:00Z");
+        let todos: Vec<&str> = tasks[0]["todo_list"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(todos, ["y", "b", "a"]);
+        assert_eq!(tasks[0]["todo_list"][0]["first_at"], "2026-10-02T01:01:00Z");
+        assert_eq!(tasks[0]["todo_list"][0]["last_at"], "2026-10-02T03:00:00Z");
+        // Removed todos are not part of the plan's progress.
+        assert_eq!(
+            (
+                tasks[0]["todos_done"].as_u64(),
+                tasks[0]["todos_total"].as_u64()
+            ),
+            (Some(2), Some(2))
+        );
+        let preview = session["prompts"][0]["preview"].as_str().unwrap();
+        assert!(preview.starts_with("line one word word") && preview.ends_with('…'));
+        assert_eq!(preview.chars().count(), 121);
+        assert_eq!(session["events"][6]["prompt_number"], 1);
+    }
+
     #[test]
     fn correlates_tasks_and_preserves_source_order() {
         let rows = vec![
