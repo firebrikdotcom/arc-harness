@@ -190,7 +190,7 @@ def tool_label(tool: str, tool_input) -> str | None:
         return None
     text = lambda key: tool_input.get(key) if isinstance(tool_input.get(key), str) else ""
     label = ""
-    if tool in ("Bash", "shell", "exec_command", "local_shell", "container.exec", "BashOutput"):
+    if tool in SHELL_TOOLS:
         command = tool_input.get("command", tool_input.get("cmd"))
         if isinstance(command, list):
             command = " ".join(str(part) for part in command)
@@ -208,6 +208,27 @@ def tool_label(tool: str, tool_input) -> str | None:
         label = text("description")
     label = " ".join(redact(label).split())
     return label[:157] + "..." if len(label) > 160 else label or None
+
+
+SHELL_TOOLS = ("Bash", "shell", "exec_command", "local_shell", "container.exec", "BashOutput")
+COMMAND_LIMIT = 1900
+
+
+def tool_command(tool: str, tool_input) -> str | None:
+    """The redacted shell command itself, so a failed call shows exactly what ran
+    even when the label is the agent's description. Kept under the service's
+    2000-byte field limit; output is never recorded."""
+    if tool not in SHELL_TOOLS or not isinstance(tool_input, dict):
+        return None
+    command = tool_input.get("command", tool_input.get("cmd"))
+    if isinstance(command, list):
+        command = shlex.join(str(part) for part in command)
+    if not isinstance(command, str) or not command.strip():
+        return None
+    command = redact(command.strip())
+    if len(command.encode()) > COMMAND_LIMIT:
+        command = command.encode()[:COMMAND_LIMIT - 3].decode(errors="ignore") + "..."
+    return command
 
 
 def herdr_metadata(sid: str, context: dict, payload: dict) -> None:
@@ -311,15 +332,18 @@ def hook(agent: str | None = None) -> int:
                 if call_id:
                     facts["tool_call_id"] = call_id
                 label = tool_label(tool, payload.get("tool_input"))
+                command = tool_command(tool, payload.get("tool_input"))
                 pending = context.setdefault("pending_tools", {})
                 if event == "PreToolUse":
                     if call_id:
-                        pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "todo_id": context.get("active_todo_id"), "tool_name": tool, "label": label}
+                        pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "todo_id": context.get("active_todo_id"), "tool_name": tool, "label": label, "command": command}
                         # Bound state when a runtime never emits completion hooks.
                         while len(pending) > 1000:
                             pending.pop(next(iter(pending)))
                     if label:
                         facts["tool_label"] = label
+                    if command:
+                        facts["tool_command"] = command
                     record("tool_started", sid, context, **facts, outcome="running")
                 else:
                     response = payload.get("tool_response")
@@ -339,8 +363,11 @@ def hook(agent: str | None = None) -> int:
                         if start.get("todo_id"):
                             facts["todo_id"] = start["todo_id"]
                         label = label or start.get("label")
+                        command = command or start.get("command")
                     if label:
                         facts["tool_label"] = label
+                    if command:
+                        facts["tool_command"] = command
                     if active_process:
                         facts["process_id"] = str(process)
                     record("tool_failed" if failed else "tool_completed", sid, binding,

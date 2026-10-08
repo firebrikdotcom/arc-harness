@@ -60,6 +60,7 @@ const KEYS: &[&str] = &[
     "tool_name",
     "tool_call_id",
     "tool_label",
+    "tool_command",
     "started_at",
     "duration_ms",
     "process_id",
@@ -108,6 +109,13 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
             .is_none_or(|s| s.trim().is_empty() || s.len() > 300)
     {
         return Err("tool label must be short text");
+    }
+    if object.contains_key("tool_command")
+        && payload["tool_command"]
+            .as_str()
+            .is_none_or(|s| s.trim().is_empty())
+    {
+        return Err("tool command must be text");
     }
     if object.contains_key("cwd")
         && payload["cwd"]
@@ -295,8 +303,13 @@ fn signal_view(
                 .as_i64()
                 .map(|code| format!(" (exit {code})"))
                 .unwrap_or_default();
-            let label = text(p, "tool_label").to_owned();
-            (true, format!("{tool} failed{exit}"), label, "fail")
+            // The command says exactly what failed; the label is the fallback.
+            let detail = [text(p, "tool_command"), text(p, "tool_label")]
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or("")
+                .to_owned();
+            (true, format!("{tool} failed{exit}"), detail, "fail")
         }
         "verification" | "review" => {
             let check = if kind == "review" { "review" } else { "verify" };
@@ -433,8 +446,10 @@ pub fn signal_items(events: &[Value]) -> Vec<Value> {
                             for key in ["status", "duration_ms", "exit_code"] {
                                 call[key] = done[key].clone();
                             }
-                            if call["label"].is_null() {
-                                call["label"] = done["label"].clone();
+                            for key in ["label", "command"] {
+                                if call[key].is_null() {
+                                    call[key] = done[key].clone();
+                                }
                             }
                         }
                         None => call["status"] = json!("no return"),
@@ -463,7 +478,7 @@ pub fn signal_items(events: &[Value]) -> Vec<Value> {
         .filter_map(|e| {
             let p = &e["payload"];
             p["tool_call_id"].as_str().map(|id| {
-                (id, json!({"status": e["result_status"], "duration_ms": p["duration_ms"], "exit_code": p["exit_code"], "label": p["tool_label"]}))
+                (id, json!({"status": e["result_status"], "duration_ms": p["duration_ms"], "exit_code": p["exit_code"], "label": p["tool_label"], "command": p["tool_command"]}))
             })
         })
         .collect();
@@ -504,6 +519,7 @@ pub fn signal_items(events: &[Value]) -> Vec<Value> {
                     "tool": name,
                     "id": p["tool_call_id"],
                     "label": p["tool_label"],
+                    "command": p["tool_command"],
                     "at": at,
                     "status": event["result_status"],
                     "duration_ms": p["duration_ms"],
@@ -1132,6 +1148,13 @@ mod tests {
         assert!(validate("workflow.tool_failed", &t).is_err());
         t["tool_label"] = json!(7);
         assert!(validate("workflow.tool_failed", &t).is_err());
+        // The command is text up to the 2000-byte field limit.
+        let mut c = json!({"schema_version":1,"session_id":"s","task_id":"t","occurred_at":"2026-10-02T00:00:00Z","tool_name":"Bash","tool_command":"git config core.hooksPath"});
+        assert!(validate("workflow.tool_failed", &c).is_ok());
+        c["tool_command"] = json!(" ");
+        assert!(validate("workflow.tool_failed", &c).is_err());
+        c["tool_command"] = json!("x".repeat(2001));
+        assert!(validate("workflow.tool_failed", &c).is_err());
     }
     #[test]
     fn failed_tools_name_their_command_and_bursts_list_each_call() {
@@ -1180,6 +1203,12 @@ mod tests {
         assert_eq!(calls[1]["label"], Value::Null);
         assert_eq!(items[1]["headline"], "Bash failed (exit 2)");
         assert_eq!(items[1]["detail"], "Run the test suite");
+        // With the command recorded, the failure row names it instead.
+        let mut rows = rows;
+        rows[2]["payload"]["tool_command"] = json!("make test");
+        let session = sessions(&rows).remove(0);
+        let items = signal_items(session["events"].as_array().unwrap());
+        assert_eq!(items[1]["detail"], "make test");
     }
     #[test]
     fn prompt_chunks_reassemble_only_when_complete_and_preserve_initial_goal() {

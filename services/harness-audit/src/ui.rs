@@ -2388,7 +2388,7 @@ mod tests {
             json!({"event_type":"workflow.task_started","payload":{"session_id":"s","task_id":"t","name":"Repair parser","status":"running","occurred_at":at(1)}}),
             json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t","prompt_id":"p1","part_index":0,"part_count":1,"text":"Fix the <b>parser</b>","occurred_at":at(2)}}),
             json!({"event_type":"workflow.tool_completed","payload":{"session_id":"s","task_id":"t","tool_name":"mcp__browser__navigate","tool_label":"Open <the> page","outcome":"succeeded","exit_code":0,"duration_ms":12,"occurred_at":at(3)}}),
-            json!({"event_type":"workflow.tool_failed","payload":{"session_id":"s","task_id":"t","tool_name":"Bash","tool_label":"Run the test suite","outcome":"failed","exit_code":2,"occurred_at":at(4)}}),
+            json!({"event_type":"workflow.tool_failed","payload":{"session_id":"s","task_id":"t","tool_name":"Bash","tool_label":"Run the test suite","tool_command":"make <test>","outcome":"failed","exit_code":2,"occurred_at":at(4)}}),
             json!({"event_type":"workflow.decision","payload":{"session_id":"s","task_id":"t","description":"Pick the fix","options":["patch","rewrite"],"selected":"patch","occurred_at":at(5)}}),
             json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t","prompt_id":"p2","part_index":0,"part_count":1,"text":"Now verify","occurred_at":at(6)}}),
             json!({"event_type":"workflow.verification","payload":{"session_id":"s","task_id":"t","check":"verify","exit_code":0,"ran":3,"occurred_at":at(7)}}),
@@ -2460,6 +2460,8 @@ mod tests {
         }
         assert!(html.contains("<template id=\"flow-2\">"));
         assert!(html.contains("Run the test suite"));
+        assert!(html.contains("make &lt;test&gt;"));
+        assert!(!html.contains("make <test>"));
         assert!(html.contains("Open &lt;the&gt; page"));
         assert!(html.contains("Fix the &lt;b&gt;parser"));
         assert!(!html.contains("<b>parser</b>"));
@@ -2472,7 +2474,7 @@ mod tests {
         query.view = None;
         let signal = render_session(&session, &query);
         assert!(signal.contains(
-            "Bash failed (exit 2)</span><span class=\"signal-detail\">Run the test suite"
+            "Bash failed (exit 2)</span><span class=\"signal-detail\">make &lt;test&gt;"
         ));
         assert!(!signal.contains("class=\"flow-inspector\""));
     }
