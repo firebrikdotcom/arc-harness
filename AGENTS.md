@@ -64,7 +64,7 @@ An agent may only mark work complete when:
 - Failures, skips, or missing project tooling are documented.
 - `progress.md` reflects the final state.
 
-Verification detects non-rewriting format checks, lint, typecheck, tests, and builds. A target can require any of those categories through `.harness-required-checks` or `HARNESS_REQUIRED_CHECKS`; a required category with no runnable check fails. `scripts/verify.sh` and `scripts/review.sh` write gate records beneath `.harness-db/records/` for `build done` and `review done`.
+Verification detects non-rewriting format checks, lint, typecheck, tests, and builds. A target can require any of those categories through `.harness-required-checks` or `HARNESS_REQUIRED_CHECKS`; a required category with no runnable check fails. When every change since the upstream base is documentation, verification runs only format and lint and records `SCOPE=docs-only`. `scripts/verify.sh` and `scripts/review.sh` write gate records beneath `.harness-db/records/` for `build done` and `review done`.
 
 <!-- harness-cli:start -->
 ## Harness Phases

@@ -81,6 +81,7 @@ Optional harness variables:
 - `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
 - `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
+- `HARNESS_VERIFY_SCOPE=full`: disables the docs-only scope and runs every verification category.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
 - `HARNESS_TYPESAFE_ACTIVE`: set to `1` only after the active-routing outcome gate is satisfied and reviewed.
 - `HARNESS_TYPESAFE_ROLLOUT_PERCENT`: optional integer from `0` to `100`; in active mode, only that percentage of eligible tasks follows JEV's live recommendation. The cohort is stable as the percentage increases; default `100`.
@@ -471,6 +472,10 @@ sh tests/harness-hook.sh
 `scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing its selected session's `verify.state` (legacy manual runs use `.harness-db/records/verify.state`), which `scripts/harness build done` requires.
 
 Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
+
+Verification narrows itself for documentation-only work. It lists every file changed since the merge base with `@{upstream}` (falling back to `origin/HEAD`): committed, uncommitted, and untracked, with renames split into old and new paths. If every path matches the docs patterns, only format and lint run; typecheck, test, and build are skipped, required or not, and the run record carries `SCOPE=docs-only`. Any doubt runs the full set: no git, no base, no changed files, or a single non-doc path.
+
+The default docs patterns are `*.md`, `*.mdx`, and `*.markdown`, excluding `AGENTS.md`, `CLAUDE.md`, and `SKILL.md` at any depth because tests often assert on agent instructions. A target can replace them with `.harness-docs-paths`: one `case` pattern per line, `!` to exclude, `#` for comments. List only paths no test reads; CI still runs the full suite.
 
 Detection order:
 
