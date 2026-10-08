@@ -460,3 +460,4 @@ details[open] > .row-summary::after { content:"\2212"; }
   .flow-fields dt { border-bottom:0; padding-bottom:0; }
 }
 .tool-label { font:.8rem/1.45 var(--mono); padding:.3rem .5rem; background:var(--panel); border-left:3px solid var(--border-subtle); overflow-wrap:anywhere; }
+.tool-command { display:block; margin:.25rem 0 0; font:.78rem/1.45 var(--mono); padding:.3rem .5rem; background:var(--panel); border-left:3px solid var(--border-subtle); white-space:pre-wrap; overflow-wrap:anywhere; }

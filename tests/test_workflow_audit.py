@@ -160,6 +160,25 @@ class WorkflowTests(unittest.TestCase):
         rows = {e["event_type"]: e["payload"] for e in self.queued() if e["event_type"].startswith("workflow.tool_")}
         self.assertEqual(rows["workflow.tool_started"]["tool_label"], "Run the test suite")
         self.assertEqual(rows["workflow.tool_failed"]["tool_label"], "Run the test suite")
+        # The description labels the call; the command itself says what failed.
+        self.assertEqual(rows["workflow.tool_started"]["tool_command"], "make test")
+        self.assertEqual(rows["workflow.tool_failed"]["tool_command"], "make test")
+
+    def test_tool_command_keeps_the_full_redacted_command(self):
+        import workflow_audit as audit
+        command = audit.tool_command
+        multi = "cd /repo && grep -rn x . | head -5\ngit config core.hooksPath"
+        self.assertEqual(command("Bash", {"command": multi, "description": "Find branch rule"}), multi)
+        self.assertEqual(command("exec_command", {"cmd": ["git", "commit", "-m", "two words"]}), "git commit -m 'two words'")
+        self.assertIsNone(command("Read", {"file_path": "/x/a.md"}))
+        self.assertIsNone(command("Bash", {"command": "  "}))
+        self.assertIsNone(command("Bash", "not a dict"))
+        redacted = command("Bash", {"command": "export API_KEY=sk-abc123def456ghi; curl https://user:pw@host.io"})
+        self.assertNotIn("sk-abc", redacted)
+        self.assertNotIn("user:pw", redacted)
+        long = command("Bash", {"command": "echo " + "wörd " * 1000})
+        self.assertLessEqual(len(long.encode()), 1900)
+        self.assertTrue(long.endswith("..."))
 
     def gate(self, event, code=0, **fields):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py"), "codex"], input=json.dumps({"session_id":"policy-session","hook_event_name":event,"cwd":str(ROOT),**fields}), env=self.env, text=True, capture_output=True)
