@@ -15,7 +15,7 @@ use arc_web::ui::{
     Breadcrumb, TemplateBundle, TemplateDef, TemplateName, UiContribution, UiHost, UiPage,
 };
 use arc_web::UiRegistry;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -78,6 +78,14 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
         source: include_str!("../resources/views/audit/partials/timeline-items.html"),
     },
     TemplateDef {
+        name: TemplateName("audit/partials/signal-items.html"),
+        source: include_str!("../resources/views/audit/partials/signal-items.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/partials/flow.html"),
+        source: include_str!("../resources/views/audit/partials/flow.html"),
+    },
+    TemplateDef {
         name: TemplateName("audit/partials/more.html"),
         source: include_str!("../resources/views/audit/partials/more.html"),
     },
@@ -88,8 +96,13 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
 const FIRST_ROWS: usize = 2;
 const MORE_ROWS: usize = 5;
 const FIRST_EVENTS: usize = 10;
+/// Signal rows are one line each, so the curated timeline opens with more of them.
+const FIRST_SIGNAL: usize = 25;
 const MORE_EVENTS: usize = 20;
 const MAX_PAGE: usize = 1000;
+
+/// The flow diagram draws every block at once, so very long sessions keep the latest ones.
+const FLOW_MAX: usize = 400;
 
 const RECENT_EVENTS: usize = 25;
 const MAX_EVENTS: usize = 500;
@@ -533,6 +546,15 @@ struct WorkflowQuery {
     event_q: Option<String>,
     event_category: Option<String>,
     event_status: Option<String>,
+    /// `all` shows every event with its evidence, `flow` draws the signal as a
+    /// diagram; otherwise the signal list.
+    view: Option<String>,
+    /// `oldest` lists the timeline in source order; otherwise newest first.
+    order: Option<String>,
+    /// Directory quick filters: `needs`, `unfinished` or `verified`.
+    attention: Option<String>,
+    /// `show` lists sessions with no prompt, task, plan, check or decision.
+    empty: Option<String>,
     /// `/workflow/items` only: which list to page and the slice to return.
     list: Option<String>,
     offset: Option<usize>,
@@ -556,7 +578,18 @@ fn url_component(text: &str) -> String {
 fn directory_url(query: &WorkflowQuery, page: usize) -> String {
     let mut fields = Vec::new();
     for key in [
-        "q", "agent", "model", "status", "path", "phase", "prompts", "since", "until", "sort",
+        "q",
+        "agent",
+        "model",
+        "status",
+        "path",
+        "phase",
+        "prompts",
+        "since",
+        "until",
+        "sort",
+        "attention",
+        "empty",
     ] {
         if let Some(value) = serde_json::to_value(query).unwrap()[key]
             .as_str()
@@ -598,6 +631,51 @@ fn valid_date(date: &str) -> bool {
     year > 0 && day > 0 && day <= max
 }
 
+/// `Today · Oct 6`, `Yesterday · Oct 5`, or `Sat · Oct 3` for a local `YYYY-MM-DD`.
+fn day_heading(day: &str, today: chrono::NaiveDate) -> String {
+    let Ok(date) = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+        return "Date unknown".into();
+    };
+    let prefix = match (today - date).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ => date.format("%a").to_string(),
+    };
+    let year = if date.year() == today.year() {
+        String::new()
+    } else {
+        date.format(", %Y").to_string()
+    };
+    format!("{prefix} · {}{year}", date.format("%b %-d"))
+}
+
+/// Share of todos done; sessions without todos rank below every plan.
+fn progress_rank(session: &Value) -> (f64, u64) {
+    let done = session["verdict"]["todos_done"].as_u64().unwrap_or(0);
+    let total = session["verdict"]["todos_total"].as_u64().unwrap_or(0);
+    if total == 0 {
+        (-1.0, 0)
+    } else {
+        (done as f64 / total as f64, total)
+    }
+}
+
+/// Failed checks first, then no checks, then partly and fully passed.
+fn checks_rank(session: &Value) -> u8 {
+    let checks = &session["verdict"]["checks"];
+    let last = |key: &str| checks[key]["last"].as_str().unwrap_or("");
+    let results = [last("verify"), last("review")];
+    if results.contains(&"failed") {
+        0
+    } else if results == ["", ""] {
+        1
+    } else if results == ["passed", "passed"] {
+        3
+    } else {
+        2
+    }
+}
+
 fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
     let clean = |value: &Option<String>| value.as_deref().unwrap_or("").trim().to_owned();
     let terms: Vec<String> = clean(&query.q)
@@ -607,6 +685,12 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
     let path = clean(&query.path).to_lowercase();
     let since = clean(&query.since);
     let until = clean(&query.until);
+    let timezone: Tz = query
+        .timezone
+        .as_deref()
+        .and_then(|zone| zone.parse().ok())
+        .unwrap_or(chrono_tz::UTC);
+    let today = Utc::now().with_timezone(&timezone).date_naive();
     let mut errors = Vec::new();
     if (!since.is_empty() && !valid_date(&since)) || (!until.is_empty() && !valid_date(&until)) {
         errors.push("Use valid YYYY-MM-DD dates for the activity range.");
@@ -659,17 +743,21 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
             {
                 return false;
             }
+            let verdict = &s["verdict"];
+            match clean(&query.attention).as_str() {
+                "needs" if verdict["attention"].as_array().is_none_or(Vec::is_empty) => {
+                    return false
+                }
+                "unfinished" if verdict["unfinished"] != true => return false,
+                "verified" if verdict["verified"] != true => return false,
+                _ => {}
+            }
             let prompt_count = s["prompts"].as_array().map_or(0, Vec::len);
             if (clean(&query.prompts) == "recorded" && prompt_count == 0)
                 || (clean(&query.prompts) == "none" && prompt_count > 0)
             {
                 return false;
             }
-            let timezone = query
-                .timezone
-                .as_deref()
-                .and_then(|zone| zone.parse().ok())
-                .unwrap_or(chrono_tz::UTC);
             let date = local_activity_date(s["last_at"].as_str().unwrap_or(""), timezone);
             if (!since.is_empty() && date.as_str() < since.as_str())
                 || (!until.is_empty() && date.as_str() > until.as_str())
@@ -680,6 +768,7 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
             for key in [
                 "label",
                 "session_name",
+                "herdr_tab",
                 "agent",
                 "model",
                 "cwd",
@@ -731,6 +820,15 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
         })
         .cloned()
         .collect();
+    // Sessions with nothing to review stay out of the list unless asked for.
+    let show_empty = clean(&query.empty) == "show";
+    let hidden_empty = if show_empty {
+        0
+    } else {
+        let before = matching.len();
+        matching.retain(|s| s["empty"] != true);
+        before - matching.len()
+    };
     for s in &mut matching {
         let tasks = s["tasks"].as_object().cloned().unwrap_or_default();
         s["task_count"] = json!(tasks.len());
@@ -765,23 +863,55 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
             let value = s[key].as_str().unwrap_or("");
             s[format!("{key}_display")] = json!(value.get(..19).unwrap_or(value).replace('T', " "));
         }
+        // One square per todo, capped so a long plan still fits the row.
+        let (done, total) = (
+            s["verdict"]["todos_done"].as_u64().unwrap_or(0),
+            s["verdict"]["todos_total"].as_u64().unwrap_or(0),
+        );
+        let squares = total.min(8);
+        let filled = (done * squares).checked_div(total).unwrap_or(0);
+        s["todo_squares"] = json!((0..squares).map(|i| i < filled).collect::<Vec<_>>());
+        s["local_day"] = json!(local_activity_date(
+            s["last_at"].as_str().unwrap_or(""),
+            timezone
+        ));
     }
     let sort = clean(&query.sort);
+    // Column sorts take a `_desc` suffix for the reverse order; `latest` is `oldest` reversed.
+    let (key, descending) = match sort.as_str() {
+        "" | "latest" => ("oldest", true),
+        other => other
+            .strip_suffix("_desc")
+            .map_or((other, false), |key| (key, true)),
+    };
     matching.sort_by(|a, b| {
-        let comparison = match sort.as_str() {
+        let comparison = match key {
             "oldest" => a["last_at"].as_str().cmp(&b["last_at"].as_str()),
             "name" => a["label"]
                 .as_str()
                 .unwrap_or("")
                 .to_lowercase()
                 .cmp(&b["label"].as_str().unwrap_or("").to_lowercase()),
-            "agent" | "model" | "status" => {
-                a[sort.as_str()].as_str().cmp(&b[sort.as_str()].as_str())
-            }
+            "agent" | "model" | "status" => a[key].as_str().cmp(&b[key].as_str()),
             "path" => a["cwd"].as_str().cmp(&b["cwd"].as_str()),
+            "project" => {
+                let project = |s: &Value| s["project"].as_str().unwrap_or("").to_lowercase();
+                project(a)
+                    .cmp(&project(b))
+                    .then(a["cwd"].as_str().cmp(&b["cwd"].as_str()))
+            }
+            "progress" => progress_rank(a)
+                .partial_cmp(&progress_rank(b))
+                .unwrap_or(std::cmp::Ordering::Equal),
+            "checks" => checks_rank(a).cmp(&checks_rank(b)),
             "tasks" => b["task_count"].as_u64().cmp(&a["task_count"].as_u64()),
             "prompts" => b["prompt_count"].as_u64().cmp(&a["prompt_count"].as_u64()),
             _ => b["last_at"].as_str().cmp(&a["last_at"].as_str()),
+        };
+        let comparison = if descending {
+            comparison.reverse()
+        } else {
+            comparison
         };
         comparison.then(a["session_id"].as_str().cmp(&b["session_id"].as_str()))
     });
@@ -790,9 +920,86 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
     let pages = total.div_ceil(per_page).max(1);
     let page = query.page.unwrap_or(1).clamp(1, pages);
     let offset = (page - 1) * per_page;
-    let rows: Vec<Value> = matching.into_iter().skip(offset).take(per_page).collect();
-    let filters = json!({"q":clean(&query.q),"agent":clean(&query.agent),"model":clean(&query.model),"status":clean(&query.status),"path":clean(&query.path),"phase":clean(&query.phase),"prompts":clean(&query.prompts),"since":since,"until":until,"sort":if sort.is_empty(){"latest"}else{&sort},"per_page":per_page});
-    json!({"rows":rows,"total":total,"all_count":sessions.len(),"facets":facets,"filters":filters,"errors":errors,"page":page,"pages":pages,"start":if total==0{0}else{offset+1},"end":(offset+per_page).min(total),"url":directory_url(query,page),"previous":if page>1{directory_url(query,page-1)}else{String::new()},"next":if page<pages{directory_url(query,page+1)}else{String::new()}})
+    let mut rows: Vec<Value> = matching.into_iter().skip(offset).take(per_page).collect();
+    // Time-ordered lists read by day; other sorts would scatter the headings.
+    if matches!(sort.as_str(), "" | "latest" | "oldest") {
+        let mut previous = String::new();
+        for row in &mut rows {
+            let day = row["local_day"].as_str().unwrap_or("").to_owned();
+            if day != previous {
+                row["day_heading"] = json!(day_heading(&day, today));
+                previous = day;
+            }
+        }
+    }
+    let reviewable: Vec<&Value> = sessions.iter().filter(|s| s["empty"] != true).collect();
+    let count = |test: &dyn Fn(&Value) -> bool| reviewable.iter().filter(|s| test(s)).count();
+    let today_text = today.format("%Y-%m-%d").to_string();
+    let pulse = json!({
+        "running": count(&|s| s["status"] == "running"),
+        "needs": count(&|s| s["verdict"]["attention"].as_array().is_some_and(|a| !a.is_empty())),
+        "unfinished": count(&|s| s["verdict"]["unfinished"] == true),
+        "verified_today": count(&|s| s["verdict"]["verified"] == true
+            && local_activity_date(s["last_at"].as_str().unwrap_or(""), timezone) == today_text),
+    });
+    let advanced = [
+        "agent", "model", "status", "path", "phase", "prompts", "since", "until",
+    ]
+    .iter()
+    .any(|key| {
+        !clean(
+            &serde_json::to_value(query).unwrap()[*key]
+                .as_str()
+                .map(str::to_owned),
+        )
+        .is_empty()
+    }) || query.per_page.is_some_and(|n| n != 25);
+    let quick = |field: &str, value: &str| {
+        let mut next = query.clone();
+        next.attention = None;
+        next.status = None;
+        match field {
+            "attention" => next.attention = Some(value.into()),
+            "status" => next.status = Some(value.into()),
+            _ => {}
+        }
+        directory_url(&next, 1)
+    };
+    // Column titles sort on click; a second click on the active column reverses it.
+    let columns: Vec<Value> = [
+        ("Session", "name", "name_desc", false),
+        ("Project", "project", "project_desc", false),
+        ("Progress", "progress", "progress_desc", true),
+        ("Checks", "checks", "checks_desc", false),
+        ("Last active", "oldest", "latest", true),
+    ]
+    .iter()
+    .map(|&(label, ascending, reversed, first_descending)| {
+        let current = if sort.is_empty() { "latest" } else { sort.as_str() };
+        let active = current == ascending || current == reversed;
+        let next = if active {
+            if current == ascending { reversed } else { ascending }
+        } else if first_descending {
+            reversed
+        } else {
+            ascending
+        };
+        let mut target = query.clone();
+        target.sort = Some(next.into());
+        json!({"label": label, "href": directory_url(&target, 1), "active": active,
+            "direction": if !active { "" } else if current == reversed { "descending" } else { "ascending" }})
+    })
+    .collect();
+    let mut with_empty = query.clone();
+    with_empty.empty = Some("show".into());
+    let filters = json!({"q":clean(&query.q),"agent":clean(&query.agent),"model":clean(&query.model),"status":clean(&query.status),"path":clean(&query.path),"phase":clean(&query.phase),"prompts":clean(&query.prompts),"since":since,"until":until,"sort":if sort.is_empty(){"latest"}else{&sort},"per_page":per_page,"attention":clean(&query.attention)});
+    let chips = json!([
+        {"label": "Needs attention", "count": pulse["needs"], "href": quick("attention", "needs"), "active": clean(&query.attention) == "needs"},
+        {"label": "Running", "count": pulse["running"], "href": quick("status", "running"), "active": clean(&query.status) == "running" && clean(&query.attention).is_empty()},
+        {"label": "Ended unfinished", "count": pulse["unfinished"], "href": quick("attention", "unfinished"), "active": clean(&query.attention) == "unfinished"},
+        {"label": "Verified", "count": Value::Null, "href": quick("attention", "verified"), "active": clean(&query.attention) == "verified"},
+    ]);
+    json!({"rows":rows,"columns":columns,"total":total,"all_count":sessions.len(),"pulse":pulse,"chips":chips,"advanced":advanced,"hidden_empty":hidden_empty,"show_empty_url":directory_url(&with_empty,1),"show_empty":show_empty,"facets":facets,"filters":filters,"errors":errors,"page":page,"pages":pages,"start":if total==0{0}else{offset+1},"end":(offset+per_page).min(total),"url":directory_url(query,page),"previous":if page>1{directory_url(query,page-1)}else{String::new()},"next":if page<pages{directory_url(query,page+1)}else{String::new()}})
 }
 
 #[get("/workflow")]
@@ -873,6 +1080,8 @@ fn session_url(query: &WorkflowQuery, base: &str, extra: &[(&str, String)]) -> S
         ("event_q", &query.event_q),
         ("event_category", &query.event_category),
         ("event_status", &query.event_status),
+        ("view", &query.view),
+        ("order", &query.order),
     ];
     let fields: Vec<String> = scope
         .iter()
@@ -980,6 +1189,195 @@ fn more(query: &WorkflowQuery, list: &str, shown: usize, total: usize) -> Value 
     })
 }
 
+/// The signal view folds tool calls and drops bookkeeping; `view=all` keeps every event.
+fn signal_view(query: &WorkflowQuery) -> bool {
+    trimmed(&query.view) != "all"
+}
+
+/// Timeline rows for the current view, after the task, todo and search filters.
+fn timeline_rows(session: &Value, query: &WorkflowQuery) -> Vec<Value> {
+    let events: Vec<Value> = timeline(session, query).into_iter().cloned().collect();
+    let rows = if signal_view(query) {
+        crate::workflow::signal_items(&events)
+    } else {
+        events
+    };
+    match (newest_first(query), signal_view(query)) {
+        (false, _) => rows,
+        (true, true) => crate::workflow::newest_first(rows),
+        (true, false) => rows.into_iter().rev().collect(),
+    }
+}
+
+/// `view=flow` draws the signal timeline as a diagram of blocks per prompt.
+fn flow_view(query: &WorkflowQuery) -> bool {
+    trimmed(&query.view) == "flow"
+}
+
+/// The icon and kind label that tell a flow block's event type at a glance.
+fn flow_icon(item: &Value) -> (&'static str, &'static str) {
+    let kind = item["event_type"]
+        .as_str()
+        .unwrap_or("")
+        .trim_start_matches("workflow.");
+    match (
+        item["category"].as_str().unwrap_or(""),
+        item["tone"].as_str(),
+    ) {
+        ("burst", _) => ("tools", "Tool calls"),
+        ("prompt", _) => ("prompt", "Prompt"),
+        ("tool", _) => ("tool-fail", "Tool failure"),
+        ("check", Some("ok")) => ("check-ok", "Check"),
+        ("check", Some("fail")) => ("check-fail", "Check"),
+        ("check", _) => ("check", "Check"),
+        ("decision", _) => ("decision", "Decision"),
+        ("todo", _) => ("todo", "Todo"),
+        ("plan", _) => ("plan", "Plan"),
+        ("phase", _) => ("phase", "Phase"),
+        ("task", _) if kind == "task_completed" => ("task-done", "Task"),
+        ("task", _) if kind == "task_blocked" => ("task-blocked", "Task"),
+        ("task", _) => ("task", "Task"),
+        ("session", _) => ("session", "Session"),
+        _ => ("event", "Event"),
+    }
+}
+
+/// MCP tools read as `mcp__server__tool`; the diagram shows the tool part.
+fn short_tool(name: &str) -> &str {
+    match name.strip_prefix("mcp__") {
+        Some(rest) => rest.rsplit("__").next().unwrap_or(rest),
+        None => name,
+    }
+}
+
+/// A flow block's recorded fields for the inspector, without identifiers every
+/// event of the session shares and without empty values.
+fn flow_fields(payload: &Value) -> Vec<Value> {
+    payload
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| !matches!(key.as_str(), "session_id" | "schema_version"))
+        .filter_map(|(key, value)| {
+            let text = match value {
+                Value::Null | Value::Object(_) => return None,
+                Value::String(text) if text.trim().is_empty() => return None,
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            Some(json!({"key": key.replace('_', " "), "value": text}))
+        })
+        .collect()
+}
+
+/// The signal timeline as a diagram: one lane per prompt, its blocks in the
+/// order they happened. Newest first puts the latest lane on top; blocks inside
+/// a lane always read left to right. Events before the first prompt form a
+/// lane without a prompt.
+fn flow_lanes(session: &Value, query: &WorkflowQuery) -> Value {
+    let events: Vec<Value> = timeline(session, query).into_iter().cloned().collect();
+    let mut items = crate::workflow::signal_items(&events);
+    let total = items.len();
+    let hidden = total.saturating_sub(FLOW_MAX);
+    items.drain(..hidden);
+    let mut lanes: Vec<Value> = Vec::new();
+    for (index, mut item) in items.into_iter().enumerate() {
+        let (icon, kind) = flow_icon(&item);
+        item["flow_id"] = json!(format!("flow-{index}"));
+        item["icon"] = json!(icon);
+        item["kind"] = json!(kind);
+        item["fields"] = json!(flow_fields(&item["payload"]));
+        for list in ["tools", "call_list"] {
+            let key = if list == "tools" { "name" } else { "tool" };
+            for entry in item[list].as_array_mut().into_iter().flatten() {
+                let short = short_tool(entry[key].as_str().unwrap_or("")).to_owned();
+                entry["short"] = json!(short);
+            }
+        }
+        if item["category"] == "prompt" || lanes.is_empty() {
+            lanes.push(json!({"prompt": Value::Null, "blocks": []}));
+        }
+        let lane = lanes.last_mut().unwrap();
+        if item["category"] == "prompt" {
+            lane["prompt"] = item.clone();
+        }
+        lane["blocks"].as_array_mut().unwrap().push(item);
+    }
+    if newest_first(query) {
+        lanes.reverse();
+    }
+    json!({"lanes": lanes, "total": total, "hidden": hidden})
+}
+
+/// The latest events lead unless `order=oldest` asks for source order.
+fn newest_first(query: &WorkflowQuery) -> bool {
+    trimmed(&query.order) != "oldest"
+}
+
+/// The link that flips the timeline order, keeping the view and filters.
+fn order_toggle(query: &WorkflowQuery) -> Value {
+    let next = WorkflowQuery {
+        order: newest_first(query).then(|| "oldest".to_owned()),
+        show_events: None,
+        ..query.clone()
+    };
+    json!({
+        "label": if newest_first(query) { "Oldest first" } else { "Newest first" },
+        "current": if newest_first(query) { "newest first" } else { "oldest first" },
+        "href": format!("{}#timeline", session_url(&next, "/workflow", &[])),
+    })
+}
+
+fn timeline_more(query: &WorkflowQuery, shown: usize, total: usize) -> Value {
+    let mut more = more(query, "timeline", shown, total);
+    if signal_view(query) {
+        more["noun"] = json!("entries");
+    }
+    more
+}
+
+/// Quick timeline views: the curated signal, every raw event, and one-click
+/// filters for failures, decisions and checks.
+fn timeline_chips(session: &Value, query: &WorkflowQuery) -> Value {
+    let category = trimmed(&query.event_category);
+    let status = trimmed(&query.event_status);
+    let unfiltered = category.is_empty() && status.is_empty() && trimmed(&query.event_q).is_empty();
+    let verdict = &session["verdict"];
+    let checks: u64 = verdict["checks"]
+        .as_object()
+        .into_iter()
+        .flat_map(|c| c.values())
+        .filter_map(|c| c["total"].as_u64())
+        .sum();
+    let failures = session["analysis"]["failed"].as_u64().unwrap_or(0)
+        + session["analysis"]["check_failures"].as_u64().unwrap_or(0);
+    // Failure, decision and check filters keep the view they were chosen from.
+    let current = match trimmed(&query.view).as_str() {
+        "all" => Some("all"),
+        "flow" => Some("flow"),
+        _ => None,
+    };
+    let link = |view: Option<&str>, category: Option<&str>, status: Option<&str>| {
+        let next = WorkflowQuery {
+            view: view.map(Into::into),
+            event_category: category.map(Into::into),
+            event_status: status.map(Into::into),
+            event_q: None,
+            show_events: None,
+            ..query.clone()
+        };
+        format!("{}#timeline", session_url(&next, "/workflow", &[]))
+    };
+    json!([
+        {"label": "Signal", "href": link(None, None, None), "active": signal_view(query) && !flow_view(query) && unfiltered, "count": Value::Null},
+        {"label": "Flow", "href": link(Some("flow"), None, None), "active": flow_view(query) && unfiltered, "count": Value::Null},
+        {"label": "Raw events", "href": link(Some("all"), None, None), "active": !signal_view(query) && unfiltered, "count": session["events"].as_array().map_or(0, Vec::len)},
+        {"label": "Failures", "href": link(current, None, Some("failed")), "active": status == "failed", "count": failures},
+        {"label": "Decisions", "href": link(current, Some("decision"), None), "active": category == "decision", "count": verdict["decisions"]},
+        {"label": "Checks", "href": link(current, Some("check"), None), "active": category == "check", "count": checks},
+    ])
+}
+
 fn page(items: &[Value], offset: usize, limit: usize) -> &[Value] {
     let start = offset.min(items.len());
     &items[start..(start + limit).min(items.len())]
@@ -1004,8 +1402,13 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
     let task_rows = size(query.show_tasks, FIRST_ROWS)
         .max(expanded.and_then(|t| t["sequence"].as_u64()).unwrap_or(0) as usize);
     let prompt_rows = size(query.show_prompts, FIRST_ROWS);
-    let event_rows = size(query.show_events, FIRST_EVENTS);
-    let events: Vec<Value> = timeline(session, query).into_iter().cloned().collect();
+    let first_events = if signal_view(query) {
+        FIRST_SIGNAL
+    } else {
+        FIRST_EVENTS
+    };
+    let event_rows = size(query.show_events, first_events);
+    let events = timeline_rows(session, query);
     context.insert("prompt_page", page(prompts, 0, prompt_rows));
     context.insert(
         "prompts_more",
@@ -1017,7 +1420,35 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
     context.insert("timeline_page", page(&events, 0, event_rows));
     context.insert(
         "timeline_more",
-        &more(query, "timeline", event_rows, events.len()),
+        &timeline_more(query, event_rows, events.len()),
+    );
+    context.insert("signal_view", &signal_view(query));
+    context.insert("flow_view", &flow_view(query));
+    if flow_view(query) {
+        context.insert("flow", &flow_lanes(session, query));
+    }
+    context.insert("timeline_chips", &timeline_chips(session, query));
+    context.insert("order_toggle", &order_toggle(query));
+    // Every planned todo of the session, newest task last, for the side column.
+    let todo_rows: Vec<Value> = tasks
+        .iter()
+        .flat_map(|task| {
+            task["todo_list"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|todo| todo["status"] != "removed")
+                .map(|todo| {
+                    let mut row = todo.clone();
+                    row["task_id"] = task["task_id"].clone();
+                    row
+                })
+        })
+        .collect();
+    context.insert("todo_rows", &todo_rows);
+    context.insert(
+        "named_tasks",
+        &tasks.iter().filter(|t| t["name"] != "Session work").count(),
     );
     context.insert("task_filter", &query.task_id);
     context.insert("todo_filter", &query.todo_id);
@@ -1048,6 +1479,15 @@ fn workflow_fragment(session: &Value, query: &WorkflowQuery) -> Result<Value, St
     context.insert("selected", session);
     context.insert("return_to", return_to(query));
     context.insert("expanded_task", &Value::Null);
+    context.insert(
+        "named_tasks",
+        &session["task_list"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["name"] != "Session work")
+            .count(),
+    );
     let render = |name: &str, context: &Context| {
         fragments()
             .render(name, context)
@@ -1082,18 +1522,22 @@ fn workflow_fragment(session: &Value, query: &WorkflowQuery) -> Result<Value, St
             session["task_list"].as_array().cloned().unwrap_or_default(),
         ),
         "timeline" => (
-            "timeline-items",
+            if signal_view(query) {
+                "signal-items"
+            } else {
+                "timeline-items"
+            },
             "timeline_page",
-            timeline(session, query).into_iter().cloned().collect(),
+            timeline_rows(session, query),
         ),
         _ => return Err("unknown list".to_owned()),
     };
     // A list reloaded from the start (a new timeline filter) opens at its first size.
     let (_, _, step) = show_key(list);
-    let first = if list == "timeline" {
-        FIRST_EVENTS
-    } else {
-        FIRST_ROWS
+    let first = match list {
+        "timeline" if signal_view(query) => FIRST_SIGNAL,
+        "timeline" => FIRST_EVENTS,
+        _ => FIRST_ROWS,
     };
     let rows = page(
         &items,
@@ -1104,7 +1548,15 @@ fn workflow_fragment(session: &Value, query: &WorkflowQuery) -> Result<Value, St
             .clamp(1, MAX_PAGE),
     );
     context.insert(field, rows);
-    context.insert("more", &more(query, list, offset + rows.len(), items.len()));
+    let shown = offset + rows.len();
+    context.insert(
+        "more",
+        &if list == "timeline" {
+            timeline_more(query, shown, items.len())
+        } else {
+            more(query, list, shown, items.len())
+        },
+    );
     Ok(json!({
         "html": render(&format!("audit/partials/{template}.html"), &context)?,
         "more_html": render("audit/partials/more.html", &context)?,
@@ -1446,7 +1898,7 @@ mod tests {
     }
 
     fn directory_fixture(id: &str, date: &str, agent: &str, prompt: bool) -> Value {
-        json!({"session_id":id,"label":format!("Repair {id}"),"agent":agent,"model":"model-v1","cwd":"/Projects/Working Tree","status":"running","first_at":format!("{date}T01:00:00Z"),"last_at":format!("{date}T02:00:00Z"),"tasks":{"t":{"name":"Repair parser","description":"Curated summary","status":"completed","outcome":"Regression passed","phase":"build"}},"prompts":if prompt{vec![json!({"text":"Fix Unicode imports"})]}else{vec![]},"initial_goal":"","events":[]})
+        json!({"session_id":id,"label":format!("Repair {id}"),"agent":agent,"model":"model-v1","cwd":"/Projects/Working Tree","status":"running","first_at":format!("{date}T01:00:00Z"),"last_at":format!("{date}T02:00:00Z"),"tasks":{"t":{"name":"Repair parser","description":"Curated summary","status":"completed","outcome":"Regression passed","phase":"build"}},"prompts":if prompt{vec![json!({"text":"Fix Unicode imports"})]}else{vec![]},"initial_goal":"","events":[],"project":"Working Tree","worktree":false,"empty":false,"verdict":{"outcome":{"status":"completed","text":"Regression passed"},"checks":{},"todos_done":0,"todos_total":0,"attention":[],"unfinished":false,"verified":false,"duration":"1h 0m"}})
     }
 
     #[test]
@@ -1533,6 +1985,272 @@ mod tests {
         assert!(url.contains("path=%2FWorking%20Tree"));
     }
 
+    fn render_directory(sessions: &[Value], query: &WorkflowQuery) -> String {
+        let mut context = Context::new();
+        context.insert("directory", &session_directory(sessions, query));
+        decorate(&mut context, "Workflow sessions");
+        for key in ["app_name", "environment", "csrf_token", "request_path"] {
+            context.insert(key, "x");
+        }
+        context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
+        context.insert("admin_navigation", &Vec::<Value>::new());
+        context.insert("admin_actions", &Vec::<Value>::new());
+        registry_tera(
+            &UiRegistry::build(Some(&host()), &[contribution()])
+                .unwrap()
+                .unwrap(),
+        )
+        .render("audit/sessions.html", &context)
+        .unwrap()
+    }
+
+    #[test]
+    fn directory_triage_counts_quick_filters_day_headings_and_hides_empty_sessions() {
+        let now = Utc::now();
+        let at = |hours_ago: i64| {
+            (now - chrono::Duration::hours(hours_ago))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let ev = |session: &str, kind: &str, hours_ago: i64, extra: Value| {
+            let mut payload = json!({"session_id": session, "task_id": format!("{session}-t"), "occurred_at": at(hours_ago)});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"event_type": format!("workflow.{kind}"), "payload": payload})
+        };
+        let rows = vec![
+            // Blocked and failing: needs attention.
+            ev("blocked", "session_started", 1, json!({"cwd": "/Code/app"})),
+            ev(
+                "blocked",
+                "session_updated",
+                1,
+                json!({"herdr_tab": "PR 9 review"}),
+            ),
+            ev("blocked", "task_started", 1, json!({"name": "review-pr-9"})),
+            ev(
+                "blocked",
+                "review",
+                1,
+                json!({"check": "review", "exit_code": 1}),
+            ),
+            ev(
+                "blocked",
+                "task_blocked",
+                1,
+                json!({"outcome": "Cleanup failed"}),
+            ),
+            // Verified and completed today.
+            ev("done", "task_started", 2, json!({"name": "Ship docs"})),
+            ev(
+                "done",
+                "verification",
+                2,
+                json!({"check": "verify", "exit_code": 0}),
+            ),
+            ev(
+                "done",
+                "review",
+                2,
+                json!({"check": "review", "exit_code": 0}),
+            ),
+            ev("done", "task_completed", 2, json!({"outcome": "Docs live"})),
+            // Ended with open todos: unfinished, several days ago.
+            ev("open", "session_started", 80, json!({})),
+            ev("open", "task_started", 80, json!({"name": "Half done"})),
+            ev(
+                "open",
+                "todo_updated",
+                80,
+                json!({"todo_id": "a", "description": "a", "status": "pending"}),
+            ),
+            ev("open", "session_ended", 80, json!({})),
+            // A probe with nothing to review.
+            ev(
+                "probe",
+                "session_started",
+                3,
+                json!({"cwd": "/Library/Probe"}),
+            ),
+        ];
+        let sessions = crate::workflow::sessions(&rows);
+        let directory = session_directory(&sessions, &WorkflowQuery::default());
+        assert_eq!(directory["total"], 3);
+        assert_eq!(directory["hidden_empty"], 1);
+        assert_eq!(
+            directory["pulse"],
+            json!({"running": 1, "needs": 1, "unfinished": 1, "verified_today": 1})
+        );
+        let headings: Vec<&str> = directory["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["day_heading"].as_str())
+            .collect();
+        assert_eq!(headings.len(), 2, "two calendar days: {headings:?}");
+        assert!(headings[0].starts_with("Today · ") || headings[0].starts_with("Yesterday · "));
+        // Quick filters.
+        let only = |attention: &str| {
+            let d = session_directory(
+                &sessions,
+                &WorkflowQuery {
+                    attention: Some(attention.into()),
+                    ..Default::default()
+                },
+            );
+            d["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["session_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(only("needs"), ["blocked"]);
+        let needs = render_directory(
+            &sessions,
+            &WorkflowQuery {
+                attention: Some("needs".into()),
+                ..Default::default()
+            },
+        );
+        assert!(needs
+            .contains(r#"<span class="badge badge--tab" title="Herdr tab">PR 9 review</span>"#));
+        let by_tab = session_directory(
+            &sessions,
+            &WorkflowQuery {
+                q: Some("PR 9 review".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(by_tab["total"], 1);
+        assert_eq!(only("unfinished"), ["open"]);
+        assert_eq!(only("verified"), ["done"]);
+        let shown = session_directory(
+            &sessions,
+            &WorkflowQuery {
+                empty: Some("show".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            (shown["total"].as_u64(), shown["hidden_empty"].as_u64()),
+            (Some(4), Some(0))
+        );
+        // Other sorts do not split rows by day.
+        let by_name = session_directory(
+            &sessions,
+            &WorkflowQuery {
+                sort: Some("name".into()),
+                ..Default::default()
+            },
+        );
+        assert!(by_name["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["day_heading"].is_null()));
+        // Sorting from a column title does not open More filters.
+        assert_eq!(by_name["advanced"], false);
+        let order = |sort: &str| {
+            session_directory(
+                &sessions,
+                &WorkflowQuery {
+                    sort: Some(sort.into()),
+                    ..Default::default()
+                },
+            )["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["session_id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order("checks"), ["blocked", "open", "done"]);
+        assert_eq!(order("checks_desc"), ["done", "open", "blocked"]);
+        assert_eq!(order("latest"), ["blocked", "done", "open"]);
+        assert_eq!(order("oldest"), ["open", "done", "blocked"]);
+        let reversed = order("name_desc");
+        let mut forward = order("name");
+        forward.reverse();
+        assert_eq!(reversed, forward);
+        assert_eq!(
+            order("progress_desc").last().map(String::as_str),
+            Some("done")
+        );
+        // Titles link to their first sort; the active title reverses it.
+        let columns = |sort: Option<&str>| {
+            session_directory(
+                &sessions,
+                &WorkflowQuery {
+                    sort: sort.map(Into::into),
+                    ..Default::default()
+                },
+            )["columns"]
+                .clone()
+        };
+        let default = columns(None);
+        assert_eq!(default[0]["label"], "Session");
+        assert!(default[0]["href"].as_str().unwrap().contains("sort=name&"));
+        assert_eq!(default[4]["active"], true);
+        assert_eq!(default[4]["direction"], "descending");
+        assert!(default[4]["href"].as_str().unwrap().contains("sort=oldest"));
+        let by_project = columns(Some("project"));
+        assert_eq!(by_project[1]["direction"], "ascending");
+        assert!(by_project[1]["href"]
+            .as_str()
+            .unwrap()
+            .contains("sort=project_desc"));
+        assert_eq!(by_project[4]["active"], false);
+        let html = render_directory(
+            &sessions,
+            &WorkflowQuery {
+                sort: Some("project_desc".into()),
+                attention: Some("needs".into()),
+                ..Default::default()
+            },
+        );
+        assert!(html.contains(r#"aria-sort="descending""#));
+        // Sort links keep the active filters.
+        assert!(html.contains("sort=project&amp;attention=needs"));
+
+        let html = render_directory(&sessions, &WorkflowQuery::default());
+        assert!(html.contains("Needs attention"));
+        assert!(html.contains("Review PR 9"));
+        assert!(html.contains("task blocked, check failed"));
+        assert!(html.contains("Completed:</span> Docs live"));
+        assert!(html.contains("1 empty session hidden"));
+        assert!(html.contains("empty=show"));
+        assert!(html.contains("class=\"badge badge--error\">review<"));
+        assert!(html.contains("0/1 todos"));
+        assert!(html.contains("data-client-relative="));
+        assert!(
+            !html.contains("<details class=\"more-filters\" open"),
+            "advanced filters start closed"
+        );
+        let filtered = render_directory(
+            &sessions,
+            &WorkflowQuery {
+                attention: Some("needs".into()),
+                ..Default::default()
+            },
+        );
+        assert!(filtered.contains("class=\"chip is-active\""));
+        assert!(
+            filtered.contains("name=\"attention\" value=\"needs\""),
+            "search keeps the quick filter"
+        );
+        assert!(day_heading(
+            "2025-12-31",
+            chrono::NaiveDate::from_ymd_opt(2026, 1, 9).unwrap()
+        )
+        .ends_with("Dec 31, 2025"));
+        assert_eq!(
+            day_heading("", chrono::NaiveDate::from_ymd_opt(2026, 1, 9).unwrap()),
+            "Date unknown"
+        );
+    }
+
     #[test]
     fn session_directory_template_renders_rows_filters_and_empty_results() {
         let mut data = vec![directory_fixture("id-hash", "2026-10-02", "Codex", true)];
@@ -1603,37 +2321,43 @@ mod tests {
             assert!(!html.contains("<script>bad</script>"));
             assert!(html.contains("Example task"));
             assert!(html.contains("Back to sessions"));
-            assert!(!html.contains("session-selector"));
-            assert!(!html.contains(">session ·"));
             assert!(html.contains("Session metadata"));
-            assert!(html.contains("Session analysis"));
-            assert!(html.contains("Tool succeeded"));
-            assert!(html.contains("42 ms"));
-            assert!(html.contains("call-id"));
-            assert!(html.contains("evidence-id"));
-            assert!(html.contains("Tool &lt;script&gt;"));
-            assert!(html.contains("timeline-category"));
-            assert!(html.contains("timeline-status"));
+            assert!(!html.contains("Session analysis"));
             assert!(html.contains("<dd>Codex</dd>"));
             assert!(html.contains("<dd>example-model</dd>"));
             assert!(html.contains("Working directory"));
-            assert!(
-                html.contains("/example/Working Tree")
-                    || html.contains("&#x2F;example&#x2F;Working Tree")
-            );
-            assert!(html.contains("User prompts"));
-            assert!(html.contains("Example goal &lt;script&gt;bad&lt;"));
-            assert!(!html.contains("<script>bad</script>"));
             assert!(html.contains("build: active"));
-            assert!(html.contains("review · exit 0"));
-            assert!(
-                !html.contains("workflow-tasks"),
-                "tasks are a list, not a card grid"
-            );
+            assert!(html.contains("1/1 todos"));
             assert!(html.contains("Started <time data-client-time=\"2026-10-02T00:00:00Z\">"));
             assert!(html.contains("Added <time data-client-time=\"2026-10-02T00:00:00Z\">"));
             assert!(html.contains("Updated <time data-client-time=\"2026-10-02T00:02:00Z\">"));
-            assert!(html.contains("1/1 todos"));
+            // Verdict strip and the signal view.
+            assert!(html.contains("Session verdict"));
+            assert!(html.contains("review 1/1"));
+            assert!(html.contains("no verify"));
+            assert!(html.contains("1 / 1 done"));
+            assert!(html.contains("Phase: build"));
+            assert!(html.contains("review passed"));
+            assert!(html.contains("Todo done: Repair &lt;script&gt;"));
+            assert!(html.contains("Example goal &lt;script&gt;bad&lt;"));
+            assert!(html.contains("1 tool call · Tool &lt;script&gt;"));
+            assert!(!html.contains("Event evidence"));
+            // Raw events keep every card with its evidence.
+            let raw = render_session(
+                selected,
+                &WorkflowQuery {
+                    view: Some("all".into()),
+                    ..query.clone()
+                },
+            );
+            assert!(raw.contains("Tool succeeded"));
+            assert!(raw.contains("42 ms"));
+            assert!(raw.contains("call-id"));
+            assert!(raw.contains("evidence-id"));
+            assert!(raw.contains("Tool &lt;script&gt;"));
+            assert!(!raw.contains("<script>bad</script>"));
+            assert!(raw.contains("review · exit 0"));
+            assert!(raw.contains("Event evidence"));
         }
     }
 
@@ -1655,6 +2379,102 @@ mod tests {
         registry_tera(&registry)
             .render("audit/workflow.html", &context)
             .expect("Workflow session renders")
+    }
+
+    #[test]
+    fn flow_view_draws_one_lane_per_prompt_with_icons_and_inspectable_blocks() {
+        let at = |second: usize| format!("2026-10-02T00:00:{second:02}Z");
+        let rows = vec![
+            json!({"event_type":"workflow.task_started","payload":{"session_id":"s","task_id":"t","name":"Repair parser","status":"running","occurred_at":at(1)}}),
+            json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t","prompt_id":"p1","part_index":0,"part_count":1,"text":"Fix the <b>parser</b>","occurred_at":at(2)}}),
+            json!({"event_type":"workflow.tool_completed","payload":{"session_id":"s","task_id":"t","tool_name":"mcp__browser__navigate","tool_label":"Open <the> page","outcome":"succeeded","exit_code":0,"duration_ms":12,"occurred_at":at(3)}}),
+            json!({"event_type":"workflow.tool_failed","payload":{"session_id":"s","task_id":"t","tool_name":"Bash","tool_label":"Run the test suite","outcome":"failed","exit_code":2,"occurred_at":at(4)}}),
+            json!({"event_type":"workflow.decision","payload":{"session_id":"s","task_id":"t","description":"Pick the fix","options":["patch","rewrite"],"selected":"patch","occurred_at":at(5)}}),
+            json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t","prompt_id":"p2","part_index":0,"part_count":1,"text":"Now verify","occurred_at":at(6)}}),
+            json!({"event_type":"workflow.verification","payload":{"session_id":"s","task_id":"t","check":"verify","exit_code":0,"ran":3,"occurred_at":at(7)}}),
+        ];
+        let session = crate::workflow::sessions(&rows).remove(0);
+        let mut query = WorkflowQuery {
+            session_id: Some("s".into()),
+            view: Some("flow".into()),
+            ..WorkflowQuery::default()
+        };
+        // Newest first: the latest prompt's lane leads; blocks read left to right.
+        let flow = flow_lanes(&session, &query);
+        let lanes = flow["lanes"].as_array().unwrap();
+        assert_eq!(lanes.len(), 3);
+        assert_eq!(lanes[0]["prompt"]["prompt_number"], 2);
+        assert_eq!(lanes[2]["prompt"], Value::Null);
+        let icons = |lane: &Value| -> Vec<String> {
+            lane["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| b["icon"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(icons(&lanes[0]), ["prompt", "check-ok"]);
+        assert_eq!(
+            icons(&lanes[1]),
+            ["prompt", "tools", "tool-fail", "decision"]
+        );
+        assert_eq!(icons(&lanes[2]), ["task"]);
+        let burst = &lanes[1]["blocks"][1];
+        assert_eq!(burst["tools"][0]["short"], "navigate");
+        assert_eq!(burst["call_list"][0]["short"], "navigate");
+        // Inspector fields drop shared identifiers and empty values.
+        let fields = lanes[1]["blocks"][2]["fields"].as_array().unwrap();
+        assert!(fields
+            .iter()
+            .any(|f| f["key"] == "tool label" && f["value"] == "Run the test suite"));
+        assert!(fields
+            .iter()
+            .all(|f| f["key"] != "session id" && f["key"] != "schema version"));
+        query.order = Some("oldest".into());
+        assert_eq!(
+            flow_lanes(&session, &query)["lanes"][0]["prompt"],
+            Value::Null
+        );
+        query.order = None;
+
+        let html = render_session(&session, &query);
+        assert!(html.contains("class=\"flow-inspector\""));
+        assert_eq!(count(&html, "class=\"flow-lane\""), 3);
+        assert_eq!(count(&html, "data-flow-open=\"flow-"), 7);
+        for icon in [
+            "prompt",
+            "tools",
+            "tool-fail",
+            "decision",
+            "check-ok",
+            "task",
+        ] {
+            assert!(
+                html.contains(&format!("<use href=\"#fi-{icon}\"/>")),
+                "{icon} icon"
+            );
+            assert!(
+                html.contains(&format!("<symbol id=\"fi-{icon}\"")),
+                "{icon} symbol"
+            );
+        }
+        assert!(html.contains("<template id=\"flow-2\">"));
+        assert!(html.contains("Run the test suite"));
+        assert!(html.contains("Open &lt;the&gt; page"));
+        assert!(html.contains("Fix the &lt;b&gt;parser"));
+        assert!(!html.contains("<b>parser</b>"));
+        assert!(html.contains("name=\"view\" value=\"flow\""));
+        assert!(html.contains("data-flow=\"true\""));
+        assert!(html.contains("aria-current=\"true\">Flow"));
+        // The diagram is drawn whole, so it has no show-more control.
+        assert!(!html.contains("data-more=\"timeline\""));
+        // The signal list names the failed command under its headline.
+        query.view = None;
+        let signal = render_session(&session, &query);
+        assert!(signal.contains(
+            "Bash failed (exit 2)</span><span class=\"signal-detail\">Run the test suite"
+        ));
+        assert!(!signal.contains("class=\"flow-inspector\""));
     }
 
     fn busy_session() -> Value {
@@ -1680,32 +2500,68 @@ mod tests {
     #[test]
     fn session_lists_open_with_two_rows_and_a_show_more_control() {
         let session = busy_session();
-        let query = WorkflowQuery {
+        let mut query = WorkflowQuery {
             session_id: Some("s".into()),
             ..WorkflowQuery::default()
         };
         let html = render_session(&session, &query);
-        assert_eq!(count(&html, "class=\"row-item prompt-row\""), 2);
         assert_eq!(count(&html, "class=\"row-item task-row"), 2);
-        // 5 prompts + 4 task starts + 4 todos + 16 tools, first 10 shown.
-        assert_eq!(count(&html, "<li data-category="), 10);
-        assert!(html.contains("Showing 2 of 5 prompts"));
         assert!(html.contains("Showing 2 of 4 tasks"));
+        // Signal view: 5 prompt chapters, 4 task starts and one burst for the 16 tool
+        // calls; todo creation is bookkeeping and stays out.
+        assert_eq!(count(&html, "class=\"signal-chapter\""), 5);
+        assert!(html.contains("16 tool calls · Bash 16"));
+        assert!(html.contains("Task started: Task 3"));
+        let timeline =
+            &html[html.find("id=\"timeline\"").unwrap()..html.find("session-aside").unwrap()];
+        assert!(!timeline.contains("Todo of task 1"));
+        assert!(html.contains("Showing 10 of 10 entries"));
+        // Newest first by default: the latest prompt's chapter leads, and the
+        // order toggle restores source order without losing the view.
+        assert!(timeline.find(">P5<").unwrap() < timeline.find(">P1<").unwrap());
+        assert!(html.contains("Signal view, newest first"));
+        let decoded = html.replace("&#x2F;", "/").replace("&amp;", "&");
+        assert!(decoded.contains(
+            "href=\"/workflow?session_id=s&order=oldest&return_to=%2Fworkflow#timeline\""
+        ));
+        let oldest = render_session(
+            &session,
+            &WorkflowQuery {
+                order: Some("oldest".into()),
+                ..query.clone()
+            },
+        );
+        assert!(oldest.find(">P1<").unwrap() < oldest.find(">P5<").unwrap());
+        assert!(
+            oldest.contains("name=\"order\" value=\"oldest\""),
+            "filters keep the order"
+        );
+        assert!(oldest.contains("⇅ Newest first"));
+        // Prompts open their chapter instead of a separate list.
+        assert!(!html.contains("class=\"row-item prompt-row\""));
+        assert!(html.contains("Prompt number 4"));
+        // Raw events keep the full list, ten at a time.
+        query.view = Some("all".into());
+        let html = render_session(&session, &query);
+        assert_eq!(count(&html, "<li data-category="), 10);
         assert!(html.contains("Showing 10 of 29 events"));
+        // Raw events also lead with the latest: the last tool return is at the top.
+        let raw = &html[html.find("id=\"timeline-list\"").unwrap()..];
+        assert!(
+            raw.find("2026-10-02T00:35:00Z").unwrap() < raw.find("2026-10-02T00:34:00Z").unwrap()
+        );
         // Attribute values are escaped (`/` as `&#x2F;`); compare the decoded URLs.
         let decoded = html.replace("&#x2F;", "/").replace("&amp;", "&");
         assert!(decoded.contains(
-            "data-more-src=\"/workflow/items?session_id=s&list=prompts&offset=2&limit=5"
+            "data-more-src=\"/workflow/items?session_id=s&view=all&list=timeline&offset=10&limit=20"
         ));
-        // Without scripts the control reloads with a longer list and keeps the other sizes.
+        // Without scripts the control reloads with a longer list and keeps the view.
         assert!(decoded.contains(
-            "href=\"/workflow?session_id=s&show_prompts=5&return_to=%2Fworkflow#prompts\""
+            "href=\"/workflow?session_id=s&view=all&show_events=29&return_to=%2Fworkflow#timeline\""
         ));
         // Tasks are numbered in the order they started, and details wait until opened.
-        let tasks =
-            &html[html.find("id=\"tasks\"").unwrap()..html.find("id=\"timeline\"").unwrap()];
+        let tasks = &html[html.find("id=\"tasks\"").unwrap()..];
         assert!(tasks.find("Task 1").unwrap() < tasks.find("Task 2").unwrap());
-        assert!(!tasks.contains("Task 3"));
         assert!(tasks.contains("Open task details"));
         assert!(!html.contains("Revision history"));
     }
@@ -1728,6 +2584,7 @@ mod tests {
 
         query.list = Some("timeline".into());
         query.offset = Some(10);
+        query.view = Some("all".into());
         let body = workflow_fragment(&session, &query).unwrap();
         assert_eq!(
             count(body["html"].as_str().unwrap(), "<li data-category="),
@@ -1754,6 +2611,7 @@ mod tests {
         let mut query = WorkflowQuery {
             session_id: Some("s".into()),
             event_category: Some("todo".into()),
+            view: Some("all".into()),
             ..WorkflowQuery::default()
         };
         assert_eq!(timeline(&session, &query).len(), 4);
