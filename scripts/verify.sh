@@ -189,10 +189,38 @@ check_go_format() {
   test -z "$out"
 }
 
+# Shell scripts that belong to this project, NUL-separated. Inside a git work tree the list
+# comes from git (tracked plus untracked-but-not-ignored files), so ignored virtualenvs and
+# nested repositories are skipped the same way git skips them. Outside git, fall back to a
+# pruned find. Cached database and dependency directories are excluded in both modes.
+list_shell_files() {
+  # shellcheck disable=SC2016  # the quoted script below runs under the inner sh
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files -z --cached --others --exclude-standard -- '*.sh' 'scripts/harness' 2>/dev/null
+  else
+    find . \
+      \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune \
+      -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -print0
+  fi | xargs -0 sh -c '
+    for f; do
+      case "/$f" in
+        */.harness-db/*|*/.venv/*|*/vendor/*|*/node_modules/*|*/target/*|*/.git/*) continue ;;
+      esac
+      [ -f "$f" ] && printf "%s\0" "$f"
+    done
+  ' _
+}
+
 has_shell_files() {
-  find . \
-    \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune \
-    -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -print -quit | grep -q .
+  [ -n "$(list_shell_files | tr '\0' x | head -c 1)" ]
+}
+
+shellcheck_shell_files() {
+  list_shell_files | xargs -0 sh -c '[ "$#" -eq 0 ] || exec shellcheck "$@"' _
+}
+
+syntax_check_shell_files() {
+  list_shell_files | xargs -0 sh -c '[ "$#" -eq 0 ] || exec sh -n "$@"' _
 }
 
 # Run this harness's own regression tests when verifying the harness itself.
@@ -347,7 +375,7 @@ verify_lint() {
 
   if has_shell_files; then
     if has_cmd shellcheck; then
-      run_check "bash:shellcheck" find . \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec shellcheck {} +
+      run_check "bash:shellcheck" shellcheck_shell_files
     else
       mark_skip "shell scripts found, but shellcheck is unavailable"
     fi
@@ -454,7 +482,7 @@ verify_test() {
   fi
 
   if has_shell_files; then
-    run_check "bash:syntax" find . \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec sh -n {} +
+    run_check "bash:syntax" syntax_check_shell_files
     ran_any=1
   fi
 
