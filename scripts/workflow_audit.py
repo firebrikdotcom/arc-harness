@@ -11,6 +11,7 @@ import re
 import time
 import shlex
 import sqlite3
+import subprocess
 import sys
 import uuid
 from audit_transport import ROOT, emit, enabled, flush
@@ -159,6 +160,76 @@ def runtime_metadata(sid: str, context: dict, payload: dict | None = None, agent
     if changed:
         record("session_updated", sid, {}, **changed)
         context.update(changed)
+    herdr_metadata(sid, context, payload)
+
+
+# Secrets that commonly appear in commands: key=value pairs, auth headers,
+# credentials in URLs and long opaque tokens. Matches are replaced, not dropped,
+# so the label still shows the shape of the command.
+SECRET_PATTERNS = (
+    (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 ***"),
+    (re.compile(r"(?i)\b([\w.-]*(?:key|token|secret|passw(?:or)?d|pwd|auth|credential|cookie|session)[\w.-]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\$\([^)]*\)|[^\s;&|]+)"), r"\1\2***"),
+    (re.compile(r"(?i)(?<!\S)(-u|-p|--user|--pass\w*|--[\w-]*(?:token|secret|key|auth)[\w-]*)(\s+)(\"[^\"]*\"|'[^']*'|[^\s;&|]+)"), r"\1\2***"),
+    (re.compile(r"://[^/\s:@]+:[^/\s@]+@"), "://***@"),
+    (re.compile(r"\b(?:sk|pk|rk|ghp|gho|ghs|ghu|github_pat|xox[abprs]|AKIA|ASIA|glpat|npm)[-_][A-Za-z0-9_-]{8,}"), "***"),
+    (re.compile(r"\b(?=[A-Za-z0-9+/_=-]*\d)(?=[A-Za-z0-9+/_=-]*[A-Za-z])[A-Za-z0-9+/_=-]{32,}\b"), "***"),
+)
+
+
+def redact(text: str) -> str:
+    for pattern, replacement in SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def tool_label(tool: str, tool_input) -> str | None:
+    """A short, redacted line saying what a tool call did: the agent's own
+    description of a command, otherwise the command itself, or the file name
+    (never the folder) for file tools. File contents and patches are never kept."""
+    if not isinstance(tool_input, dict):
+        return None
+    text = lambda key: tool_input.get(key) if isinstance(tool_input.get(key), str) else ""
+    label = ""
+    if tool in ("Bash", "shell", "exec_command", "local_shell", "container.exec", "BashOutput"):
+        command = tool_input.get("command", tool_input.get("cmd"))
+        if isinstance(command, list):
+            command = " ".join(str(part) for part in command)
+        label = text("description") or (command if isinstance(command, str) else "")
+    elif tool in ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "view_image"):
+        path = text("file_path") or text("notebook_path") or text("path")
+        label = os.path.basename(path.rstrip("/"))
+    elif tool == "apply_patch":
+        patch = text("input") or text("patch")
+        names = re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.M)
+        label = ", ".join(dict.fromkeys(os.path.basename(name.strip()) for name in names))
+    elif tool in ("Grep", "Glob"):
+        label = text("pattern")
+    elif tool in ("Agent", "Task"):
+        label = text("description")
+    label = " ".join(redact(label).split())
+    return label[:157] + "..." if len(label) > 160 else label or None
+
+
+def herdr_metadata(sid: str, context: dict, payload: dict) -> None:
+    # Read the Herdr tab label at start and on each prompt so renames show up.
+    tab_id = os.environ.get("HERDR_TAB_ID", "")
+    if not re.fullmatch(r"[A-Za-z0-9:_-]{1,64}", tab_id):
+        return
+    if context.get("herdr_tab") and payload.get("hook_event_name") not in ("SessionStart", "UserPromptSubmit"):
+        return
+    try:
+        result = subprocess.run([os.environ.get("HERDR_BIN_PATH") or "herdr", "tab", "get", tab_id],
+            capture_output=True, text=True, timeout=1, check=False)
+        label = json.loads(result.stdout)["result"]["tab"]["label"]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return
+    if not isinstance(label, str) or not label.strip():
+        return
+    label = " ".join(label.split())[:200]
+    # A separate event keeps other metadata accepted by servers that predate this field.
+    if context.get("herdr_tab") != label:
+        record("session_updated", sid, {}, herdr_tab=label)
+        context["herdr_tab"] = label
 
 
 def check_record(sid: str, context: dict, kind: str, path: Path) -> None:
@@ -239,13 +310,16 @@ def hook(agent: str | None = None) -> int:
                 facts = {"tool_name": tool, "source": event}
                 if call_id:
                     facts["tool_call_id"] = call_id
+                label = tool_label(tool, payload.get("tool_input"))
                 pending = context.setdefault("pending_tools", {})
                 if event == "PreToolUse":
                     if call_id:
-                        pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "todo_id": context.get("active_todo_id"), "tool_name": tool}
+                        pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "todo_id": context.get("active_todo_id"), "tool_name": tool, "label": label}
                         # Bound state when a runtime never emits completion hooks.
                         while len(pending) > 1000:
                             pending.pop(next(iter(pending)))
+                    if label:
+                        facts["tool_label"] = label
                     record("tool_started", sid, context, **facts, outcome="running")
                 else:
                     response = payload.get("tool_response")
@@ -264,6 +338,9 @@ def hook(agent: str | None = None) -> int:
                         binding = {"task_id": start["task_id"]}
                         if start.get("todo_id"):
                             facts["todo_id"] = start["todo_id"]
+                        label = label or start.get("label")
+                    if label:
+                        facts["tool_label"] = label
                     if active_process:
                         facts["process_id"] = str(process)
                     record("tool_failed" if failed else "tool_completed", sid, binding,

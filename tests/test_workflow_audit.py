@@ -45,6 +45,8 @@ class WorkflowTests(unittest.TestCase):
             "HARNESS_AUDIT_OUTBOX":str(self.base / "outbox.sqlite"),
             "HARNESS_WORKFLOW_STATE":str(self.base / "state.sqlite"),
             "HARNESS_SESSION_ID":"test-session", "CLAUDE_ENV_FILE":""}
+        for key in [k for k in self.env if k.startswith("HERDR_")]:
+            del self.env[key]
     def config(self, jev, workflow, prompts=False):
         (self.base / "settings.json").write_text(json.dumps({"jev":jev,"workflow":workflow,"workflow_prompts":prompts}))
     def run_cli(self, *args, payload=None):
@@ -89,7 +91,9 @@ class WorkflowTests(unittest.TestCase):
         self.run_cli("todo", "exempt", "--session-id", "s", "--reason", "Metadata-only fixture with no gated execution")
         self.run_cli("outcome", "--session-id", "s", "--status", "completed", "--description", "All checks passed")
         events = Handler.events + self.queued()
-        self.assertNotIn("PRIVATE", json.dumps(events))
+        # Prompts and tool output stay out; the command is kept only as a redacted label.
+        self.assertNotIn("PRIVATE PROMPT", json.dumps(events))
+        self.assertNotIn("PRIVATE OUTPUT", json.dumps(events))
         tasks = {e["payload"]["task_id"] for e in events if "task_id" in e["payload"]}
         self.assertEqual(len(tasks), 1)
         self.assertTrue(all(e["payload"]["session_id"] == "s" for e in events))
@@ -116,7 +120,46 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("started_at",rows[1])
         self.assertNotIn("duration_ms", rows[2])
         self.assertEqual(rows[2]["process_id"], "123")
-        self.assertNotIn("PRIVATE", json.dumps(self.queued()))
+        # The command is kept as a short label; tool output never is.
+        self.assertEqual(rows[1]["tool_label"], "PRIVATE COMMAND")
+        self.assertNotIn("PRIVATE OUTPUT", json.dumps(self.queued()))
+
+    def test_tool_labels_describe_calls_without_secrets_or_file_contents(self):
+        import workflow_audit as audit
+        label = audit.tool_label
+        self.assertEqual(label("Bash", {"command": "make test", "description": "Run the test suite"}), "Run the test suite")
+        self.assertEqual(label("exec_command", {"cmd": ["git", "status"]}), "git status")
+        self.assertEqual(label("Read", {"file_path": "/home/me/project/src/ui.rs"}), "ui.rs")
+        self.assertEqual(label("Write", {"file_path": "/x/notes.md", "content": "SECRET BODY"}), "notes.md")
+        self.assertEqual(label("apply_patch", {"input": "*** Begin Patch\n*** Update File: src/a.rs\n+SECRET BODY\n*** Add File: b/c.html\n"}), "a.rs, c.html")
+        self.assertIsNone(label("mcp__browser__navigate", {"url": "https://example.com"}))
+        self.assertIsNone(label("Bash", "not a dict"))
+        for command, kept, hidden in [
+            ('curl -H "Authorization: Bearer abcdefgh12345678" https://user:pw@host.io', "curl -H", ["abcdefgh12345678", "user:pw"]),
+            ("export API_KEY=sk-abc123def456ghi; ls", "export API_KEY=***; ls", ["sk-abc"]),
+            ("mysql -u root -p hunter2 db", "mysql -u *** -p *** db", ["hunter2"]),
+            ("curl --api-key abc123xyz https://x", "curl --api-key ***", ["abc123xyz"]),
+            ("TOKEN=$(cat secret.txt) npm publish", "TOKEN=*** npm publish", ["secret.txt"]),
+            ("echo ghp_0123456789abcdefABCDEF", "echo ***", ["ghp_"]),
+            ("echo 0123456789abcdef0123456789abcdef01234567", "echo ***", ["0123456789abcdef"]),
+            ("git push --force-with-lease", "git push --force-with-lease", []),
+        ]:
+            result = label("Bash", {"command": command})
+            self.assertIn(kept, result)
+            for secret in hidden:
+                self.assertNotIn(secret, result)
+        long = label("Bash", {"command": "echo " + "word " * 100})
+        self.assertLessEqual(len(long), 160)
+        self.assertTrue(long.endswith("..."))
+
+    def test_tool_label_follows_the_call_from_start_to_failure(self):
+        def event(kind, response=None):
+            self.run_cli("hook", payload={"hook_event_name":kind,"session_id":"s","tool_name":"Bash","tool_use_id":"call-a","tool_input":{"command":"make test","description":"Run the test suite"},"tool_response":response or {}})
+        event("PreToolUse")
+        event("PostToolUseFailure", {"exit_code":2})
+        rows = {e["event_type"]: e["payload"] for e in self.queued() if e["event_type"].startswith("workflow.tool_")}
+        self.assertEqual(rows["workflow.tool_started"]["tool_label"], "Run the test suite")
+        self.assertEqual(rows["workflow.tool_failed"]["tool_label"], "Run the test suite")
 
     def gate(self, event, code=0, **fields):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py"), "codex"], input=json.dumps({"session_id":"policy-session","hook_event_name":event,"cwd":str(ROOT),**fields}), env=self.env, text=True, capture_output=True)
@@ -146,7 +189,7 @@ class WorkflowTests(unittest.TestCase):
         self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"touch PRIVATE_PATH"})
         self.policy("confirm","--reason","Steering does not change the work")
         self.gate("PreToolUse",tool_name="Bash",tool_input={"command":"PRIVATE COMMAND"})
-        self.assertNotIn("PRIVATE",json.dumps(self.queued()))
+        self.assertNotIn("PRIVATE PROMPT",json.dumps(self.queued()))
         self.gate("Stop",2)
 
     def test_plan_revisions_remove_items_with_reasons_and_completion_needs_fresh_checks(self):
@@ -256,6 +299,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(metadata[-1]["cwd"], "/example/current directory")
         self.assertNotIn("agent", metadata[-1])
         self.assertNotIn("PRIVATE PROMPT", json.dumps(self.queued()))
+
+    def test_herdr_tab_label_is_recorded_and_refreshed_on_rename(self):
+        label = self.base / "label"
+        label.write_text("Audit redesign")
+        fake = self.base / "herdr"
+        fake.write_text("#!/bin/sh\n[ \"$1 $2 $3\" = \"tab get wD:tK\" ] || exit 1\n"
+            "printf '{\"result\":{\"tab\":{\"label\":\"%s\",\"tab_id\":\"wD:tK\"}}}' \"$(cat " + str(label) + ")\"\n")
+        fake.chmod(0o755)
+        self.env.update({"HERDR_TAB_ID":"wD:tK", "HERDR_BIN_PATH":str(fake)})
+        tabs = lambda: [e["payload"]["herdr_tab"] for e in self.queued() if "herdr_tab" in e["payload"]]
+        self.run_cli("hook", payload={"hook_event_name":"SessionStart","session_id":"s"})
+        self.assertEqual(tabs(), ["Audit redesign"])
+        self.run_cli("hook", payload={"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash"})
+        self.run_cli("hook", payload={"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"PRIVATE PROMPT"})
+        self.assertEqual(tabs(), ["Audit redesign"])
+        label.write_text("Renamed tab")
+        self.run_cli("hook", payload={"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"PRIVATE PROMPT"})
+        self.assertEqual(tabs(), ["Audit redesign", "Renamed tab"])
+        self.env["HERDR_TAB_ID"] = "bad id; rm"
+        self.run_cli("hook", payload={"hook_event_name":"SessionStart","session_id":"other"})
+        self.assertEqual(len(tabs()), 2)
 
     def test_wrong_session_transcript_does_not_supply_model_or_title(self):
         transcript = self.base / "wrong.jsonl"
