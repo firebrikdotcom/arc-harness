@@ -15,6 +15,9 @@ usage() {
   info "Usage: scripts/verify.sh [--project PATH]"
   info ""
   info "Runs verification sensors in PATH. Defaults to the current directory."
+  info "When every change since the upstream base is documentation (see"
+  info ".harness-docs-paths), only format and lint run; HARNESS_VERIFY_SCOPE=full"
+  info "forces every check."
 }
 
 info() {
@@ -124,6 +127,113 @@ run_category() {
     info "FAIL: required category '$category' ran no checks"
   elif is_required "$category" && [ "$failures" -eq "$failures_before" ]; then
     info "REQUIRED: $category satisfied"
+  fi
+}
+
+# Docs-only scope: when every changed file is documentation, typecheck, test
+# and build cannot be affected, so only format and lint run. Any doubt (no git,
+# no base, empty change set, one non-doc path) falls back to the full run.
+# Patterns come from .harness-docs-paths (one per line, `!` excludes) or the
+# defaults below; HARNESS_VERIFY_SCOPE=full forces the full run.
+SCOPE=full
+SCOPE_REASON=""
+DEFAULT_DOCS_PATHS='*.md
+*.mdx
+*.markdown
+!AGENTS.md
+!*/AGENTS.md
+!CLAUDE.md
+!*/CLAUDE.md
+!SKILL.md
+!*/SKILL.md'
+
+docs_patterns() {
+  if [ -f .harness-docs-paths ]; then
+    sed 's/#.*//' .harness-docs-paths
+  else
+    printf '%s\n' "$DEFAULT_DOCS_PATHS"
+  fi
+}
+
+is_doc_path() {
+  path="$1"
+  matched=1
+  for pattern in $(docs_patterns); do
+    case "$pattern" in
+      !*)
+        # shellcheck disable=SC2254
+        case "$path" in ${pattern#!}) return 1 ;; esac
+        ;;
+      *)
+        # shellcheck disable=SC2254
+        case "$path" in $pattern) matched=0 ;; esac
+        ;;
+    esac
+  done
+  return "$matched"
+}
+
+changed_paths() {
+  # Committed and uncommitted tracked changes since the base, with renames
+  # split into old and new paths, plus untracked files.
+  git diff --name-only --no-renames "$1" -- && git ls-files --others --exclude-standard
+}
+
+detect_scope() {
+  # Patterns are matched with case, never expanded against the project's files.
+  set -f
+  detect_scope_paths
+  set +f
+}
+
+detect_scope_paths() {
+  SCOPE=full
+  if [ "${HARNESS_VERIFY_SCOPE:-}" = "full" ]; then
+    SCOPE_REASON="forced by HARNESS_VERIFY_SCOPE=full"
+    return 0
+  fi
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SCOPE_REASON="not a git work tree"
+    return 0
+  fi
+  base_ref=$(git rev-parse --verify -q '@{upstream}' 2>/dev/null || git rev-parse --verify -q refs/remotes/origin/HEAD 2>/dev/null || :)
+  merge_base=""
+  if [ -n "$base_ref" ]; then
+    merge_base=$(git merge-base HEAD "$base_ref" 2>/dev/null || :)
+  fi
+  if [ -z "$merge_base" ]; then
+    SCOPE_REASON="no upstream or origin/HEAD base"
+    return 0
+  fi
+  if ! paths=$(changed_paths "$merge_base"); then
+    SCOPE_REASON="could not list changed files"
+    return 0
+  fi
+  if [ -z "$paths" ]; then
+    SCOPE_REASON="no changed files since base"
+    return 0
+  fi
+  count=0
+  old_ifs=$IFS
+  IFS='
+'
+  for path in $paths; do
+    count=$((count + 1))
+    if ! is_doc_path "$path"; then
+      IFS=$old_ifs
+      SCOPE_REASON="non-doc change: $path"
+      return 0
+    fi
+  done
+  IFS=$old_ifs
+  SCOPE=docs-only
+  SCOPE_REASON="$count changed file(s), all documentation"
+}
+
+skip_category_for_docs() {
+  mark_skip "$1: docs-only change"
+  if is_required "$1"; then
+    info "REQUIRED: $1 not applicable to a docs-only change"
   fi
 }
 
@@ -273,6 +383,7 @@ write_run_record() {
     printf 'RAN=%s\n' "$ran"
     printf 'SKIPPED=%s\n' "$skipped"
     printf 'FAILURES=%s\n' "$failures"
+    printf 'SCOPE=%s\n' "$SCOPE"
     printf 'EXIT=%s\n' "$exit_code"
   } > "$record.tmp.$$"
   mv "$record.tmp.$$" "$record"
@@ -545,11 +656,20 @@ fi
 
 jev_checkpoint verify-start
 
+detect_scope
+info "Scope: $SCOPE ($SCOPE_REASON)"
+
 run_category format verify_format
 run_category lint verify_lint
-run_category typecheck verify_typecheck
-run_category test verify_test
-run_category build verify_build
+if [ "$SCOPE" = "docs-only" ]; then
+  skip_category_for_docs typecheck
+  skip_category_for_docs test
+  skip_category_for_docs build
+else
+  run_category typecheck verify_typecheck
+  run_category test verify_test
+  run_category build verify_build
+fi
 
 info ""
 info "Verification summary: ran=$ran skipped=$skipped failures=$failures"

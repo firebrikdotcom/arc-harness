@@ -633,3 +633,9 @@ Final isolation verification passed the complete harness command (3 checks, 0 fa
 
 ## Publish and synchronize native session isolation
 Publish the verified session-isolation candidate on the existing workflow branch and synchronize the clean Resendes primary checkout through Git. Verify the exact candidate on both machines, refresh platform-specific installed hooks, and confirm clean source/commit parity. Preserve machine-local databases, credentials, other worktrees and unrelated hook groups. Completion evidence is kept in local verification/review records and the workflow task.
+
+
+## Docs-only verification scope
+`scripts/verify.sh` now inspects what changed before choosing checks. When every file changed since the merge base with `@{upstream}` (else `origin/HEAD`) matches the docs patterns, it runs only format and lint, skips typecheck/test/build (required ones reported as not applicable), and writes `SCOPE=docs-only` to the run record. It falls back to the full run with no git, no base, no changes, any non-doc path (renames split), or `HARNESS_VERIFY_SCOPE=full`. Defaults are `*.md`, `*.mdx`, `*.markdown` minus AGENTS.md/CLAUDE.md/SKILL.md; targets override with `.harness-docs-paths`. Motivation: a single-ADR Dollarwise change was blocked by full PHP tests and a production build that need machine-local services and secrets.
+
+Validation: `tests/verify-docs-scope.sh` covers 11 cases (uncommitted/untracked docs, committed docs, required test, docs+code, code renamed to markdown, AGENTS.md, no upstream, no changes, forced full, custom paths in and out). Full harness verify passed (3 checks, 0 failures) and review finished; the Dollarwise ENG-892 ADR worktree now verifies as docs-only (lint and shellcheck pass). Committed on `feature/workflow-audit` and synchronized to the Resendes and Mac mini checkouts.

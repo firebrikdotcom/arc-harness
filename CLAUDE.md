@@ -88,7 +88,7 @@ A task is complete only when:
 - Verification result is recorded in `progress.md`.
 - The final response cites exact commands and outcomes.
 
-`scripts/verify.sh` detects non-rewriting format checks, lint, typecheck, tests, and builds. `.harness-required-checks` or `HARNESS_REQUIRED_CHECKS` can require any category; a required category that runs no check fails. The verify and review scripts write their gate records under `.harness-db/records/`.
+`scripts/verify.sh` detects non-rewriting format checks, lint, typecheck, tests, and builds. `.harness-required-checks` or `HARNESS_REQUIRED_CHECKS` can require any category; a required category that runs no check fails. A docs-only change runs just format and lint (`SCOPE=docs-only` in the record). The verify and review scripts write their gate records under `.harness-db/records/`.
 
 <!-- harness-cli:start -->
 ## Harness Phases
