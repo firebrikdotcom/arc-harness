@@ -431,6 +431,17 @@ create_run() {
   [ "$_archived" = "0" ] || info "Retention: archived $_archived finished run(s) beyond the newest ${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}."
 }
 
+# run_ids  The run directories in RUNS_DIR (named <UTC timestamp>-<pid>).
+run_ids() {
+  [ -d "$RUNS_DIR" ] || return 0
+  for _path in "$RUNS_DIR"/*; do
+    _name=${_path##*/}
+    case "$_name" in
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*) [ -d "$_path" ] && printf '%s\n' "$_name" ;;
+    esac
+  done
+}
+
 # prune_runs KEEP DRY_RUN  Archives runs beyond the newest KEEP into
 # RUNS_DIR/archive/<id>.tar.gz. A run some session still has active or paused is
 # never archived. Prints the number of runs archived (or that would be).
@@ -442,7 +453,7 @@ prune_runs() {
   case "$_keep" in ''|*[!0-9]*) _keep=$DEFAULT_RETAIN_RUNS ;; esac
   _live=$(cat "$RUNS_DIR/current" "$RUNS_DIR"/sessions/*/current 2>/dev/null | sort -u)
   _index=0
-  for _id in $(ls -1 "$RUNS_DIR" | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9]+$' | sort -r); do
+  for _id in $(run_ids | sort -r); do
     _index=$((_index + 1))
     [ "$_index" -gt "$_keep" ] || continue
     _status=$(sed -n 's/^RUN_STATUS=//p' "$RUNS_DIR/$_id/state" 2>/dev/null | tail -n 1)
@@ -481,8 +492,7 @@ cmd_prune() {
 # run or the latest one, its contract, any pause, the last steps, and the map.
 
 latest_run_id() {
-  [ -d "$RUNS_DIR" ] || return 0
-  ls -1 "$RUNS_DIR" | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9]+$' | sort | tail -n 1
+  run_ids | sort | tail -n 1
 }
 
 cmd_brief() {

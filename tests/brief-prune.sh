@@ -57,7 +57,7 @@ for n in 1 2 3; do
   HARNESS_SESSION_ID="s$n" h abort "finished fixture" 2>/dev/null || :
   sleep 1
 done
-runs() { ls -1 "$HARNESS_DB_ROOT/runs" | grep -cE '^[0-9]{8}T'; }
+runs() { find "$HARNESS_DB_ROOT/runs" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*T*Z-*' | wc -l | tr -d ' '; }
 [ "$(runs)" -eq 4 ] || fail "expected 4 runs before pruning, got $(runs)"
 h prune --keep 1 --dry-run || fail "dry run failed"
 grep -q 'Would archive 2 run' "$OUT" || fail "dry run should count 2 archivable runs (the paused live run is kept)"

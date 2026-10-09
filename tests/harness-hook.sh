@@ -111,6 +111,7 @@ expect_output "fed by the post-tool hook"
 # Shell writes to the guard are judged by their real targets, however the path is spelled.
 bash_call 2 'echo x > scripts/hooks/require-phase.sh'
 expect_output "write target"
+# shellcheck disable=SC2016 # the variable is part of the command under test, not ours to expand
 bash_call 2 'D=.; printf x >> "$D/scripts/hooks/require-phase.sh"'
 bash_call 2 'cd scripts && cp /tmp/x hooks/require-phase.sh'
 bash_call 2 'sed -i s/a/b/ schemas/denylist.default'

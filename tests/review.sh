@@ -76,6 +76,7 @@ grep -q '"verdict":"approve"' "$RECORDS/review-findings.json" || fail "approving
 
 # A malformed reviewer answer is not stored.
 rm -f "$RECORDS/review-findings.json"
+# shellcheck disable=SC2016 # "$2" belongs to the generated reviewer script
 printf '#!/usr/bin/env sh\nprintf "%%s" "{not json" > "$2"\n' > "$REVIEWER"
 HARNESS_REVIEWER_CMD="$REVIEWER \"\$1\" \"\$2\"" "$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || true
 expect_output 'malformed'
