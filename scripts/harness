@@ -625,6 +625,17 @@ require_gate_record() {
     info "Fix the failures and run $_cmd again."
     exit "$EXIT_PHASE"
   fi
+  # The record proves the files as they were then; any project edit since voids it.
+  _tree=$(record_get "$_file" TREE_HASH)
+  _project=$(record_get "$_file" PROJECT_ROOT)
+  if [ -n "$_tree" ] && [ "$_tree" != "none" ] && [ -d "$_project" ]; then
+    _now_tree=$(sh "$SCRIPT_DIR/tree-hash.sh" "$_project")
+    if [ "$_now_tree" != "$_tree" ]; then
+      info "FAIL: cannot mark $1 done: project files changed after the last $_kind run."
+      info "Run $_cmd again on the current files."
+      exit "$EXIT_PHASE"
+    fi
+  fi
 
   info "Gate: $_kind record $(record_get "$_file" RECORD_AT) exit=0 head=$(record_get "$_file" GIT_HEAD)"
   log_event "$1 gate: $_kind record at $(record_get "$_file" RECORD_AT) head=$(record_get "$_file" GIT_HEAD)"

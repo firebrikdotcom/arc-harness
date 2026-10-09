@@ -394,6 +394,41 @@ bootstrap_php
 bootstrap_go
 bootstrap_rust
 
+package_script() {
+  [ -f "$1" ] && grep -q "\"$2\"[[:space:]]*:" "$1"
+}
+
+# record_required_checks  Holds a registered target to the check categories it
+# has tooling for, so verification cannot pass with nothing checked. The record
+# lives in the target's database, never in the project; a project file
+# (.harness-required-checks) or an existing record wins.
+record_required_checks() {
+  [ -n "$TARGET_DIR" ] || return 0
+  [ ! -f "$PROJECT_ROOT/.harness-required-checks" ] || return 0
+  _record=$TARGET_DIR/db/required-checks
+  [ ! -f "$_record" ] || return 0
+  _categories=""
+  if make_has_target test || package_script package.json test || package_script composer.json test \
+    || [ -f go.mod ] || [ -f Cargo.toml ]; then
+    _categories="test"
+  fi
+  if make_has_target lint || package_script package.json lint || package_script composer.json lint \
+    || [ -f go.mod ] || [ -f Cargo.toml ]; then
+    _categories="$_categories lint"
+  fi
+  [ -n "$_categories" ] || return 0
+  mkdir -p "$TARGET_DIR/db"
+  {
+    printf '%s\n' "# Detected by scripts/init.sh; edit or delete to change. allow-empty accepts a run with no checks."
+    for _category in $_categories; do
+      printf '%s\n' "$_category"
+    done
+  } > "$_record"
+  [ "$AUTO" = "1" ] || info "Required checks recorded for this target: $_categories ($_record)"
+}
+
+record_required_checks
+
 if [ "$AUTO" = "1" ]; then
   auto_mode
   exit $?
