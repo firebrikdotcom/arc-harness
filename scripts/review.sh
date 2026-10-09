@@ -17,6 +17,7 @@ usage() {
   info "packet (task contract, verification output, diff) for an independent reviewer."
   info "With HARNESS_REVIEWER_CMD set, it runs that reviewer itself:"
   info "  sh -c \"\$HARNESS_REVIEWER_CMD\" reviewer PACKET FINDINGS_OUT"
+  info "The diff includes commits since HARNESS_REVIEW_BASE, else since the run's plan."
   info "Otherwise hand the packet to a reviewer in a fresh context and submit its JSON"
   info "with: harness review submit FILE. 'harness review done' requires an approving"
   info "verdict for the current files (schemas/review-findings.schema.json)."
@@ -89,16 +90,36 @@ if [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ] && command -v python3 >/dev/null 2>
   done
 fi
 
-# show_patch ROOT LABEL  Prints status, the full staged and unstaged patch, and
-# every untracked file as a new-file diff.
+records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
+current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
+run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
+# Committed work belongs in the review too: from HARNESS_REVIEW_BASE, else the
+# commit the run's plan was closed on (CONTRACT_BASE).
+review_base=${HARNESS_REVIEW_BASE:-}
+if [ -z "$review_base" ] && [ -n "$run_id" ] && [ -f "$HARNESS_DB_ROOT/runs/$run_id/state" ]; then
+  review_base=$(sed -n 's/^CONTRACT_BASE=//p' "$HARNESS_DB_ROOT/runs/$run_id/state" | tail -n 1)
+fi
+
+# show_patch ROOT LABEL [BASE]  Prints status, the commits and committed patch
+# since BASE, the full staged and unstaged patch, and every untracked file as a
+# new-file diff.
 show_patch() {
   root="$1"
   label="$2"
+  base="${3:-}"
   info ""
   info "==> $label changes"
   if ! command -v git >/dev/null 2>&1 || ! git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     info "SKIP: git is unavailable or $label root is not a git worktree."
     return 0
+  fi
+  if [ -n "$base" ] && git -C "$root" rev-parse --verify -q "$base^{commit}" >/dev/null; then
+    info "--- $label commits since $base"
+    git -C "$root" --no-pager log --oneline "$base..HEAD" -- .
+    info ""
+    info "--- $label patch: committed since $base"
+    git -C "$root" --no-pager diff "$base" HEAD -- .
+    info ""
   fi
   git -C "$root" status --short -- .
   info ""
@@ -116,15 +137,12 @@ show_patch() {
 }
 
 {
-  show_patch "$PROJECT_ROOT" "target"
+  show_patch "$PROJECT_ROOT" "target" "$review_base"
   if [ "$PROJECT_ROOT" != "$HARNESS_ROOT" ]; then
     show_patch "$HARNESS_ROOT" "harness"
   fi
 } | tee "$WORK/patch.txt"
 
-records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
-current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
-run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
 tree_hash=$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")
 contract="$HARNESS_DB_ROOT/runs/$run_id/task.json"
 if ! mkdir -p "$records_dir" 2>/dev/null; then
