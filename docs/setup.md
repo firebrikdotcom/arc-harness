@@ -83,7 +83,7 @@ Optional harness variables:
 - `HARNESS_BUDGET_REPEAT_FAILURES`: identical failures of one command in a row before the run pauses; default `2`, `0` disables.
 - `HARNESS_RUN_IDLE_HOURS`: idle hours before a run is stale and refused; default `24`, `0` disables.
 - `HARNESS_RETAIN_RUNS`: runs kept per database before `plan start` archives older finished ones; default `50`.
-- `HARNESS_CONFIRM_TTY`: the terminal `harness review submit` reads its confirmation from; default `/dev/tty`. Tests point it at a file; agent commands may not assign it.
+- `HARNESS_CONFIRM_TTY`: the terminal `harness review submit` reads its confirmation from; default `/dev/tty`. Tests point it at a file. Never set it in the environment an agent starts from, and agent commands may not assign it.
 - `HARNESS_REVIEW_BASE`: commit the review packet's committed diff starts from; default the run's `CONTRACT_BASE`.
 - `HARNESS_CRITERION_TIMEOUT`: seconds each contract acceptance command may run at `build done`; default `900`.
 - `HARNESS_HOME`: the installed harness root for the guard-version check; defaults to the path `scripts/install-hooks.sh` records in `~/.config/harness/root`.
