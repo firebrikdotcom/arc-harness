@@ -123,6 +123,9 @@ if [ "$tool_name" = "Bash" ]; then
     *knowledge-trust.sh\ approve*)
       block "abort and knowledge-trust approve are human decisions. Ask the user to run them, e.g. with the ! prefix."
       ;;
+    harness\ failure*|*/scripts/harness\ failure*|scripts/harness\ failure*)
+      block "the repeated-failure counter is fed by the post-tool hook, not by tool calls."
+      ;;
     harness\ *|harness|*/scripts/harness\ *|*/scripts/harness|scripts/harness\ *|scripts/harness)
       exit 0
       ;;
