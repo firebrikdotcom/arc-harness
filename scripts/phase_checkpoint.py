@@ -868,8 +868,12 @@ def session_start(project: Path, db_root: Path, router: Path) -> str:
         path.unlink(missing_ok=True)
     observed = route.get("observed_recommendation") or route.get("recommendation")
     summary = advice.pilot(db_root)
-    return (f"Jev shadow route for this session: {observed} (source {route['source']}, shadow; existing rules decide). "
-            f"Pilot: {summary['labeled']}/{summary['target']} labeled shadow decisions.")
+    line = f"Jev shadow route for this session: {observed} (source {route['source']}, shadow; existing rules decide). "
+    if summary["labeled"] >= summary["target"]:
+        # Past the target, more shadow labels add nothing; the pilot needs a decision.
+        return line + (f"Pilot complete ({summary['labeled']} labeled, {summary['target']} needed): "
+                       "a human decides to promote or retire it from: harness advise --report")
+    return line + f"Pilot: {summary['labeled']}/{summary['target']} labeled shadow decisions."
 
 
 def main(argv: list[str] | None = None) -> int:

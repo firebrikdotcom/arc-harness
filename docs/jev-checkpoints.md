@@ -2,6 +2,18 @@
 
 Consider Jev at every meaningful decision point. Apply explicit instructions and deterministic evidence first; call Jev only for a bounded judgment that remains. Consideration is a guidance obligation, not an API call per action. The harness observes submitted checkpoints, not private reasoning or every interactive tool call.
 
+## Optional manual checkpoints
+
+The harness raises its own checkpoints at plan done, build start, verify, review, session start, and repeated commands, and labels them from the gate results that follow. These three manual calls are optional and stay in shadow mode (the answer is advice; permissions, failed checks, required checks, and completion gates still decide). Keep goals, facts, and choices redacted: no paths, source, question text, credentials, or personal data.
+
+- Before the first broad Grep or Glob in an unfamiliar target: `scripts/harness advise --family tool_selection --baseline grep --goal "locate the code for one task" --choice grep="targeted grep" --choice retrieval="one semantic retrieval first" --fact "target unfamiliar"`
+- Before settling a review finding's severity: `scripts/harness advise --family evidence_assessment --baseline minor --goal "grade one review finding" --choice blocker="blocks merge" --choice major="fix before handoff" --choice minor="follow-up" --fact "finding reproduced: yes"`
+- Before a handoff with unresolved failures or skipped checks: `scripts/harness advise --family handoff_assessment --baseline hand_off --goal "decide whether to hand off" --choice hand_off="hand off with the gap stated" --choice keep_working="fix first" --choice ask_user="user decision needed" --fact "failing checks: 1"`
+
+The `--baseline` and `--fact` values are examples: set `--baseline` to the choice you would make without asking and replace each `--fact` with the real redacted fact. Once the result is known, label the call: `scripts/harness advise --label CALL_ID --outcome OUTCOME --action-taken "..." --evidence "..."` (outcomes: correct, incorrect, over_escalated, under_escalated, unknown). `advise --pending` lists unlabeled calls and `advise --report` summarises them. Multi-question checkpoints and file outcomes use `advise --context CHECKPOINT.json` and `advise --record OUTCOME.json`.
+
+Once the pilot target is met, the session-start line asks for a decision instead of more labels: a human reads `scripts/harness advise --report` and promotes or retires the pilot.
+
 ## Where to consider it
 
 - `tool_selection`: choose the next permitted tool or read-only investigation step.

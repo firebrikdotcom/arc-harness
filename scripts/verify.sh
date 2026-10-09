@@ -71,6 +71,13 @@ if [ -z "$REQUIRED_CHECKS" ] && [ -f .harness-required-checks ]; then
   REQUIRED_CHECKS=$(sed 's/#.*//' .harness-required-checks | tr '\n' ' ')
   REQUIRED_CHECKS_SOURCE=".harness-required-checks"
 fi
+# scripts/init.sh records the categories it detected for a registered target in
+# the target's own database, so a target needs no tracked file to be held to them.
+if [ -z "$REQUIRED_CHECKS" ] && [ -f "$HARNESS_DB_ROOT/required-checks" ]; then
+  REQUIRED_CHECKS=$(sed 's/#.*//' "$HARNESS_DB_ROOT/required-checks" | tr '\n' ' ')
+  REQUIRED_CHECKS_SOURCE="$HARNESS_DB_ROOT/required-checks"
+fi
+REQUIRED_CHECKS=$(printf '%s' "$REQUIRED_CHECKS" | tr -s ' \t' '  ' | sed 's/^ //; s/ $//')
 
 is_required() {
   wanted="$1"
@@ -85,7 +92,7 @@ is_required() {
 validate_required_checks() {
   for required in $REQUIRED_CHECKS; do
     case "$required" in
-      format|lint|typecheck|test|build) ;;
+      format|lint|typecheck|test|build|allow-empty) ;;
       *)
         info "FAIL: unknown required check category: $required"
         exit 2
@@ -338,8 +345,10 @@ run_harness_tests() {
   status=0
   for test_file in tests/*.sh; do
     info "--> $test_file"
-    # Nested harness runs inside tests must not emit real Jev checkpoints.
-    if ! HARNESS_JEV_CHECKPOINTS=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' sh "$test_file"; then
+    # Nested harness runs inside tests must not emit real Jev checkpoints, and
+    # they model a human at a terminal, not the agent that may be running verify.
+    if ! HARNESS_JEV_CHECKPOINTS=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
+      CLAUDECODE='' CODEX_SANDBOX='' sh "$test_file"; then
       status=1
     fi
   done
@@ -369,6 +378,7 @@ write_run_record() {
   fi
   git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
   git_dirty=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | grep -c . || true)
+  tree_hash=$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")
   record="$records_dir/verify.state"
   current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
   run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
@@ -380,6 +390,7 @@ write_run_record() {
     printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
     printf 'GIT_HEAD=%s\n' "$git_head"
     printf 'GIT_DIRTY_FILES=%s\n' "$git_dirty"
+    printf 'TREE_HASH=%s\n' "$tree_hash"
     printf 'RAN=%s\n' "$ran"
     printf 'SKIPPED=%s\n' "$skipped"
     printf 'FAILURES=%s\n' "$failures"
@@ -669,6 +680,18 @@ else
   run_category typecheck verify_typecheck
   run_category test verify_test
   run_category build verify_build
+fi
+
+if [ "$ran" -eq 0 ]; then
+  if is_required allow-empty; then
+    info ""
+    info "NOTE: no checks ran; accepted because 'allow-empty' is declared ($REQUIRED_CHECKS_SOURCE)."
+  else
+    failures=$((failures + 1))
+    info ""
+    info "FAIL: no checks ran, so there is no evidence the change works."
+    info "Add a check (make test, a package.json script, ...) or declare 'allow-empty' in .harness-required-checks."
+  fi
 fi
 
 info ""

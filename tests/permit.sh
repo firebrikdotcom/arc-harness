@@ -104,7 +104,108 @@ allow_path 'docs/setup.md'
 allow_path '.env.example'
 allow_path "$HOME/.claude/projects/x/memory/note.md"
 allow_path 'scripts/verify.sh'
-allow_path '.harness-db/runs/x/state'
+# The harness database is written by the harness scripts, never by a tool call.
+deny_path '.harness-db/runs/x/state'
+deny_path '.harness-db/runs/x/task.json'
+deny_path ".harness-db/targets/abc/db/records/verify.state"
+# Unnormalised spellings resolve before the rules apply.
+deny_path "$HARNESS_ROOT_UNDER_TEST/docs/../scripts/hooks/require-phase.sh"
+deny_path "$HARNESS_ROOT_UNDER_TEST//scripts/hooks/require-phase.sh"
+deny_path "$HARNESS_ROOT_UNDER_TEST/./scripts/permit.py"
+
+# Writes are judged by their targets, however the command reaches them; each case
+# below is a bypass an independent review reproduced against the first version.
+H=scripts/hooks/require-phase.sh
+# Deleting a directory that contains the project deletes its guard too.
+PARENT_DIR=$(dirname "$HARNESS_ROOT_UNDER_TEST")
+# shellcheck disable=SC2016 # substitutions and variables are part of the commands under test
+for command in "rm -rf scripts/hooks" "rm -rf .harness-db/records" "rm -rf .harness-db" "mv $H /tmp/x" "chmod -x $H" \
+  "cp -t scripts/hooks /tmp/evil" "cp -r /tmp/evil scripts" "nice -n 5 rm -f $H" "pushd scripts && rm -f hooks/require-phase.sh" \
+  "env -C scripts rm hooks/require-phase.sh" "rm scripts/hook*/require-phase.sh" "rm scripts/{hooks,x}/require-phase.sh" \
+  "find scripts/hooks -delete" "find . -name '*.md' -delete" "echo $H | xargs rm" "git rm -f $H" "git checkout HEAD~3 -- $H" \
+  "perl -pi -e 's/a/b/' $H" "bash -ec 'rm -f $H'" "sh -xc 'echo > $H'" "eval 'rm -f $H'" \
+  "cp /tmp/evil $H # don't" "python3 -Ic \"open('$H','w')\"" "tar -xf /tmp/a.tar $H" "rm -rf $PARENT_DIR" \
+  'cd "$(chmod -x scripts/hooks/require-phase.sh)" && ls' 'D=.; printf x >> "$D/scripts/hooks/require-phase.sh"' \
+  'echo CAP_REPEAT_FAILURES=0 >> .harness-db/runs/x/state' 'cp /tmp/weak.json .harness-db/runs/x/task.json' \
+  'true && scripts/harness failure clear --command-key abc' 'scripts/harness review submit f.json' \
+  'HARNESS_REVIEWER_CMD=x scripts/review.sh' 'HARNESS_REQUIRED_CHECKS=allow-empty scripts/verify.sh' \
+  'HARNESS_BUDGET_STEPS=9999 scripts/harness plan start' "cd /tmp > $H && scripts/harness status"; do
+  deny_cmd "$command"
+done
+deny_cmd "$(printf "bash <<'EOF'\nrm -f %s\nEOF" "$H")"
+deny_cmd "$(printf "python3 - <<'EOF'\nopen('%s','w').write('')\nEOF" "$H")"
+deny_cmd "$(printf "echo '<<END'\nrm -f %s" "$H")"
+# Reading or naming a protected file stays allowed.
+for command in "cat $H" "grep -n x schemas/denylist.default" "ls scripts/hooks/" "cp a.txt docs/b.txt" "mkdir -p scripts/new" \
+  "cp x scripts/" "sed -i s/a/b/ docs/x.md" "git checkout -b feature" "python3 -c \"print(open('schemas/denylist.default').read())\"" \
+  "find build -name '*.o' -delete" "chmod +x scripts/new.sh" "tar -xf a.tar -C /tmp/out" "git log --format=%h#x" \
+  "echo \"don't\" > /tmp/q" 'grep -rn "harness abort" docs'; do
+  allow_cmd "$command"
+done
+allow_cmd "$(printf "cat > notes.md <<'EOF'\nrm -f %s\nEOF" "$H")"
+
+# Human-only commands and guard settings are judged on the parsed argv, so
+# quoting, option order, or a quoted assignment cannot hide them (second review).
+# shellcheck disable=SC2016 # the variables are part of the commands under test
+for command in "scripts/harness 'review' submit f.json" 'scripts/harness "abort"' 'scripts/harness fail""ure clear --command-key a' \
+  'scripts/harness --session-id abc abort' 'scripts/harness launch --state t.json --default-command c.json' \
+  'env "HARNESS_REVIEWER_CMD=cp /tmp/f.json $2" scripts/review.sh' "env 'HARNESS_HOOK_DISABLE=1' true" \
+  'export HARNESS_REVIEWER_""CMD=x' 'export HARNESS_REVIEW_BASE=HEAD'; do
+  deny_cmd "$command"
+done
+allow_cmd 'HARNESS_SESSION_ID= CLAUDE_CODE_SESSION_ID= sh tests/x.sh'
+# Launchers, append assignments, and setter builtins (third review).
+# shellcheck disable=SC2016 # the variables are part of the commands under test
+for command in "bash scripts/harness 'review' submit f.json" "sh scripts/harness 'abort'" 'echo review submit f | xargs scripts/harness' \
+  "find f -exec scripts/harness 'review' submit {} \\;" '. ./scripts/harness review submit f' 'watch scripts/harness abort' \
+  "bash scripts/knowledge-trust.sh 'approve'" "HARNESS_REVIEWER_CMD+='cp f.json \"\$2\"' scripts/review.sh" \
+  'export HARNESS_REVIEW_BASE+=x' 'set -a; read -r HARNESS_REVIEWER_CMD <<< zz; scripts/review.sh' \
+  'printf -v HARNESS_DB_ROOT %s /tmp' 'find scripts -exec rm {} \;'; do
+  deny_cmd "$command"
+done
+# shellcheck disable=SC2016 # reading a variable is not setting it
+for command in "find . -name '*.sh' -exec grep -l foo {} +" 'find . -exec wc -l {} \;' 'git stash list' \
+  'perl -MList::Util -e "print 1" README.md' 'grep -n HARNESS_REVIEWER_CMD docs/setup.md' 'echo "$HARNESS_REVIEWER_CMD"'; do
+  allow_cmd "$command"
+done
+[ -z "$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/permit.py" targets --command 'git stash list')" ] || fail "git stash list writes nothing"
+# Indirect command words, loop and nameref assignments, and wrapped find -exec (fourth review).
+# shellcheck disable=SC2016 # the variables are part of the commands under test
+for command in "scripts/harnes? 'review' submit f.json" "scripts/h*ss 'abort'" 'h=scripts/harness; $h abort' \
+  'find scripts -name harness -exec {} abort \;' "bash -c 'exec \"\$0\" abort' scripts/harness" \
+  "script -qc 'scripts/harness review submit f' /dev/null" 'flock /tmp/l scripts/harness abort' 'parallel scripts/harness ::: abort' \
+  "set -a; for HARNESS_REVIEWER_CMD in 'cp f \$2'; do scripts/review.sh; done" 'set -a; declare -n r=HARNESS_REVIEWER_CMD; r=x' \
+  ': "${HARNESS_REVIEWER_CMD:=x}"; scripts/review.sh' 'printf -vHARNESS_REVIEW_BASE %s HEAD' 'export HARNESS_CONFIRM_TTY=/tmp/yes' \
+  'find .harness-db -exec env rm -rf {} +' 'find scripts/hooks -exec nice rm {} +' 'find scripts/hooks -exec busybox rm {} +' \
+  'for f in x; do rm -rf scripts/hooks; done' 'if true; then rm -rf .harness-db; fi'; do
+  deny_cmd "$command"
+done
+# shellcheck disable=SC2016 # the loop variable is part of the command under test
+for command in "printf '%s\\n' HARNESS_REVIEWER_CMD" 'declare -p HARNESS_REVIEWER_CMD' 'for f in a b; do echo $f; done' \
+  'git rebase --abort' 'git merge --abort'; do
+  allow_cmd "$command"
+done
+PY_PERMIT="$HARNESS_ROOT_UNDER_TEST/scripts/permit.py"
+call_kind() {
+  [ "$(python3 "$PY_PERMIT" harness-call --command "$2" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = "$1" ] \
+    || fail "harness-call should say $1 for: $2"
+}
+call_kind pass 'scripts/harness status'
+call_kind pass 'scripts/harness review start'
+call_kind human "scripts/harness 'review' submit f.json"
+call_kind human 'scripts/harness --session-id abc abort'
+call_kind human 'true && scripts/harness launch --state t.json'
+call_kind no 'scripts/harness budget --thread x --tokens 5'
+call_kind no 'scripts/harness --session-id abc status'
+
+# Without python3 the Node fallback cannot see write targets, so it refuses any
+# command that names a guard path.
+if command -v node >/dev/null 2>&1; then
+  if PATH="$TMP_ROOT/node-bin" "$PERMIT" check --command "echo x > $H" >/dev/null 2>&1; then
+    fail "the Node fallback must refuse a command naming the guard"
+  fi
+  PATH="$TMP_ROOT/node-bin" "$PERMIT" check --command 'rm -rf build' >/dev/null 2>&1 || fail "the Node fallback should allow ordinary commands"
+fi
 
 # A project denylist replaces the default entirely.
 mkdir -p "$TMP_ROOT/proj"

@@ -1,0 +1,14 @@
+{
+  "goal": "Reject empty input in the CSV parser with a clear error instead of returning no rows.",
+  "deliverables": ["src/csv/parse.py", "tests/test_parse.py"],
+  "constraints": ["No new dependencies.", "Keep the public parse() signature."],
+  "non_goals": [
+    {"description": "Do not change the exporter or its fixtures.", "paths": ["src/export/", "tests/fixtures/export/*"]},
+    {"description": "No performance work in this task."}
+  ],
+  "acceptance": [
+    {"id": "empty-input", "criterion": "parse('') raises EmptyInputError", "command": ["python3", "-m", "pytest", "tests/test_parse.py", "-k", "empty"]},
+    {"id": "suite", "criterion": "The whole suite still passes", "command": ["python3", "-m", "pytest", "-q"]},
+    {"id": "message", "criterion": "The error message names the file"}
+  ]
+}

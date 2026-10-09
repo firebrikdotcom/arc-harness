@@ -1,6 +1,8 @@
 """Deterministic todo-plan policy, independent of audit collection switches."""
 from datetime import datetime, timezone
 import json
+from pathlib import Path
+import subprocess
 import uuid
 
 TERMINAL = {"completed", "removed"}
@@ -27,6 +29,25 @@ def assert_plan(context, active=False):
     if active and context.get("todos", {}).get(context.get("active_todo_id"), {}).get("status") != "in_progress":
         raise ValueError("Select an active todo: harness workflow todo update --id ID --status in_progress --reason SUMMARY")
 
+def parse_time(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else datetime.min.replace(tzinfo=timezone.utc)
+
+def current_tree(project):
+    result = subprocess.run(["sh", str(Path(__file__).resolve().parent / "tree-hash.sh"), project],
+                            capture_output=True, text=True, timeout=60)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+def fresh(check, context):
+    """A check counts when it ran after the plan was scoped and the project files
+    are unchanged since; writes outside the project never make it stale. Records
+    without a tree hash fall back to the last executed tool call."""
+    if not check.get("at") or parse_time(check["at"]) < parse_time(context.get("plan_scope_at", "")):
+        return False
+    tree, project = check.get("tree"), check.get("project")
+    if tree and tree != "none" and project and Path(project).is_dir():
+        return current_tree(project) == tree
+    return parse_time(check["at"]) >= parse_time(context.get("last_execution_at", ""))
+
 def assert_complete(context):
     if context.get("plan_mode") == "question" and context.get("confirmed_request") == context.get("request_seq", 0):
         return
@@ -35,10 +56,8 @@ def assert_complete(context):
         raise ValueError("Required todos remain unresolved")
     for kind in ("verify", "review"):
         check = context.get("checks", {}).get(kind, {})
-        threshold = max(context.get("plan_scope_at", ""), context.get("last_execution_at", ""))
-        fresh = bool(check.get("at")) and datetime.fromisoformat(check["at"].replace("Z", "+00:00")) >= datetime.fromisoformat(threshold.replace("Z", "+00:00"))
-        if check.get("exit_code") != 0 or check.get("failures", 0) != 0 or not fresh:
-            raise ValueError("Fresh passing " + kind + " is required before completion")
+        if check.get("exit_code") != 0 or check.get("failures", 0) != 0 or not fresh(check, context):
+            raise ValueError("Fresh passing " + kind + " is required before completion (run scripts/" + kind + ".sh on the current files)")
 
 def handle(args, sid, context, record):
     action = args.todo_action

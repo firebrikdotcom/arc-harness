@@ -265,7 +265,8 @@ def check_record(sid: str, context: dict, kind: str, path: Path) -> None:
            check=kind, exit_code=exit_code, outcome="passed" if exit_code == 0 else "failed",
            **{k.lower(): int(facts[k]) for k in ("RAN", "SKIPPED", "FAILURES") if facts.get(k, "").isdigit()})
     context[key] = digest
-    context.setdefault("checks", {})[kind] = {"exit_code":exit_code,"failures":int(facts.get("FAILURES", "0")),"at":facts.get("RECORD_AT", "")}
+    context.setdefault("checks", {})[kind] = {"exit_code":exit_code,"failures":int(facts.get("FAILURES", "0")),"at":facts.get("RECORD_AT", ""),
+                                              "tree":facts.get("TREE_HASH", ""),"project":facts.get("PROJECT_ROOT", "")}
 
 
 def hook(agent: str | None = None) -> int:
@@ -296,15 +297,11 @@ def hook(agent: str | None = None) -> int:
             if env_file:
                 with open(env_file, "a") as output:
                     output.write("\nexport HARNESS_SESSION_ID=" + shlex.quote(sid) + "\n")
-            print(f"Workflow audit is enabled for session {sid}. "
-                  f"At task entry, use {ROOT}/scripts/harness workflow task --session-id {shlex.quote(sid)} "
-                  "--name NAME --description SUMMARY (add --new for a subsequent task and --parent-task-id for subtasks). "
-                  "Record meaningful decisions with workflow decision --description SUMMARY --option OPTION "
-                  "--option OPTION --selected OPTION, and explicit final results with workflow outcome "
-                  "--status completed|blocked|running --description RESULT, using the same --session-id. "
-                  "Register a complete todo plan before execution using workflow todo plan --items JSON --reason SUMMARY; select an in_progress item, audit revisions, and record completion evidence. Questions use todo exempt. Only mark completed after required todos and fresh verify/review checks pass. Supply curated task and outcome summaries. "
-                  f"Automatic user-prompt collection is {'enabled' if enabled('workflow.prompt_recorded') else 'disabled'}; "
-                  "manage it in the dashboard collection settings.")
+            print(f"Workflow audit on for session {sid} (prompt collection "
+                  f"{'on' if enabled('workflow.prompt_recorded') else 'off'}). Before editing: "
+                  f"{ROOT}/scripts/harness workflow todo plan --items JSON --reason TEXT, then todo update "
+                  "--status in_progress; reads, harness commands, verify and review need no todo. "
+                  "Commands: docs/setup.md, section Audited todo enforcement.")
         elif event == "UserPromptSubmit" and enabled("workflow.prompt_recorded"):
             prompt = payload.get("prompt")
             if isinstance(prompt, str) and prompt.strip():
@@ -432,6 +429,10 @@ def main() -> int:
         return 0
     sid = session_id(args.session_id)
     if not sid:
+        # An agent always has a session; a gate it cannot attribute fails closed.
+        # A human at a terminal has no todo plan to check.
+        if args.command == "gate" and (os.environ.get("CLAUDECODE") == "1" or os.environ.get("CODEX_SANDBOX")):
+            raise ValueError("the todo gate needs this session's ID (HARNESS_SESSION_ID) inside an agent")
         if args.command in ("phase", "check", "gate"):
             return 0
         parser.error("--session-id is required when no native session environment is available")
@@ -478,8 +479,16 @@ def main() -> int:
             check_record(sid, context, args.kind, args.record)
         save(db, sid, context)
     flush()
-    if args.command == "todo":
+    if args.command == "todo" and args.todo_action == "show":
         print(json.dumps({"session_id":sid,"task_id":context["task_id"],"todos":list(context.get("todos",{}).values()),"revision":context.get("plan_revision",0),"confirmed":context.get("confirmed_request")==context.get("request_seq",0)}))
+    elif args.command == "todo":
+        # One line: the full list is `todo show`, so every update stays cheap to read.
+        live = [item for item in context.get("todos", {}).values() if item["status"] != "removed"]
+        done = sum(item["status"] == "completed" for item in live)
+        detail = f"{args.id} {args.status}; " if args.todo_action == "update" else ""
+        ids = "; ids: " + ", ".join(item["id"] for item in live) if args.todo_action == "plan" else ""
+        print(f"todo {args.todo_action}: {detail}{done}/{len(live)} complete, active {context.get('active_todo_id') or 'none'}, "
+              f"revision {context.get('plan_revision', 0)}{ids}")
     if args.command in ("task", "decision", "outcome"):
         print(json.dumps({"session_id": sid, "task_id": context["task_id"], "recorded": True}))
     return 0
@@ -490,5 +499,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except (OSError, ValueError, sqlite3.Error, KeyError) as error:
         # Audit infrastructure remains advisory; never include raw input in diagnostics.
-        print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
+        # Policy refusals are the harness's own messages and say what to do next.
+        if type(error) is ValueError and "gate" in sys.argv:
+            print("WORKFLOW GATE: " + str(error), file=sys.stderr)
+        else:
+            print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
         sys.exit(0 if "hook" in sys.argv or "phase" in sys.argv or "check" in sys.argv else 1)
