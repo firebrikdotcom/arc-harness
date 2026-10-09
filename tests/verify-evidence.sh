@@ -38,6 +38,17 @@ printf '%s\n' 'note' > "$EMPTY/progress.md"
 printf '%s\n' 'code' > "$EMPTY/main.c"
 [ "$(sh "$ROOT/scripts/tree-hash.sh" "$EMPTY")" != "$before" ] || fail "a project edit must change the hash"
 rm -f "$EMPTY/main.c" "$EMPTY/progress.md"
+# A project inside a larger repository leaves out the notes at its own root.
+MONO="$TMP_ROOT/mono"
+mkdir -p "$MONO/app"
+git -C "$MONO" init -q
+printf '%s\n' 'x' > "$MONO/app/main.c"
+before=$(sh "$ROOT/scripts/tree-hash.sh" "$MONO/app")
+printf '%s\n' '{}' > "$MONO/app/review-findings.json"
+printf '%s\n' 'n' > "$MONO/app/progress.md"
+[ "$(sh "$ROOT/scripts/tree-hash.sh" "$MONO/app")" = "$before" ] || fail "notes at a subproject root must not change its hash"
+printf '%s\n' 'y' >> "$MONO/app/main.c"
+[ "$(sh "$ROOT/scripts/tree-hash.sh" "$MONO/app")" != "$before" ] || fail "a subproject edit must change its hash"
 
 # allow-empty is an explicit, visible exemption.
 printf '%s\n' 'allow-empty  # documentation-only project' > "$EMPTY/.harness-required-checks"

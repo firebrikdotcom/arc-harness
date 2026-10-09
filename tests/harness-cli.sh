@@ -8,6 +8,10 @@ CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 unset HARNESS_ROOT
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-cli.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+printf 'yes\n' > "$TMP_ROOT/confirm"
+HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
+export HARNESS_CONFIRM_TTY
 # The CLI reports physical paths, so compare against the resolved temp root.
 TMP_ROOT=$(CDPATH='' cd "$TMP_ROOT" && pwd -P)
 
@@ -132,6 +136,15 @@ run 0 build "done"
 expect_output "Gate: verify record"
 run 0 review start
 record review 0
+run 4 review "done"
+expect_output "no review findings"
+# Approval needs a person typing yes on a terminal; none attached, or anything else, stores nothing.
+printf '{"tree_hash":"%s","reviewer":"x","verdict":"approve","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" > "$TMP_ROOT/self.json"
+HARNESS_CONFIRM_TTY=$TMP_ROOT/no-such-terminal run 4 review submit "$TMP_ROOT/self.json"
+expect_output "asks a person to confirm on a terminal"
+printf 'no\n' > "$TMP_ROOT/refuse"
+HARNESS_CONFIRM_TTY=$TMP_ROOT/refuse run 4 review submit "$TMP_ROOT/self.json"
+expect_output "not confirmed"
 run 4 review "done"
 expect_output "no review findings"
 findings block

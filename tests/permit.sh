@@ -167,6 +167,22 @@ for command in "find . -name '*.sh' -exec grep -l foo {} +" 'find . -exec wc -l 
   allow_cmd "$command"
 done
 [ -z "$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/permit.py" targets --command 'git stash list')" ] || fail "git stash list writes nothing"
+# Indirect command words, loop and nameref assignments, and wrapped find -exec (fourth review).
+# shellcheck disable=SC2016 # the variables are part of the commands under test
+for command in "scripts/harnes? 'review' submit f.json" "scripts/h*ss 'abort'" 'h=scripts/harness; $h abort' \
+  'find scripts -name harness -exec {} abort \;' "bash -c 'exec \"\$0\" abort' scripts/harness" \
+  "script -qc 'scripts/harness review submit f' /dev/null" 'flock /tmp/l scripts/harness abort' 'parallel scripts/harness ::: abort' \
+  "set -a; for HARNESS_REVIEWER_CMD in 'cp f \$2'; do scripts/review.sh; done" 'set -a; declare -n r=HARNESS_REVIEWER_CMD; r=x' \
+  ': "${HARNESS_REVIEWER_CMD:=x}"; scripts/review.sh' 'printf -vHARNESS_REVIEW_BASE %s HEAD' 'export HARNESS_CONFIRM_TTY=/tmp/yes' \
+  'find .harness-db -exec env rm -rf {} +' 'find scripts/hooks -exec nice rm {} +' 'find scripts/hooks -exec busybox rm {} +' \
+  'for f in x; do rm -rf scripts/hooks; done' 'if true; then rm -rf .harness-db; fi'; do
+  deny_cmd "$command"
+done
+# shellcheck disable=SC2016 # the loop variable is part of the command under test
+for command in "printf '%s\\n' HARNESS_REVIEWER_CMD" 'declare -p HARNESS_REVIEWER_CMD' 'for f in a b; do echo $f; done' \
+  'git rebase --abort' 'git merge --abort'; do
+  allow_cmd "$command"
+done
 PY_PERMIT="$HARNESS_ROOT_UNDER_TEST/scripts/permit.py"
 call_kind() {
   [ "$(python3 "$PY_PERMIT" harness-call --command "$2" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = "$1" ] \

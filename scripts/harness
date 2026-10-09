@@ -918,6 +918,21 @@ cmd_review_submit() {
   if [ "$_status" -ge 2 ]; then
     exit "$EXIT_PHASE"
   fi
+  # Approval is a person's act, whatever the command's spelling: it is confirmed
+  # on a terminal, which an agent's shell does not have.
+  _tty=${HARNESS_CONFIRM_TTY:-/dev/tty}
+  if ! ( : < "$_tty" ) 2>/dev/null; then
+    info "FAIL: review submit asks a person to confirm on a terminal, and none is attached."
+    info "Run it in your own terminal: $SCRIPT_DIR/harness review submit $1"
+    exit "$EXIT_PHASE"
+  fi
+  printf 'Store these findings as the independent review of run %s? Type yes: ' "$(state_get RUN_ID)" >&2
+  _answer=""
+  read -r _answer < "$_tty" || :
+  if [ "$_answer" != "yes" ]; then
+    info "FAIL: not confirmed; nothing was stored."
+    exit "$EXIT_PHASE"
+  fi
   mkdir -p "$RECORDS_DIR"
   cp "$1" "$RECORDS_DIR/review-findings.json.tmp.$$"
   mv "$RECORDS_DIR/review-findings.json.tmp.$$" "$RECORDS_DIR/review-findings.json"

@@ -8,6 +8,10 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-contract.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+printf 'yes\n' > "$TMP_ROOT/confirm"
+HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
+export HARNESS_CONFIRM_TTY
 TMP_ROOT=$(CDPATH='' cd "$TMP_ROOT" && pwd -P)
 HARNESS_DB_ROOT="$TMP_ROOT/db"
 export HARNESS_DB_ROOT
