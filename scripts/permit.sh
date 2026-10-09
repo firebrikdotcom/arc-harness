@@ -5,13 +5,21 @@ set -eu
 # schema validation and by the phase guard hook on every real tool call, so the
 # same rules apply to what the agent proposes and to what it actually does.
 #
-#   permit.sh check --command "STRING" [--project PATH]
+#   permit.sh check --command "STRING" [--project PATH] [--cwd PATH]
 #   permit.sh check --path PATH         [--project PATH]
+#   permit.sh targets --command "STRING" [--project PATH] [--cwd PATH]
 #   permit.sh rules                     [--project PATH]
+#
+# With python3, scripts/permit.py parses commands and checks every file they
+# would write against the path rules. The Node fallback only matches command
+# and path regexes and reports no write targets.
 #
 # Exit 0 allowed, 1 denied, 2 usage or environment error.
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+if command -v python3 >/dev/null 2>&1 && [ -f "$SCRIPT_DIR/permit.py" ]; then
+  exec python3 "$SCRIPT_DIR/permit.py" "$@"
+fi
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-$HARNESS_ROOT}"
 
@@ -38,6 +46,7 @@ while [ "$#" -gt 0 ]; do
     --command) [ "$#" -ge 2 ] || { info "FAIL: --command requires a string."; exit 2; }; KIND='command'; SUBJECT=$2; shift 2 ;;
     --path) [ "$#" -ge 2 ] || { info "FAIL: --path requires a path."; exit 2; }; KIND=path; SUBJECT=$2; shift 2 ;;
     --project) [ "$#" -ge 2 ] || { info "FAIL: --project requires a path."; exit 2; }; PROJECT_ROOT=$2; shift 2 ;;
+    --cwd) [ "$#" -ge 2 ] || { info "FAIL: --cwd requires a path."; exit 2; }; shift 2 ;;
     *) info "FAIL: unknown argument: $1"; usage; exit 2 ;;
   esac
 done
@@ -59,6 +68,7 @@ case "$COMMAND" in
     exit 0
     ;;
   check) ;;
+  targets) exit 0 ;;
   *) info "FAIL: unknown command: $COMMAND"; usage; exit 2 ;;
 esac
 [ -n "$KIND" ] || { info "FAIL: check needs --command or --path."; exit 2; }

@@ -339,7 +339,7 @@ run_harness_tests() {
   for test_file in tests/*.sh; do
     info "--> $test_file"
     # Nested harness runs inside tests must not emit real Jev checkpoints.
-    if ! HARNESS_JEV_CHECKPOINTS=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' sh "$test_file"; then
+    if ! HARNESS_JEV_CHECKPOINTS=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' sh "$test_file"; then
       status=1
     fi
   done
