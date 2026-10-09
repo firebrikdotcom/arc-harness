@@ -441,7 +441,10 @@ write_project_map() {
     if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       git -C "$PROJECT_ROOT" ls-files | awk -F/ '{ top = (NF > 1) ? $1 "/" : $1; count[top]++ } END { for (t in count) printf "- %s (%d)\n", t, count[t] }' | sort | head -n 40
     else
-      ls -1p "$PROJECT_ROOT" | head -n 40 | sed 's/^/- /'
+      for _entry in "$PROJECT_ROOT"/*; do
+        [ -e "$_entry" ] || continue
+        if [ -d "$_entry" ]; then printf -- '- %s/\n' "${_entry##*/}"; else printf -- '- %s\n' "${_entry##*/}"; fi
+      done | head -n 40
     fi
     printf '\n%s\n' "## Checks scripts/verify.sh can run"
     for _target in format-check fmt-check lint typecheck type-check test build; do
