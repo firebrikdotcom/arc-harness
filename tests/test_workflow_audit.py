@@ -328,7 +328,8 @@ class WorkflowTests(unittest.TestCase):
     def test_prompt_policy_is_dynamic_and_long_unicode_prompts_are_lossless(self):
         self.config(True, True)
         guidance = self.run_cli("hook", payload={"hook_event_name":"SessionStart","session_id":"s"})
-        self.assertIn("user-prompt collection is disabled", guidance)
+        self.assertIn("prompt collection off", guidance)
+        self.assertEqual(len(guidance.strip().splitlines()), 1)
         self.assertNotIn("never raw prompts", guidance)
         self.run_cli("hook", payload={"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"not collected"})
         self.assertFalse(any(e["event_type"] == "workflow.prompt_recorded" for e in self.queued()))
