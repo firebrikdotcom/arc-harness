@@ -841,7 +841,7 @@ cmd_contract() {
   block_when_paused
   case "$_action" in
     set)
-      [ "$#" -eq 1 ] && [ -f "$1" ] || { info "FAIL: contract set needs one JSON file."; exit "$EXIT_USAGE"; }
+      if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then info "FAIL: contract set needs one JSON file."; exit "$EXIT_USAGE"; fi
       if [ "$(phase_status plan)" != "active" ]; then
         info "FAIL: the contract is set while planning (plan is '$(phase_status plan)')."
         exit "$EXIT_PHASE"
@@ -853,7 +853,7 @@ cmd_contract() {
       info "Contract stored: $(contract_file)"
       ;;
     waive)
-      [ "$#" -eq 1 ] && [ -n "$1" ] || { info "FAIL: contract waive needs a reason."; exit "$EXIT_USAGE"; }
+      if [ "$#" -ne 1 ] || [ -z "$1" ]; then info "FAIL: contract waive needs a reason."; exit "$EXIT_USAGE"; fi
       if [ "$(phase_status plan)" != "active" ]; then
         info "FAIL: a waiver is recorded while planning (plan is '$(phase_status plan)')."
         exit "$EXIT_PHASE"
@@ -879,7 +879,11 @@ run_target() {
 }
 
 physical_dir() {
-  [ -n "$1" ] && [ -d "$1" ] && (CDPATH='' cd "$1" && pwd -P) || printf '%s\n' "$1"
+  if [ -n "$1" ] && [ -d "$1" ]; then
+    (CDPATH='' cd "$1" && pwd -P)
+  else
+    printf '%s\n' "$1"
+  fi
 }
 
 # review_project  Reviews are always about the run's own project.
@@ -1183,7 +1187,7 @@ cmd_failure() {
     esac
   done
   case "$_action" in
-    record) [ -n "$_key" ] && [ -n "$_sig" ] || { info "FAIL: record needs --command-key and --signature."; exit "$EXIT_USAGE"; } ;;
+    record) if [ -z "$_key" ] || [ -z "$_sig" ]; then info "FAIL: record needs --command-key and --signature."; exit "$EXIT_USAGE"; fi ;;
     clear) [ -n "$_key" ] || { info "FAIL: clear needs --command-key."; exit "$EXIT_USAGE"; } ;;
     *) info "FAIL: failure takes record or clear."; exit "$EXIT_USAGE" ;;
   esac
