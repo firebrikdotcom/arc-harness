@@ -120,6 +120,7 @@ new_case
 run 0 plan start
 run 4 review start
 expect_output "cannot start review: build is 'pending'"
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 4 review start
 expect_output "cannot start review: build is 'pending'"
@@ -151,6 +152,7 @@ expect_output "is complete. Start a new run"
 
 new_case
 run 0 plan start
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 0 build start
 run 4 build "done"
@@ -177,6 +179,7 @@ run 0 review "done"
 
 new_case
 run 0 plan start
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 4 plan "done"
 expect_output "cannot mark plan done: plan is 'done'"
@@ -247,6 +250,7 @@ grep -q 'narrowing to one file' "$PAUSE_RECORD" || fail "pause record should sto
 
 # Work resumes after the evaluation, and the extended cap pauses again later.
 run 0 step --note "narrow the plan"
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 0 status
 expect_output "steps     5/6"
@@ -299,6 +303,7 @@ expect_output "time_min  600/unknown"
 
 new_case
 run 0 plan start
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 0 build start
 record verify 0

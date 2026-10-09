@@ -93,7 +93,7 @@ grep -q '^EXIT=1$' "$RECORDS/review.state" || fail "review record should show EX
 rm "$PROJECT/.harness-required-checks"
 
 # review done needs an approving independent verdict for the current files.
-(cd "$PROJECT" && "$CLI" plan start && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "phases failed"
+(cd "$PROJECT" && "$CLI" plan start && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "phases failed"
 "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh" --project "$PROJECT" > "$OUT" 2>&1 || fail "verify failed"
 (cd "$PROJECT" && "$CLI" build "done" && "$CLI" review start) > "$OUT" 2>&1 || fail "build done / review start failed"
 "$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || fail "review failed"

@@ -85,6 +85,7 @@ payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh 
 grep -q '"resolver": "tool_repeat"' "$HARNESS_DB_ROOT"/advice-pending/*.json || fail "tool repeat left no pending oracle"
 
 # 6. Phase gates, verify, and review emit checkpoints and label them from the real results.
+scripts/harness contract waive "fixture task" >/dev/null
 plan_out=$(scripts/harness plan "done")
 printf '%s\n' "$plan_out" | grep -c 'Jev: handoff_assessment/phase-plan-2 shadow recommendation' >/dev/null || fail "plan done emitted no checkpoint: $plan_out"
 # The fourth identical command above recurred after the checkpoint: the oracle labels it stuck.
