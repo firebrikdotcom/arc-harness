@@ -110,6 +110,9 @@ class SessionRunsTests(unittest.TestCase):
         for sid in ("a", "b"):
             self.call(sid, "workflow", "todo", "update", "--id", "check", "--status", "completed",
                       "--reason", "tested", "--evidence", "sensors passed")
+            findings = self.base / ("findings-" + sid + ".json")
+            findings.write_text(json.dumps({"tree_hash": "none", "reviewer": "fixture", "verdict": "approve", "findings": []}))
+            self.call(sid, "review", "submit", str(findings))
             self.call(sid, "review", "done")
         previous = self.run_id("a")
         self.call("a", "plan", "start")

@@ -18,6 +18,7 @@ cp "$SOURCE_ROOT/scripts/run-paths.sh" "$SOURCE_ROOT/scripts/run_paths.py" "$HAR
 cp "$SOURCE_ROOT/scripts/workflow_audit.py" "$SOURCE_ROOT/scripts/workflow_todos.py" "$SOURCE_ROOT/scripts/audit_transport.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/verify.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh"
 cp "$SOURCE_ROOT/scripts/permit.sh" "$SOURCE_ROOT/scripts/permit.py" "$SOURCE_ROOT/scripts/guard-version" "$HARNESS_ROOT_UNDER_TEST/scripts/"
+cp "$SOURCE_ROOT/scripts/review_findings.py" "$SOURCE_ROOT/scripts/tree-hash.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/knowledge-trust.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/knowledge-trust.sh"
 cp "$SOURCE_ROOT/scripts/hooks/require-phase.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/hooks/require-phase.sh"
 cp "$SOURCE_ROOT/schemas/denylist.default" "$HARNESS_ROOT_UNDER_TEST/schemas/denylist.default"
@@ -171,7 +172,9 @@ hook 2 '{"tool_name":"Edit","tool_input":{"file_path":"docs/setup.md"}}'
 expect_output "review phase does not edit project files"
 hook 0 '{"tool_name":"Write","tool_input":{"file_path":"review-findings.json"}}'
 record review 0
-"$CLI" review "done" >/dev/null
+printf '%s\n' '{"tree_hash":"none","reviewer":"fixture","verdict":"approve","findings":[]}' > "$TMP_ROOT/findings.json"
+(cd "$H" && "$CLI" review submit "$TMP_ROOT/findings.json") > "$OUT" 2>&1 || fail "review submit failed"
+(cd "$H" && "$CLI" review "done") > "$OUT" 2>&1 || fail "review done failed"
 hook 2 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"}}'
 expect_output "run is complete"
 

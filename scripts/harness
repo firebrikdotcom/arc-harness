@@ -50,6 +50,7 @@ usage() {
   info "  plan start|done      Open or close the planning phase."
   info "  build start|done     Open or close the build phase (needs plan done)."
   info "  review start|done    Open or close the review phase (needs build done)."
+  info "  review submit FILE   Store an independent reviewer's findings for review done."
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
@@ -79,7 +80,9 @@ usage() {
   info ""
   info ""
   info "Gates: 'build done' needs a passing scripts/verify.sh record newer than 'build start';"
-  info "'review done' needs a scripts/review.sh record newer than 'review start'."
+  info "'review done' needs a scripts/review.sh record newer than 'review start' and an"
+  info "independent reviewer's approving findings for the current files (review submit)."
+  info "Both records are void once project files change."
   info ""
   info "Exit codes: 0 ok, $EXIT_USAGE usage/environment, $EXIT_BUDGET budget pause, $EXIT_PHASE phase-order or gate violation."
 }
@@ -641,6 +644,54 @@ require_gate_record() {
   log_event "$1 gate: $_kind record at $(record_get "$_file" RECORD_AT) head=$(record_get "$_file" GIT_HEAD)"
 }
 
+# review_project  The project the last review covered, else the target root.
+review_project() {
+  _project=""
+  [ -f "$RECORDS_DIR/review.state" ] && _project=$(record_get "$RECORDS_DIR/review.state" PROJECT_ROOT)
+  [ -n "$_project" ] && [ -d "$_project" ] || _project=$TARGET_ROOT
+  printf '%s\n' "$_project"
+}
+
+# The reviewer that wrote the change cannot approve it: review done needs an
+# independent reviewer's verdict for the files as they are now.
+require_review_findings() {
+  if ! has_cmd python3; then
+    info "FAIL: python3 is required to check the independent review findings."
+    exit "$EXIT_PHASE"
+  fi
+  if ! python3 "$SCRIPT_DIR/review_findings.py" check --findings "$RECORDS_DIR/review-findings.json" --project "$(review_project)"; then
+    exit "$EXIT_PHASE"
+  fi
+  log_event "review gate: independent findings approved"
+}
+
+cmd_review_submit() {
+  if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+    info "FAIL: review submit needs one findings file (schemas/review-findings.schema.json)."
+    exit "$EXIT_USAGE"
+  fi
+  require_run
+  refuse_stale_run
+  block_when_paused
+  if [ "$(phase_status review)" != "active" ]; then
+    info "FAIL: review is '$(phase_status review)'; submit findings while it is active (harness review start)."
+    exit "$EXIT_PHASE"
+  fi
+  has_cmd python3 || { info "FAIL: python3 is required to check review findings."; exit "$EXIT_USAGE"; }
+  _status=0
+  python3 "$SCRIPT_DIR/review_findings.py" check --findings "$1" --project "$(review_project)" || _status=$?
+  if [ "$_status" -ge 2 ]; then
+    exit "$EXIT_PHASE"
+  fi
+  mkdir -p "$RECORDS_DIR"
+  cp "$1" "$RECORDS_DIR/review-findings.json.tmp.$$"
+  mv "$RECORDS_DIR/review-findings.json.tmp.$$" "$RECORDS_DIR/review-findings.json"
+  count_step
+  write_run_json
+  log_event "review findings submitted (check exit $_status)"
+  info "Findings stored: $RECORDS_DIR/review-findings.json"
+}
+
 # --- Jev shadow checkpoints --------------------------------------------------
 # Phase gates emit shadow checkpoints only when HARNESS_JEV_CHECKPOINTS=1.
 # They observe; they never change a gate result or block a phase.
@@ -762,6 +813,9 @@ cmd_phase_done() {
   fi
 
   require_gate_record "$_phase"
+  if [ "$_phase" = "review" ]; then
+    require_review_findings
+  fi
   if [ "$_phase" = "review" ] && [ -f "$SCRIPT_DIR/workflow_todos.py" ]; then
     python3 "$SCRIPT_DIR/workflow_audit.py" gate --check plan || exit "$EXIT_PHASE"
   fi
@@ -1034,6 +1088,10 @@ case "$COMMAND" in
     fi
     ACTION=$1
     shift
+    if [ "$COMMAND $ACTION" = "review submit" ]; then
+      cmd_review_submit "$@"
+      exit 0
+    fi
     if [ "$#" -gt 0 ]; then
       info "FAIL: unknown argument: $1"
       exit "$EXIT_USAGE"

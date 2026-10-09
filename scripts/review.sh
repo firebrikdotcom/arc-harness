@@ -13,7 +13,13 @@ info() {
 usage() {
   info "Usage: scripts/review.sh [--project PATH]"
   info ""
-  info "Runs project verification and prints target/harness diff summaries."
+  info "Runs project verification, prints the target/harness diff, and writes a review"
+  info "packet (task contract, verification output, diff) for an independent reviewer."
+  info "With HARNESS_REVIEWER_CMD set, it runs that reviewer itself:"
+  info "  sh -c \"\$HARNESS_REVIEWER_CMD\" reviewer PACKET FINDINGS_OUT"
+  info "Otherwise hand the packet to a reviewer in a fresh context and submit its JSON"
+  info "with: harness review submit FILE. 'harness review done' requires an approving"
+  info "verdict for the current files (schemas/review-findings.schema.json)."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -64,10 +70,13 @@ if [ ! -x "$SCRIPT_DIR/verify.sh" ]; then
   exit 1
 fi
 
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/harness-review.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
 # Verification failing is exactly when a reviewer needs the evidence below,
 # so its status is captured and the review continues.
-verify_status=0
-"$SCRIPT_DIR/verify.sh" --project "$PROJECT_ROOT" || verify_status=$?
+{ "$SCRIPT_DIR/verify.sh" --project "$PROJECT_ROOT"; printf '%s\n' "$?" > "$WORK/verify.status"; } 2>&1 | tee "$WORK/verify.log"
+verify_status=$(cat "$WORK/verify.status" 2>/dev/null || printf '1')
 if [ "$verify_status" -ne 0 ]; then
   info ""
   info "WARN: verification failed (exit $verify_status); continuing the review so the change can still be inspected."
@@ -106,45 +115,95 @@ show_patch() {
   done
 }
 
-show_patch "$PROJECT_ROOT" "target"
-if [ "$PROJECT_ROOT" != "$HARNESS_ROOT" ]; then
-  show_patch "$HARNESS_ROOT" "harness"
+{
+  show_patch "$PROJECT_ROOT" "target"
+  if [ "$PROJECT_ROOT" != "$HARNESS_ROOT" ]; then
+    show_patch "$HARNESS_ROOT" "harness"
+  fi
+} | tee "$WORK/patch.txt"
+
+records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
+current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
+run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
+tree_hash=$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")
+contract="$HARNESS_DB_ROOT/runs/$run_id/task.json"
+if ! mkdir -p "$records_dir" 2>/dev/null; then
+  info "WARN: could not create $records_dir; no review record written."
+  exit "$verify_status"
 fi
 
-info ""
-info "Review questions:"
-info "1. Does it satisfy acceptance criteria?"
-info "2. Are tests meaningful?"
-info "3. Did we avoid scope creep?"
-info "4. Are docs/progress updated?"
-info "5. Are there security or performance risks?"
+# The packet is everything an independent reviewer needs and nothing else: it
+# holds no conversation, so the reviewer judges the change, not the narrative.
+packet="$records_dir/review-packet.md"
+{
+  printf '%s\n' "# Review packet" ""
+  printf '%s\n' "You are an independent reviewer. You did not write this change. Check it against the"
+  printf '%s\n' "task contract and the evidence below. Report every defect you can point to with a"
+  printf '%s\n' "file and line or reproduce with a command; do not report style preferences."
+  printf '%s\n' "Return JSON matching schemas/review-findings.schema.json (template below) with"
+  printf '%s\n' "verdict \"block\" if any blocker or major finding is open, otherwise \"approve\"." ""
+  printf 'Project: %s\nTree hash: %s\n\n' "$PROJECT_ROOT" "$tree_hash"
+  printf '%s\n' "## Findings template" '```json'
+  python3 "$SCRIPT_DIR/review_findings.py" template --project "$PROJECT_ROOT" 2>/dev/null || printf '{"tree_hash": "%s"}\n' "$tree_hash"
+  printf '%s\n' '```' "" "## Task contract"
+  if [ -f "$contract" ]; then
+    printf '%s\n' '```json'
+    cat "$contract"
+    printf '%s\n' '```'
+  else
+    printf '%s\n' "No task contract was recorded for this run (harness contract set FILE)."
+  fi
+  printf '\n%s\n%s\n' "## Verification (exit $verify_status)" '```'
+  cat "$WORK/verify.log"
+  printf '%s\n\n%s\n%s\n' '```' "## Diff" '```diff'
+  cat "$WORK/patch.txt"
+  printf '%s\n' '```'
+} > "$packet.tmp.$$"
+mv "$packet.tmp.$$" "$packet"
 
-# Write the KEY=VALUE record that `scripts/harness review done` requires.
-records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
-if mkdir -p "$records_dir" 2>/dev/null; then
-  git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
-  record="$records_dir/review.state"
-  current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
-  run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
-  {
-    printf 'RECORD_KIND=review\n'
-    printf 'RUN_ID=%s\n' "$run_id"
-    printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
-    printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
-    printf 'GIT_HEAD=%s\n' "$git_head"
-    printf 'TREE_HASH=%s\n' "$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")"
-    printf 'VERIFY_EXIT=%s\n' "$verify_status"
-    printf 'EXIT=%s\n' "$verify_status"
-  } > "$record.tmp.$$"
-  mv "$record.tmp.$$" "$record"
-  info ""
-  info "Run record: $record"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 "$SCRIPT_DIR/workflow_audit.py" check --kind review --record "$record" >&2 || :
+findings="$records_dir/review-findings.json"
+info ""
+info "Review packet: $packet"
+if [ -n "${HARNESS_REVIEWER_CMD:-}" ]; then
+  info "Running the independent reviewer (HARNESS_REVIEWER_CMD)."
+  reviewer_status=0
+  sh -c "$HARNESS_REVIEWER_CMD" harness-reviewer "$packet" "$WORK/findings.json" || reviewer_status=$?
+  if [ "$reviewer_status" -ne 0 ] || [ ! -s "$WORK/findings.json" ]; then
+    info "WARN: the reviewer exited $reviewer_status without findings; 'harness review done' will refuse until findings are submitted."
+  else
+    check_status=0
+    python3 "$SCRIPT_DIR/review_findings.py" check --findings "$WORK/findings.json" --project "$PROJECT_ROOT" || check_status=$?
+    if [ "$check_status" -le 1 ]; then
+      cp "$WORK/findings.json" "$findings"
+      info "Reviewer findings stored: $findings"
+    fi
   fi
 else
-  info "WARN: could not create $records_dir; no review record written."
+  info "Independent review: hand the packet to a reviewer in a fresh context (a subagent, or"
+  info "claude -p / codex exec) that writes JSON per schemas/review-findings.schema.json, then"
+  info "submit it: scripts/harness review submit FILE. 'harness review done' needs its approval."
+fi
+
+# Write the KEY=VALUE record that `scripts/harness review done` requires.
+git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
+record="$records_dir/review.state"
+{
+  printf 'RECORD_KIND=review\n'
+  printf 'RUN_ID=%s\n' "$run_id"
+  printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
+  printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
+  printf 'GIT_HEAD=%s\n' "$git_head"
+  printf 'TREE_HASH=%s\n' "$tree_hash"
+  printf 'PACKET=%s\n' "$packet"
+  printf 'VERIFY_EXIT=%s\n' "$verify_status"
+  printf 'EXIT=%s\n' "$verify_status"
+} > "$record.tmp.$$"
+mv "$record.tmp.$$" "$record"
+info ""
+info "Run record: $record"
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$SCRIPT_DIR/workflow_audit.py" check --kind review --record "$record" >&2 || :
 fi
 
 if [ "$verify_status" -ne 0 ]; then

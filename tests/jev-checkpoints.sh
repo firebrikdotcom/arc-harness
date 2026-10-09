@@ -100,6 +100,8 @@ scripts/harness build "done" >/dev/null
 scripts/harness review start >/dev/null
 review_out=$(scripts/review.sh --project "$TARGET" 2>&1) || fail "review failed: $review_out"
 printf '%s\n' "$review_out" | grep -c 'Jev: handoff_assessment/review-handoff-2 shadow recommendation ready_for_handoff' >/dev/null || fail "review emitted no handoff checkpoint"
+printf '{"tree_hash":"%s","reviewer":"fixture","verdict":"approve","findings":[]}\n' "$(sh scripts/tree-hash.sh "$TARGET")" > "$TMP_ROOT/findings.json"
+scripts/harness review submit "$TMP_ROOT/findings.json" >/dev/null
 done_out=$(scripts/harness review "done")
 printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/phase-plan-2 correct' >/dev/null || fail "review done did not label the plan handoff"
 printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/review-handoff-2 correct' >/dev/null || fail "review done did not label the review handoff"

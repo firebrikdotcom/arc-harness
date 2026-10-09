@@ -68,6 +68,12 @@ record() {
     > "$HARNESS_DB_ROOT/records/$1.state"
 }
 
+# findings VERDICT  Submit an independent reviewer's findings for the fixture (not a git tree).
+findings() {
+  printf '{"tree_hash":"none","reviewer":"fixture","verdict":"%s","findings":[]}\n' "$1" > "$TMP_ROOT/findings.json"
+  run 0 review submit "$TMP_ROOT/findings.json"
+}
+
 # --- harness root discovery -------------------------------------------------
 
 new_case
@@ -125,6 +131,12 @@ run 0 build "done"
 expect_output "Gate: verify record"
 run 0 review start
 record review 0
+run 4 review "done"
+expect_output "no review findings"
+findings block
+run 4 review "done"
+expect_output "verdict is block"
+findings approve
 run 0 review "done"
 expect_output "Run complete"
 run 0 status
@@ -158,6 +170,7 @@ record review 0 -100
 run 4 review "done"
 expect_output "predates review start"
 record review 0
+findings approve
 run 0 review "done"
 
 # --- phase done requires an active phase ------------------------------------
