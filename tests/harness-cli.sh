@@ -333,6 +333,34 @@ expect_output "already aborted"
 run 0 plan start
 expect_output "Run created"
 
+# --- stale runs -------------------------------------------------------------
+
+new_case
+run 0 plan start
+RUN_STATE=$(state_dir)
+sed -i.bak "s/^LAST_ACTIVITY_EPOCH=.*/LAST_ACTIVITY_EPOCH=$(( $(date +%s) - 90000 ))/" "$RUN_STATE/state" && rm -f "$RUN_STATE/state.bak"
+run 0 status
+expect_output "Run:.*(stale)"
+expect_output "idle for more than 24 hours"
+run 4 step --note "work on a stale run"
+expect_output "is stale"
+run 4 plan "done"
+expect_output "is stale"
+run 0 plan start
+expect_output "expired after more than 24 idle hours"
+expect_output "Run created"
+grep -q '^RUN_STATUS=expired$' "$RUN_STATE/state" || fail "stale run should be marked expired"
+
+# Activity keeps a run fresh, and a zero idle limit disables staleness.
+new_case
+HARNESS_RUN_IDLE_HOURS=0
+export HARNESS_RUN_IDLE_HOURS
+run 0 plan start
+RUN_STATE=$(state_dir)
+sed -i.bak "s/^LAST_ACTIVITY_EPOCH=.*/LAST_ACTIVITY_EPOCH=1/" "$RUN_STATE/state" && rm -f "$RUN_STATE/state.bak"
+run 0 step --note "no idle limit"
+unset HARNESS_RUN_IDLE_HOURS
+
 # --- token accounting -------------------------------------------------------
 
 new_case

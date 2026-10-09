@@ -11,6 +11,9 @@ DEFAULT_CAP_STEPS=200
 DEFAULT_CAP_TIME_MIN=unknown
 DEFAULT_CAP_LOOPS=1
 DEFAULT_CAP_CONTINUES=3
+# A run left idle this long is stale: the guard refuses it and plan start
+# replaces it, so a later session never inherits an old run's phase.
+DEFAULT_RUN_IDLE_HOURS=24
 SCRIPT_PATH=$0
 while [ -L "$SCRIPT_PATH" ]; do
   _link_dir=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
@@ -67,6 +70,7 @@ usage() {
   info "  HARNESS_BUDGET_LOOPS     default $DEFAULT_CAP_LOOPS"
   info "  HARNESS_BUDGET_TOKENS    default unknown (the CLI cannot count tokens)"
   info "  HARNESS_BUDGET_CONTINUES default $DEFAULT_CAP_CONTINUES (continues allowed per run)"
+  info "  HARNESS_RUN_IDLE_HOURS   default $DEFAULT_RUN_IDLE_HOURS (idle hours before a run is stale; 0 disables)"
   info ""
   info "Other environment variables:"
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
@@ -311,6 +315,57 @@ require_run() {
   fi
 }
 
+# run_idle_seconds  Seconds since the run's last recorded activity. Runs created
+# before activity tracking fall back to the modification time of their log.
+run_idle_seconds() {
+  _last=$(state_get LAST_ACTIVITY_EPOCH "")
+  if [ -z "$_last" ]; then
+    _last=$(date -r "$RUN_DIR/log" +%s 2>/dev/null || date -r "$STATE_FILE" +%s 2>/dev/null || now_epoch)
+  fi
+  printf '%s\n' "$(( $(now_epoch) - _last ))"
+}
+
+idle_cap_hours() {
+  _hours=$(state_get CAP_IDLE_HOURS "$DEFAULT_RUN_IDLE_HOURS")
+  case "$_hours" in
+    ''|*[!0-9]*) _hours=$DEFAULT_RUN_IDLE_HOURS ;;
+  esac
+  printf '%s\n' "$_hours"
+}
+
+run_is_stale() {
+  case "$(state_get RUN_STATUS)" in
+    active|paused) ;;
+    *) return 1 ;;
+  esac
+  _hours=$(idle_cap_hours)
+  [ "$_hours" -gt 0 ] || return 1
+  [ "$(run_idle_seconds)" -gt "$(( _hours * 3600 ))" ]
+}
+
+display_status() {
+  if run_is_stale; then
+    printf 'stale\n'
+  else
+    state_get RUN_STATUS
+  fi
+}
+
+refuse_stale_run() {
+  if run_is_stale; then
+    info "FAIL: run $(state_get RUN_ID) has been idle for more than $(idle_cap_hours) hours and is stale."
+    info "Start a new run: harness plan start"
+    exit "$EXIT_PHASE"
+  fi
+}
+
+expire_run() {
+  state_set RUN_STATUS expired
+  write_run_json
+  log_event "expired after more than $(idle_cap_hours) idle hours"
+  info "Run $(state_get RUN_ID) expired after more than $(idle_cap_hours) idle hours."
+}
+
 create_run() {
   _run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   bind_run "$_run_id"
@@ -334,6 +389,8 @@ create_run() {
   state_set CAP_LOOPS "${HARNESS_BUDGET_LOOPS:-$DEFAULT_CAP_LOOPS}"
   state_set CAP_TOKENS "${HARNESS_BUDGET_TOKENS:-unknown}"
   state_set CAP_CONTINUES "${HARNESS_BUDGET_CONTINUES:-$DEFAULT_CAP_CONTINUES}"
+  state_set CAP_IDLE_HOURS "${HARNESS_RUN_IDLE_HOURS:-$DEFAULT_RUN_IDLE_HOURS}"
+  state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
   state_set CONTINUES_USED 0
   state_set PHASE_BUILD_STARTED_EPOCH 0
   state_set PHASE_REVIEW_STARTED_EPOCH 0
@@ -448,7 +505,8 @@ write_run_json() {
     tokens_cap "$(typed_number "$(effective_cap TOKENS)")" \
     continues_used "n:$(state_get CONTINUES_USED 0)" \
     continues_cap "n:$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")" \
-    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")"
+    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")" \
+    stale "b:$(if run_is_stale; then printf true; else printf false; fi)"
 }
 
 pause_run() {
@@ -480,7 +538,7 @@ pause_run() {
 
 check_budgets() {
   case "$(state_get RUN_STATUS)" in
-    complete|aborted) return 0 ;;
+    complete|aborted|expired) return 0 ;;
   esac
   for _budget in STEPS TIME_MIN LOOPS TOKENS; do
     _cap=$(effective_cap "$_budget")
@@ -507,6 +565,7 @@ block_when_paused() {
 
 count_step() {
   state_set STEPS_USED "$(( $(state_get STEPS_USED 0) + 1 ))"
+  state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
 }
 
 # --- gate records -----------------------------------------------------------
@@ -611,6 +670,10 @@ cmd_phase_start() {
   _phase=$1
 
   if load_current_run; then
+    if [ "$_phase" = "plan" ] && run_is_stale; then
+      expire_run
+    fi
+    refuse_stale_run
     _run_status=$(state_get RUN_STATUS)
     case "$_run_status" in
       active|paused)
@@ -677,6 +740,7 @@ cmd_phase_start() {
 cmd_phase_done() {
   _phase=$1
   require_run
+  refuse_stale_run
   block_when_paused
 
   _status=$(phase_status "$_phase")
@@ -748,6 +812,7 @@ cmd_step() {
   done
 
   require_run
+  refuse_stale_run
   block_when_paused
 
   if [ "$(state_get CURRENT_PHASE)" = "none" ]; then
@@ -793,6 +858,7 @@ cmd_continue() {
   fi
 
   require_run
+  refuse_stale_run
 
   if [ "$(state_get RUN_STATUS)" != "paused" ]; then
     info "FAIL: run $(state_get RUN_ID) is not paused (status: $(state_get RUN_STATUS))."
@@ -822,6 +888,7 @@ cmd_continue() {
   _record=$(write_pause_json)
 
   state_set RUN_STATUS active
+  state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
   write_run_json
   log_event "continue budget=$(budget_label "$_budget")"
 
@@ -899,7 +966,10 @@ cmd_status() {
 
   info "Harness root: $ROOT"
   info "State root:   $DB_ROOT"
-  info "Run:          $(state_get RUN_ID) ($(state_get RUN_STATUS))"
+  info "Run:          $(state_get RUN_ID) ($(display_status))"
+  if run_is_stale; then
+    info "Stale:        idle for more than $(idle_cap_hours) hours; harness plan start replaces it"
+  fi
   info "Run state:    $RUN_DIR"
   info "Phase:        $(state_get CURRENT_PHASE)"
   info "  plan   $(phase_status plan)"

@@ -12,7 +12,8 @@ const crypto = require('crypto');
 const [kind, root, flag, value] = process.argv.slice(2);
 if (!['current', 'records', 'key'].includes(kind) || !root ||
     (flag !== undefined && (flag !== '--session-id' || value === undefined))) process.exit(2);
-const sid = value || process.env.HARNESS_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID;
+const sid = value || process.env.HARNESS_SESSION_ID || process.env.CODEX_THREAD_ID || process.env.CLAUDE_SESSION_ID ||
+  process.env.CLAUDE_CODE_SESSION_ID;
 if (sid && (Buffer.byteLength(sid) > 256 || !sid.trim() || /[\r\n]/.test(sid))) {
   process.stderr.write('invalid session ID\n'); process.exit(2);
 }

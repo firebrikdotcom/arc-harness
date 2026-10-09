@@ -6,13 +6,18 @@
 # existing harness entries are replaced, other hooks are preserved, and each
 # file is backed up before it is rewritten.
 #
-#   scripts/install-hooks.sh [--claude PATH] [--codex PATH] [--uninstall] [--dry-run]
+#   scripts/install-hooks.sh [--claude PATH] [--codex PATH] [--root-file PATH] [--uninstall] [--dry-run]
+#
+# It also records this checkout as the installed harness root (default
+# ~/.config/harness/root); the phase guard refuses to run from a checkout whose
+# scripts/guard-version is older than the installed one.
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 CODEX_HOOKS="${HOME}/.codex/hooks.json"
+ROOT_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/harness/root"
 MODE=install
 DRY_RUN=0
 
@@ -20,10 +25,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --claude) CLAUDE_SETTINGS=$2; shift 2 ;;
     --codex) CODEX_HOOKS=$2; shift 2 ;;
+    --root-file) ROOT_FILE=$2; shift 2 ;;
     --uninstall) MODE=uninstall; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
-      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) printf 'FAIL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -121,3 +127,14 @@ for index, target in enumerate(targets):
     path.write_text(rendered, encoding="utf-8")
     print(f"{mode}ed Jev and Workflow hooks in {path}")
 PY
+
+if [ "$DRY_RUN" = "1" ]; then
+  printf -- '--- %s (%s, dry run)\n%s\n' "$ROOT_FILE" "$MODE" "$HARNESS_ROOT"
+elif [ "$MODE" = "install" ]; then
+  mkdir -p "$(dirname "$ROOT_FILE")"
+  printf '%s\n' "$HARNESS_ROOT" > "$ROOT_FILE"
+  printf 'installed harness root %s in %s\n' "$HARNESS_ROOT" "$ROOT_FILE"
+elif [ -f "$ROOT_FILE" ] && [ "$(head -n 1 "$ROOT_FILE")" = "$HARNESS_ROOT" ]; then
+  rm -f "$ROOT_FILE"
+  printf 'removed harness root record %s\n' "$ROOT_FILE"
+fi

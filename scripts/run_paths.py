@@ -9,7 +9,8 @@ from pathlib import Path
 
 
 def session_id(value: str | None = None) -> str | None:
-    result = value or os.environ.get("HARNESS_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    result = (value or os.environ.get("HARNESS_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
+              or os.environ.get("CLAUDE_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID"))
     if result and (not isinstance(result, str) or len(result.encode()) > 256 or not result.strip() or "\n" in result or "\r" in result):
         raise ValueError("invalid session ID")
     return result
