@@ -34,7 +34,8 @@ TARGET="$TMP_ROOT/target"
 mkdir -p "$TARGET"
 git -C "$TARGET" init -q
 printf '<!-- harness-cli:start -->\n<!-- harness-cli:end -->\n' > "$TARGET/AGENTS.md"
-git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid add AGENTS.md
+printf 'test:\n\t@true\n' > "$TARGET/Makefile"
+git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid add AGENTS.md Makefile
 git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid commit -q -m init
 
 payload() {

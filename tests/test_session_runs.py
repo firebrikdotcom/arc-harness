@@ -24,9 +24,11 @@ class SessionRunsTests(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         self.project = self.base / "project"
         self.project.mkdir()
+        (self.project / "Makefile").write_text("test:\n\t@true\n")
         self.env = dict(os.environ)
         for key in list(self.env):
-            if key.startswith(("HARNESS_", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_ENV_FILE")):
+            if key.startswith(("HARNESS_", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_ENV_FILE",
+                               "CLAUDECODE", "CODEX_SANDBOX")):
                 self.env.pop(key)
         self.env.update(HARNESS_ROOT=str(ROOT), HARNESS_DB_ROOT=str(self.base / "db"),
                         HARNESS_JEV_CHECKPOINTS="0", HARNESS_AUDIT_ENABLED="0",

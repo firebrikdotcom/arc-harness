@@ -131,6 +131,8 @@ grep -q '^Registered harness target: ' "$OUT" || fail "manual init did not repor
 [ -f "$TDIR/db/runs/current" ] || fail "run was not created in the target database"
 [ ! -e "$HARNESS_DB_ROOT/runs/current" ] || fail "run leaked into the shared database"
 (cd "$WT" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "plan done / build start failed"
+# The fixture worktree has no checks; its database accepts an empty verification.
+printf '%s\n' allow-empty > "$TDIR/db/required-checks"
 "$ROOT/scripts/verify.sh" --project "$WT" > "$OUT" 2>&1 || fail "verify failed on the worktree"
 [ -f "$TDIR/db/records/verify.state" ] || fail "verify record not written to the target database"
 (cd "$WT/sub" && "$CLI" build "done") > "$OUT" 2>&1 || fail "build done did not accept the target's verify record"

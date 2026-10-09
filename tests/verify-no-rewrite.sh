@@ -31,7 +31,7 @@ grep -q 'make:format-check' "$OUT" || fail "verify should run the format-check t
 
 PROJECT2="$TMP_ROOT/make-only-format"
 mkdir -p "$PROJECT2"
-printf 'format:\n\t@touch REWRITTEN\n' > "$PROJECT2/Makefile"
+printf 'format:\n\t@touch REWRITTEN\ntest:\n\t@true\n' > "$PROJECT2/Makefile"
 "$VERIFY" --project "$PROJECT2" > "$OUT" 2>&1 || fail "verify failed on format-only make project"
 [ ! -f "$PROJECT2/REWRITTEN" ] || fail "verify ran make format"
 grep -q 'never runs a rewriting formatter' "$OUT" || fail "verify should explain the skipped format target"
@@ -40,7 +40,7 @@ grep -q 'never runs a rewriting formatter' "$OUT" || fail "verify should explain
 if command -v npm >/dev/null 2>&1 || command -v pnpm >/dev/null 2>&1 || command -v yarn >/dev/null 2>&1; then
   PROJECT3="$TMP_ROOT/node-project"
   mkdir -p "$PROJECT3"
-  printf '%s\n' '{"name":"fixture","version":"1.0.0","scripts":{"format":"touch REWRITTEN"}}' > "$PROJECT3/package.json"
+  printf '%s\n' '{"name":"fixture","version":"1.0.0","scripts":{"format":"touch REWRITTEN","test":"true"}}' > "$PROJECT3/package.json"
   "$VERIFY" --project "$PROJECT3" > "$OUT" 2>&1 || fail "verify failed on node project"
   [ ! -f "$PROJECT3/REWRITTEN" ] || fail "verify ran the rewriting npm format script"
   grep -q 'never runs a rewriting formatter' "$OUT" || fail "verify should explain the skipped format script"

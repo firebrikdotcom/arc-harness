@@ -133,6 +133,7 @@ if mkdir -p "$records_dir" 2>/dev/null; then
     printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
     printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
     printf 'GIT_HEAD=%s\n' "$git_head"
+    printf 'TREE_HASH=%s\n' "$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")"
     printf 'VERIFY_EXIT=%s\n' "$verify_status"
     printf 'EXIT=%s\n' "$verify_status"
   } > "$record.tmp.$$"

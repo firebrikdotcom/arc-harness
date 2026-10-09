@@ -265,7 +265,8 @@ def check_record(sid: str, context: dict, kind: str, path: Path) -> None:
            check=kind, exit_code=exit_code, outcome="passed" if exit_code == 0 else "failed",
            **{k.lower(): int(facts[k]) for k in ("RAN", "SKIPPED", "FAILURES") if facts.get(k, "").isdigit()})
     context[key] = digest
-    context.setdefault("checks", {})[kind] = {"exit_code":exit_code,"failures":int(facts.get("FAILURES", "0")),"at":facts.get("RECORD_AT", "")}
+    context.setdefault("checks", {})[kind] = {"exit_code":exit_code,"failures":int(facts.get("FAILURES", "0")),"at":facts.get("RECORD_AT", ""),
+                                              "tree":facts.get("TREE_HASH", ""),"project":facts.get("PROJECT_ROOT", "")}
 
 
 def hook(agent: str | None = None) -> int:
@@ -432,6 +433,10 @@ def main() -> int:
         return 0
     sid = session_id(args.session_id)
     if not sid:
+        # An agent always has a session; a gate it cannot attribute fails closed.
+        # A human at a terminal has no todo plan to check.
+        if args.command == "gate" and (os.environ.get("CLAUDECODE") == "1" or os.environ.get("CODEX_SANDBOX")):
+            raise ValueError("the todo gate needs this session's ID (HARNESS_SESSION_ID) inside an agent")
         if args.command in ("phase", "check", "gate"):
             return 0
         parser.error("--session-id is required when no native session environment is available")
@@ -490,5 +495,9 @@ if __name__ == "__main__":
         sys.exit(main())
     except (OSError, ValueError, sqlite3.Error, KeyError) as error:
         # Audit infrastructure remains advisory; never include raw input in diagnostics.
-        print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
+        # Policy refusals are the harness's own messages and say what to do next.
+        if type(error) is ValueError and "gate" in sys.argv:
+            print("WORKFLOW GATE: " + str(error), file=sys.stderr)
+        else:
+            print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
         sys.exit(0 if "hook" in sys.argv or "phase" in sys.argv or "check" in sys.argv else 1)

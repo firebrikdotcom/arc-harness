@@ -195,8 +195,9 @@ class WorkflowTests(unittest.TestCase):
         self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"touch PRIVATE_PATH"})
         self.gate("PreToolUse",tool_name="Read",tool_input={"file_path":"PRIVATE_PATH"})
         self.gate("PreToolUse",tool_name="Bash",tool_input={"command":str(ROOT/"scripts/harness")+" workflow todo show"})
-        for suffix in (";touch PRIVATE_PATH", " && touch PRIVATE_PATH", " | cat", " $(touch PRIVATE_PATH)", " `touch PRIVATE_PATH`"):
+        for suffix in (";touch PRIVATE_PATH", " && touch PRIVATE_PATH", " > PRIVATE_PATH", " $(touch PRIVATE_PATH)", " `touch PRIVATE_PATH`"):
             self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":str(ROOT/"scripts/harness")+" workflow todo show"+suffix})
+        self.gate("PreToolUse",tool_name="Bash",tool_input={"command":str(ROOT/"scripts/harness")+" workflow todo show | cat"})
         self.policy("plan","--items",json.dumps([{"id":"a","description":"Repair parser","criterion":"Regression passes"}]),"--reason","Initial plan")
         self.gate("PreToolUse",2,tool_name="Write",tool_input={"file_path":"PRIVATE_PATH"})
         self.policy("update","--id","a","--status","in_progress","--reason","Working on parser")
@@ -233,10 +234,57 @@ class WorkflowTests(unittest.TestCase):
         self.policy("update","--id","a","--status","completed","--evidence","Evidence supplied","--reason","Updated")
         self.gate("Stop",2)
 
+    def test_reads_bookkeeping_and_sensors_need_no_active_todo_but_writes_do(self):
+        self.gate("UserPromptSubmit",prompt="Work")
+        harness = str(ROOT/"scripts/harness")
+        for command in ("ls -la", "git status --short", "git log --oneline -3 | head -n 2", "cat README.md | grep -n x 2>/dev/null",
+                        "find . -name '*.md' | wc -l", "sed -n 1,5p README.md", "cd scripts && ls",
+                        harness+" workflow todo show && "+harness+" status", str(ROOT/"scripts/verify.sh")+" --project .",
+                        str(ROOT/"scripts/review.sh")+" --project ."):
+            self.gate("PreToolUse",tool_name="Bash",tool_input={"command":command})
+        for command in ("echo x > PRIVATE_PATH", "touch PRIVATE_PATH", "sed -i s/a/b/ PRIVATE_PATH", "find . -delete",
+                        "git commit -m x", "git branch -D x", "ls $(touch PRIVATE_PATH)", "python3 -c 'print(1)'", "sh -c ls",
+                        "cat a | tee PRIVATE_PATH", "sort -o PRIVATE_PATH a"):
+            self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":command})
+
+    def test_completion_freshness_follows_project_files_not_unrelated_writes(self):
+        project = self.base/"project"
+        project.mkdir()
+        subprocess.run(["git","init","-q",str(project)],check=True)
+        (project/"a.txt").write_text("one\n")
+        self.gate("UserPromptSubmit",prompt="Work")
+        self.policy("plan","--items",json.dumps([{"id":"a","description":"Change a","criterion":"Checks pass"}]),"--reason","Plan")
+        self.policy("update","--id","a","--status","completed","--evidence","Checks passed","--reason","Done")
+        tree = subprocess.run(["sh",str(ROOT/"scripts/tree-hash.sh"),str(project)],capture_output=True,text=True,check=True).stdout.strip()
+        for kind in ("verify","review"):
+            path=self.base/(kind+".state")
+            path.write_text("EXIT=0\nFAILURES=0\nRECORD_AT="+datetime.now(timezone.utc).isoformat().replace("+00:00","Z")+
+                            "\nTREE_HASH="+tree+"\nPROJECT_ROOT="+str(project)+"\n")
+            self.run_cli("check","--kind",kind,"--record",str(path),"--session-id","policy-session")
+        self.gate("Stop")
+        # An executed call that leaves the project untouched (a memory note, a scratch file) keeps the checks fresh.
+        self.policy("update","--id","a","--status","in_progress","--reason","Write a note")
+        self.gate("PreToolUse",tool_name="Write",tool_input={"file_path":str(self.base/"note.md")})
+        self.policy("update","--id","a","--status","completed","--evidence","Checks passed","--reason","Done")
+        self.gate("Stop")
+        (project/"a.txt").write_text("two\n")
+        result = self.gate("Stop",2)
+        self.assertIn("Fresh passing verify", result.stderr)
+
+    def test_gate_without_a_session_fails_closed_inside_an_agent(self):
+        env = {k: v for k, v in self.env.items() if k not in ("HARNESS_SESSION_ID","CODEX_THREAD_ID","CLAUDE_SESSION_ID","CLAUDE_CODE_SESSION_ID")}
+        human = subprocess.run([sys.executable,str(ROOT/"scripts/workflow_audit.py"),"gate","--check","active"],
+                               env={k: v for k, v in env.items() if k not in ("CLAUDECODE","CODEX_SANDBOX")},text=True,capture_output=True)
+        self.assertEqual(human.returncode,0,human.stderr)
+        agent = subprocess.run([sys.executable,str(ROOT/"scripts/workflow_audit.py"),"gate","--check","active"],
+                               env={**env,"CLAUDECODE":"1"},text=True,capture_output=True)
+        self.assertEqual(agent.returncode,1)
+        self.assertIn("needs this session's ID",agent.stderr)
+
     def test_policy_is_independent_of_collection_and_question_exemption_cannot_execute(self):
         self.config(False,False)
         self.gate("UserPromptSubmit",prompt="Question")
-        self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"echo question"})
+        self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"touch question"})
         self.policy("exempt","--reason","Answer needs no local execution")
         self.gate("Stop")
         self.gate("PreToolUse",2,tool_name="Write",tool_input={"file_path":"file"})

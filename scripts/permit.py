@@ -172,6 +172,42 @@ def command_writes(argv: list[str]) -> list[str]:
     return []
 
 
+def segment_argv(segment: list[str]) -> tuple[list[str], list[str]]:
+    """Split one segment into the command's argv and the files it redirects output to.
+    Leading variable assignments and wrappers (env, nohup, timeout, ...) are removed."""
+    argv: list[str] = []
+    outputs: list[str] = []
+    index = 0
+    while index < len(segment):
+        token = segment[index]
+        if token in REDIRECT_OUT or token == ">&":
+            if index + 1 < len(segment):
+                target = segment[index + 1]
+                if not (token == ">&" and (target.isdigit() or target == "-")) and target not in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+                    outputs.append(target)
+                if argv and argv[-1].isdigit():
+                    argv.pop()
+            index += 2
+            continue
+        if token in REDIRECT_IN or token == "<&":
+            if argv and argv[-1].isdigit():
+                argv.pop()
+            index += 2
+            continue
+        argv.append(token)
+        index += 1
+    while argv and (re.match(r"^[A-Za-z_]\w*=", argv[0]) or os.path.basename(argv[0]) in WRAPPERS or argv[0] == "env"):
+        if argv[0] == "env":
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[1:]
+            continue
+        argv = argv[1:]
+    if argv and os.path.basename(argv[0]) == "timeout":
+        argv = options_and_operands(argv[1:])[1][1:] if len(argv) > 2 else []
+    return argv, outputs
+
+
 def analyse(command: str, cwd: str, depth: int = 0) -> tuple[list[tuple[str, str]], list[str]]:
     """Return ([(target, cwd), ...], [inline code, ...]) for one shell command."""
     if depth > 3:
@@ -179,35 +215,8 @@ def analyse(command: str, cwd: str, depth: int = 0) -> tuple[list[tuple[str, str
     targets: list[tuple[str, str]] = []
     inline: list[str] = []
     for segment in split_segments(tokenize(command)):
-        argv: list[str] = []
-        index = 0
-        while index < len(segment):
-            token = segment[index]
-            if token in REDIRECT_OUT or token == ">&":
-                if index + 1 < len(segment):
-                    target = segment[index + 1]
-                    if not (token == ">&" and (target.isdigit() or target == "-")) and target not in ("/dev/null", "/dev/stdout", "/dev/stderr"):
-                        targets.append((target, cwd))
-                    if argv and argv[-1].isdigit():
-                        argv.pop()
-                index += 2
-                continue
-            if token in REDIRECT_IN or token == "<&":
-                if argv and argv[-1].isdigit():
-                    argv.pop()
-                index += 2
-                continue
-            argv.append(token)
-            index += 1
-        while argv and (re.match(r"^[A-Za-z_]\w*=", argv[0]) or os.path.basename(argv[0]) in WRAPPERS or argv[0] == "env"):
-            if argv[0] == "env":
-                argv = argv[1:]
-                while argv and argv[0].startswith("-"):
-                    argv = argv[1:]
-                continue
-            argv = argv[1:]
-        if argv and os.path.basename(argv[0]) == "timeout":
-            argv = options_and_operands(argv[1:])[1][1:] if len(argv) > 2 else []
+        argv, outputs = segment_argv(segment)
+        targets.extend((target, cwd) for target in outputs)
         if not argv:
             continue
         name = os.path.basename(argv[0])
