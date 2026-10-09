@@ -18,6 +18,10 @@ count_markers() {
   grep -c -F '<!-- harness-cli:start -->' "$1" || true
 }
 
+block_words() {
+  sed -n '/<!-- harness-cli:start -->/,/<!-- harness-cli:end -->/p' "$1" | wc -w | tr -d ' '
+}
+
 # Existing file without a block gets the block appended; missing file is created.
 printf '%s\n' '# Agent Guide' '' 'Keep this line.' > "$PROJECT/AGENTS.md"
 "$INSTALL" --project "$PROJECT" >/dev/null
@@ -25,31 +29,29 @@ printf '%s\n' '# Agent Guide' '' 'Keep this line.' > "$PROJECT/AGENTS.md"
 grep -q 'Keep this line.' "$PROJECT/AGENTS.md" || fail "existing AGENTS.md content was lost"
 [ "$(count_markers "$PROJECT/AGENTS.md")" -eq 1 ] || fail "AGENTS.md should hold exactly one block"
 [ "$(count_markers "$PROJECT/CLAUDE.md")" -eq 1 ] || fail "CLAUDE.md should hold exactly one block"
-grep -q 'plan start' "$PROJECT/AGENTS.md" || fail "block missing the plan command"
-grep -q 'launch --state TASK.json' "$PROJECT/AGENTS.md" || fail "block missing the task-entry launch command"
 
-grep -q 'advise --context CHECKPOINT.json' "$PROJECT/AGENTS.md" || fail "checkpoint command missing"
-grep -q 'advise --record OUTCOME.json' "$PROJECT/CLAUDE.md" || fail "outcome command missing"
-grep -q 'shadow mode' "$PROJECT/AGENTS.md" || fail "shadow boundary missing"
-
-# Jev guidance names concrete trigger points instead of a generic paragraph,
-# and every trigger command is an exact, runnable flag-form checkpoint.
-if grep -q 'Consider Jev at every meaningful decision' "$PROJECT/AGENTS.md"; then
-  fail "generic Jev paragraph should be replaced by trigger points"
+# The block is a short map of the gated workflow, not an encyclopedia.
+for command in "plan start" "contract set" "contract waive" "plan done" "build done" "review submit" "review done" "brief" "continue"; do
+  grep -q "$command" "$PROJECT/AGENTS.md" || fail "block missing: $command"
+done
+[ "$(block_words "$PROJECT/AGENTS.md")" -le 350 ] || fail "the block grew past 350 words ($(block_words "$PROJECT/AGENTS.md")); move detail to docs"
+if grep -q 'advise --family' "$PROJECT/AGENTS.md"; then
+  fail "Jev trigger commands belong in docs/jev-checkpoints.md, not the always-loaded block"
 fi
+
+# The optional Jev triggers stay exact, runnable flag-form checkpoints in the docs.
+JEV_DOC="$HARNESS_ROOT_UNDER_TEST/docs/jev-checkpoints.md"
 for family in tool_selection evidence_assessment handoff_assessment; do
-  grep -q "^- Before .*advise --family $family " "$PROJECT/AGENTS.md" || fail "trigger for $family missing"
+  grep -q "^- Before .*advise --family $family " "$JEV_DOC" || fail "trigger for $family missing from the Jev docs"
 done
 # shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
-grep -q 'set `--baseline` to the choice you would make without asking' "$PROJECT/AGENTS.md" \
+grep -q 'set `--baseline` to the choice you would make without asking' "$JEV_DOC" \
   || fail "trigger commands must tell the agent to substitute its own baseline and facts"
 # shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
-grep '^- Before' "$PROJECT/AGENTS.md" | sed 's/^[^`]*`//; s/`$//' > "$TMP_ROOT/triggers"
+grep '^- Before' "$JEV_DOC" | sed 's/^[^`]*`//; s/`$//' > "$TMP_ROOT/triggers"
 [ "$(wc -l < "$TMP_ROOT/triggers")" -eq 3 ] || fail "expected exactly three trigger commands"
-if grep -q "$PROJECT\|$HARNESS_ROOT_UNDER_TEST/scripts/jg" "$TMP_ROOT/triggers"; then
-  fail "trigger choices must not embed paths that would be sent to Jev"
-fi
 (
+  cd "$HARNESS_ROOT_UNDER_TEST"
   export HARNESS_TYPESAFE_ROUTER="$HARNESS_ROOT_UNDER_TEST/tests/fake_router.py"
   export HARNESS_DB_ROOT="$TMP_ROOT/db" FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
   while IFS= read -r trigger; do
@@ -65,16 +67,22 @@ fi
 # infers its root from that path, so no repeated environment assignment is needed.
 grep -q "^$HARNESS_ROOT_UNDER_TEST/scripts/harness plan start" "$PROJECT/AGENTS.md" \
   || fail "external project block should point at the harness CLI"
-# The harness root's own guides carry the current block with repository-relative links.
-for guide in AGENTS.md CLAUDE.md; do
-  grep -qF "Formats: docs/jev-checkpoints.md." "$HARNESS_ROOT_UNDER_TEST/$guide" \
-    || fail "$guide block is stale or uses a machine-specific docs path; rerun scripts/install-guides.sh --project ."
-done
-grep -qF "Formats: $HARNESS_ROOT_UNDER_TEST/docs/jev-checkpoints.md." "$PROJECT/AGENTS.md" \
+grep -qF "$HARNESS_ROOT_UNDER_TEST/docs/jev-checkpoints.md" "$PROJECT/AGENTS.md" \
   || fail "external project block should point at the harness checkpoint docs"
 if grep -q 'HARNESS_ROOT=' "$PROJECT/AGENTS.md"; then
   fail "external project block should not repeat HARNESS_ROOT"
 fi
+# The harness root's own guide carries the current block with repository-relative links,
+# and its CLAUDE.md imports AGENTS.md instead of repeating it.
+cp "$HARNESS_ROOT_UNDER_TEST/AGENTS.md" "$TMP_ROOT/self-agents.before"
+cp "$HARNESS_ROOT_UNDER_TEST/CLAUDE.md" "$TMP_ROOT/self-claude.before"
+sh "$INSTALL" --project "$HARNESS_ROOT_UNDER_TEST" > "$TMP_ROOT/self.out" 2>&1 || fail "install on the harness root failed"
+if ! cmp -s "$HARNESS_ROOT_UNDER_TEST/AGENTS.md" "$TMP_ROOT/self-agents.before"; then
+  cp "$TMP_ROOT/self-agents.before" "$HARNESS_ROOT_UNDER_TEST/AGENTS.md"
+  fail "the harness root AGENTS.md block is stale; rerun scripts/install-guides.sh --project ."
+fi
+cmp -s "$HARNESS_ROOT_UNDER_TEST/CLAUDE.md" "$TMP_ROOT/self-claude.before" || fail "CLAUDE.md must not change"
+grep -q 'skipped: .*CLAUDE.md (imports AGENTS.md)' "$TMP_ROOT/self.out" || fail "a CLAUDE.md importing AGENTS.md should be left alone"
 
 # Second run changes nothing.
 cp "$PROJECT/AGENTS.md" "$TMP_ROOT/agents.before"
@@ -98,4 +106,4 @@ if "$INSTALL" --bogus >/dev/null 2>&1; then
   fail "unknown argument should fail"
 fi
 
-printf '%s\n' 'PASS: install-guides creates, appends, and refreshes the harness block'
+printf '%s\n' 'PASS: install-guides keeps a short gated-workflow block; Jev triggers live in the docs'

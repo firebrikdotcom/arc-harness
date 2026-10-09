@@ -301,7 +301,7 @@ def hook(agent: str | None = None) -> int:
                   f"{'on' if enabled('workflow.prompt_recorded') else 'off'}). Before editing: "
                   f"{ROOT}/scripts/harness workflow todo plan --items JSON --reason TEXT, then todo update "
                   "--status in_progress; reads, harness commands, verify and review need no todo. "
-                  "Commands: docs/setup.md, section Workflow audit.")
+                  "Commands: docs/setup.md, section Audited todo enforcement.")
         elif event == "UserPromptSubmit" and enabled("workflow.prompt_recorded"):
             prompt = payload.get("prompt")
             if isinstance(prompt, str) and prompt.strip():
