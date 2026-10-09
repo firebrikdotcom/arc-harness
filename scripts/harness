@@ -16,6 +16,8 @@ DEFAULT_CAP_CONTINUES=3
 DEFAULT_RUN_IDLE_HOURS=24
 # The same command failing the same way this many times in a row pauses the run.
 DEFAULT_CAP_REPEAT_FAILURES=2
+# plan start archives finished runs beyond this many per database.
+DEFAULT_RETAIN_RUNS=50
 SCRIPT_PATH=$0
 while [ -L "$SCRIPT_PATH" ]; do
   _link_dir=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
@@ -58,6 +60,9 @@ usage() {
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
+  info "  brief                What a new session needs: run, contract, pause, recent steps, map."
+  info "  prune [--keep N] [--dry-run]"
+  info "                       Archive finished runs beyond the newest N (plan start does this too)."
   info "  workflow task|todo|decision|outcome|flush  Record session task metadata or retry delivery."
   info "  route --state PATH   Route compact task metadata before an agent starts."
   info "  launch --state PATH --default-command PATH"
@@ -78,6 +83,7 @@ usage() {
   info "  HARNESS_BUDGET_CONTINUES default $DEFAULT_CAP_CONTINUES (continues allowed per run)"
   info "  HARNESS_RUN_IDLE_HOURS   default $DEFAULT_RUN_IDLE_HOURS (idle hours before a run is stale; 0 disables)"
   info "  HARNESS_BUDGET_REPEAT_FAILURES default $DEFAULT_CAP_REPEAT_FAILURES (identical failures in a row before a pause; 0 disables)"
+  info "  HARNESS_RETAIN_RUNS      default $DEFAULT_RETAIN_RUNS (runs kept per database before plan start archives older ones)"
   info ""
   info "Other environment variables:"
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
@@ -421,6 +427,108 @@ create_run() {
   mv "$CURRENT_FILE.tmp.$$" "$CURRENT_FILE"
   info "Run created: $_run_id"
   info "State: $RUN_DIR"
+  _archived=$(prune_runs "${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}" 0)
+  [ "$_archived" = "0" ] || info "Retention: archived $_archived finished run(s) beyond the newest ${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}."
+}
+
+# prune_runs KEEP DRY_RUN  Archives runs beyond the newest KEEP into
+# RUNS_DIR/archive/<id>.tar.gz. A run some session still has active or paused is
+# never archived. Prints the number of runs archived (or that would be).
+prune_runs() {
+  _keep=$1
+  _dry=$2
+  _count=0
+  [ -d "$RUNS_DIR" ] || { printf '0\n'; return 0; }
+  case "$_keep" in ''|*[!0-9]*) _keep=$DEFAULT_RETAIN_RUNS ;; esac
+  _live=$(cat "$RUNS_DIR/current" "$RUNS_DIR"/sessions/*/current 2>/dev/null | sort -u)
+  _index=0
+  for _id in $(ls -1 "$RUNS_DIR" | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9]+$' | sort -r); do
+    _index=$((_index + 1))
+    [ "$_index" -gt "$_keep" ] || continue
+    _status=$(sed -n 's/^RUN_STATUS=//p' "$RUNS_DIR/$_id/state" 2>/dev/null | tail -n 1)
+    if printf '%s\n' "$_live" | grep -qx "$_id"; then
+      case "$_status" in active|paused) continue ;; esac
+    fi
+    _count=$((_count + 1))
+    [ "$_dry" = "1" ] && continue
+    mkdir -p "$RUNS_DIR/archive"
+    tar -czf "$RUNS_DIR/archive/$_id.tar.gz" -C "$RUNS_DIR" "$_id" && rm -rf "${RUNS_DIR:?}/$_id"
+  done
+  printf '%s\n' "$_count"
+}
+
+cmd_prune() {
+  _keep=${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}
+  _dry=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --keep) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _keep=$2; shift 2 ;;
+      --dry-run) _dry=1; shift ;;
+      *) info "FAIL: unknown argument: $1"; exit "$EXIT_USAGE" ;;
+    esac
+  done
+  case "$_keep" in ''|*[!0-9]*) info "FAIL: --keep needs a number."; exit "$EXIT_USAGE" ;; esac
+  _count=$(prune_runs "$_keep" "$_dry")
+  if [ "$_dry" = "1" ]; then
+    info "Would archive $_count run(s) beyond the newest $_keep in $RUNS_DIR."
+  else
+    info "Archived $_count run(s) beyond the newest $_keep into $RUNS_DIR/archive."
+  fi
+}
+
+# --- brief --------------------------------------------------------------------
+# What a new session needs to resume, printed at session start: this session's
+# run or the latest one, its contract, any pause, the last steps, and the map.
+
+latest_run_id() {
+  [ -d "$RUNS_DIR" ] || return 0
+  ls -1 "$RUNS_DIR" | grep -E '^[0-9]{8}T[0-9]{6}Z-[0-9]+$' | sort | tail -n 1
+}
+
+cmd_brief() {
+  _mine=1
+  _map="$(dirname "$DB_ROOT")/map.md"
+  if ! load_current_run; then
+    _mine=0
+    _latest=$(latest_run_id)
+    if [ -z "$_latest" ] || [ ! -f "$RUNS_DIR/$_latest/state" ]; then
+      info "Harness: no runs yet for $TARGET_ROOT. Start with: harness plan start"
+      [ -f "$_map" ] && info "Project map: $_map"
+      return 0
+    fi
+    bind_run "$_latest"
+  fi
+  info "Harness brief for $TARGET_ROOT"
+  _summary="$(state_get RUN_ID) ($(display_status), phase $(state_get CURRENT_PHASE))"
+  if [ "$_mine" = "1" ]; then
+    info "This session's run: $_summary"
+  else
+    info "No run in this session yet (harness plan start). Latest run: $_summary"
+  fi
+  if [ -f "$(contract_file)" ] && has_cmd python3; then
+    python3 - "$(contract_file)" <<'PY' 2>/dev/null || :
+import json, sys
+data = json.load(open(sys.argv[1]))
+if "waived" in data:
+    print("Contract: waived (" + data["waived"][:160] + ")")
+else:
+    print("Contract: " + data["goal"][:160])
+    print("Acceptance: " + ", ".join(item["id"] for item in data["acceptance"]))
+PY
+  fi
+  if [ "$(state_get RUN_STATUS)" = "paused" ]; then
+    _detail=$(state_get PAUSE_DETAIL)
+    info "Paused on: $(budget_label "$(state_get PAUSE_BUDGET)")${_detail:+ ($_detail)}"
+  fi
+  if [ -f "$RUN_DIR/log" ]; then
+    _recent=$(grep -v '	step tool:' "$RUN_DIR/log" | tail -n 10 | cut -c1-200)
+    if [ -n "$_recent" ]; then
+      info "Recent steps:"
+      printf '%s\n' "$_recent" | sed 's/^/  /'
+    fi
+  fi
+  [ -f "$_map" ] && info "Project map: $_map"
+  return 0
 }
 
 log_event() {
@@ -1305,6 +1413,12 @@ case "$COMMAND" in
     ;;
   contract)
     cmd_contract "$@"
+    ;;
+  brief)
+    cmd_brief "$@"
+    ;;
+  prune)
+    cmd_prune "$@"
     ;;
   abort)
     cmd_abort "$@"
