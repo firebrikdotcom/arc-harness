@@ -6,7 +6,7 @@ This repository currently contains AI-agent configuration and harness files. It 
 
 Known repo items:
 
-- `AGENTS.md`, `CLAUDE.md`, `docs/`, `tasks/`, `scripts/`, `schemas/`, and `progress.md`: AI development harness.
+- `AGENTS.md` (the map), `CLAUDE.md` (imports it), `docs/`, `tasks/`, `scripts/`, and `schemas/`: AI development harness. Run progress lives in each run's log under `.harness-db/`.
 - `.github/workflows/`: CI automation.
 - `.gitignore` and `SECURITY.md`: repository hygiene and security guidance.
 
@@ -65,7 +65,13 @@ Until application code exists, use these boundaries:
 - `scripts/verify.sh` and `scripts/review.sh`: non-mutating verification and review sensors. They write the records used by the build and review gates.
 - `scripts/install-guides.sh`: idempotently refreshes the marked harness block in a target's agent guides without changing its surrounding instructions.
 - `tools/auditability-planning-wizard.html`: dependency-free browser planner for the first Arc/JEV auditability slice. It keeps draft answers in browser-local storage and exports only the answers the operator supplies; it does not route tasks or call an external service.
-- `.claude/settings.json` and `scripts/hooks/require-phase.sh`: Claude Code-only enforcement for denylist, knowledge trust, active phase, and tool-step accounting.
+- `.claude/settings.json` and `scripts/hooks/require-phase.sh`: Claude Code-only enforcement for the guard version, denylist, knowledge trust, the session's active phase (stale runs refused), build-only project writes, and tool-step accounting.
+- `scripts/permit.py`: the denylist engine behind `scripts/permit.sh`. It parses shell commands into segments and judges the files they would write against the `path` rules; inline interpreter code and unparseable commands meet the `inline` rules.
+- `scripts/task_contract.py` and `schemas/task.schema.json`: the run's bounded contract. `plan done` requires it, `build done` runs its acceptance commands through the denylist, `review done` checks non-goal paths.
+- `scripts/review_findings.py` and `schemas/review-findings.schema.json`: the independent reviewer's verdict, bound to the tree hash it reviewed; `review done` requires an approval with no open blocker or major finding.
+- `scripts/failure_budget.py`: post-tool hook that reports each shell outcome to `harness failure`; the same command failing the same way twice pauses the run.
+- `scripts/tree-hash.sh`: a git tree of the project's files on disk, used to void verify and review records once project files change.
+- `scripts/guard-version`: the guard's version stamp; a checkout older than the installed harness refuses work.
 
 When application code is added, document each module with:
 
@@ -97,6 +103,7 @@ Add dated decisions here as the system takes shape.
 - 2026-05-25: Defined the harness as a cross-project orchestrator. Project-specific documents and run state are local database content under ignored harness database directories, not tracked template files.
 - 2026-09-01: Added a proposed-action schema and validator. The model proposes `run_command` or `write_file` JSON. The harness validates the shape. Permission checks and execution are not in this slice.
 - 2026-09-19: Added dynamic TypeSafe advice as a separate, non-executing path. It takes a small redacted context and per-situation choices instead of a fixed global template; the existing deterministic gates remain authoritative.
+- 2026-10-09: Closed the gaps against harness-engineering practice: every rule in AGENTS.md now has a gate. Runs are bound to a contract, verification must produce evidence and expires on project edits, an independent reviewer approves the exact files, two identical failures stop the run, the denylist judges write targets instead of command text, sessions resume from `harness brief`, and the always-loaded guide shrank to a map.
 - 2026-09-21: Added opt-in Codex goal-token metering for App Server-owned threads. Existing active goal usage is preserved, direct CLI launches refuse unenforceable caps, and active-turn interruption uses the App Server protocol's required thread and turn identifiers.
 - 2026-09-22: Added an offline auditability-planning wizard for choosing the first Arc/JEV event-sourcing slice without collecting raw prompts or making network requests.
 
