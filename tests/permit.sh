@@ -104,7 +104,52 @@ allow_path 'docs/setup.md'
 allow_path '.env.example'
 allow_path "$HOME/.claude/projects/x/memory/note.md"
 allow_path 'scripts/verify.sh'
-allow_path '.harness-db/runs/x/state'
+# The harness database is written by the harness scripts, never by a tool call.
+deny_path '.harness-db/runs/x/state'
+deny_path '.harness-db/runs/x/task.json'
+deny_path ".harness-db/targets/abc/db/records/verify.state"
+# Unnormalised spellings resolve before the rules apply.
+deny_path "$HARNESS_ROOT_UNDER_TEST/docs/../scripts/hooks/require-phase.sh"
+deny_path "$HARNESS_ROOT_UNDER_TEST//scripts/hooks/require-phase.sh"
+deny_path "$HARNESS_ROOT_UNDER_TEST/./scripts/permit.py"
+
+# Writes are judged by their targets, however the command reaches them; each case
+# below is a bypass an independent review reproduced against the first version.
+H=scripts/hooks/require-phase.sh
+# shellcheck disable=SC2016 # substitutions and variables are part of the commands under test
+for command in "rm -rf scripts/hooks" "rm -rf .harness-db/records" "rm -rf .harness-db" "mv $H /tmp/x" "chmod -x $H" \
+  "cp -t scripts/hooks /tmp/evil" "cp -r /tmp/evil scripts" "nice -n 5 rm -f $H" "pushd scripts && rm -f hooks/require-phase.sh" \
+  "env -C scripts rm hooks/require-phase.sh" "rm scripts/hook*/require-phase.sh" "rm scripts/{hooks,x}/require-phase.sh" \
+  "find scripts/hooks -delete" "find . -name '*.md' -delete" "echo $H | xargs rm" "git rm -f $H" "git checkout HEAD~3 -- $H" \
+  "perl -pi -e 's/a/b/' $H" "bash -ec 'rm -f $H'" "sh -xc 'echo > $H'" "eval 'rm -f $H'" \
+  "cp /tmp/evil $H # don't" "python3 -Ic \"open('$H','w')\"" "tar -xf /tmp/a.tar $H" "rm -rf /home" \
+  'cd "$(chmod -x scripts/hooks/require-phase.sh)" && ls' 'D=.; printf x >> "$D/scripts/hooks/require-phase.sh"' \
+  'echo CAP_REPEAT_FAILURES=0 >> .harness-db/runs/x/state' 'cp /tmp/weak.json .harness-db/runs/x/task.json' \
+  'true && scripts/harness failure clear --command-key abc' 'scripts/harness review submit f.json' \
+  'HARNESS_REVIEWER_CMD=x scripts/review.sh' 'HARNESS_REQUIRED_CHECKS=allow-empty scripts/verify.sh' \
+  'HARNESS_BUDGET_STEPS=9999 scripts/harness plan start' "cd /tmp > $H && scripts/harness status"; do
+  deny_cmd "$command"
+done
+deny_cmd "$(printf "bash <<'EOF'\nrm -f %s\nEOF" "$H")"
+deny_cmd "$(printf "python3 - <<'EOF'\nopen('%s','w').write('')\nEOF" "$H")"
+deny_cmd "$(printf "echo '<<END'\nrm -f %s" "$H")"
+# Reading or naming a protected file stays allowed.
+for command in "cat $H" "grep -n x schemas/denylist.default" "ls scripts/hooks/" "cp a.txt docs/b.txt" "mkdir -p scripts/new" \
+  "cp x scripts/" "sed -i s/a/b/ docs/x.md" "git checkout -b feature" "python3 -c \"print(open('schemas/denylist.default').read())\"" \
+  "find build -name '*.o' -delete" "chmod +x scripts/new.sh" "tar -xf a.tar -C /tmp/out" "git log --format=%h#x" \
+  "echo \"don't\" > /tmp/q" 'grep -rn "harness abort" docs'; do
+  allow_cmd "$command"
+done
+allow_cmd "$(printf "cat > notes.md <<'EOF'\nrm -f %s\nEOF" "$H")"
+
+# Without python3 the Node fallback cannot see write targets, so it refuses any
+# command that names a guard path.
+if command -v node >/dev/null 2>&1; then
+  if PATH="$TMP_ROOT/node-bin" "$PERMIT" check --command "echo x > $H" >/dev/null 2>&1; then
+    fail "the Node fallback must refuse a command naming the guard"
+  fi
+  PATH="$TMP_ROOT/node-bin" "$PERMIT" check --command 'rm -rf build' >/dev/null 2>&1 || fail "the Node fallback should allow ordinary commands"
+fi
 
 # A project denylist replaces the default entirely.
 mkdir -p "$TMP_ROOT/proj"

@@ -36,14 +36,15 @@ command \b(cargo|gem)\s+(publish|push)\b
 command \btwine\s+upload\b
 command \bgh\s+(release\s+create|repo\s+delete)\b
 
-# Loosening permissions, disabling the guard, or approving untrusted knowledge
+# Loosening permissions, disabling or retuning the guard, or human-only decisions
 command \bchmod\s+(-R\s+)?[0-7]*777\b
-command (^|[\s;&|(])(export\s+)?HARNESS_HOOK_DISABLE=
+command (^|[\s;&|(])(export\s+|env\s+)?HARNESS_(HOOK_DISABLE|BUDGET_[A-Z_]+|RUN_IDLE_HOURS|RETAIN_RUNS|HOME|DB_ROOT|REQUIRED_CHECKS|REVIEWER_CMD|REVIEW_BASE)=
 command knowledge-trust\.sh\s+approve\b
+command (^|[\s;&|(/])harness\s+(abort|failure|review\s+submit)\b
 
-# Inline interpreter code that writes to the guard, its rules, or its records
-inline (scripts/hooks/|scripts/permit\.(sh|py)|scripts/guard-version|schemas/denylist\.default|\.harness-denylist|\.harness-db/(trust|records)/|\.claude/(settings(\.local)?\.json|CLAUDE\.md))[\s\S]*(['"][wax]\+?['"]|write_text|write_bytes|\.write\(|writeFile|appendFile|unlink|os\.remove|rename|chmod|shutil\.|rmtree|truncate|subprocess|system\()
-inline (open\([^)]*['"][wax]|write_text|write_bytes|\.write\(|writeFile|appendFile|unlink|os\.remove|rename|chmod|shutil\.|rmtree|truncate|subprocess|system\()[\s\S]*(scripts/hooks/|scripts/permit\.(sh|py)|scripts/guard-version|schemas/denylist\.default|\.harness-denylist|\.harness-db/(trust|records)/|\.claude/(settings(\.local)?\.json|CLAUDE\.md))
+# Inline interpreter code that writes to the guard, its rules, or its state
+inline (scripts/hooks/|scripts/permit\.(sh|py)|scripts/guard-version|schemas/denylist\.default|\.harness-denylist|\.harness-db|\.claude/(settings(\.local)?\.json|CLAUDE\.md))[\s\S]*(['"][wax]\+?['"]|write_text|write_bytes|\.write\(|writeFile|appendFile|unlink|os\.remove|rename|chmod|shutil\.|rmtree|truncate|subprocess|system\()
+inline (open\([^)]*['"][wax]|write_text|write_bytes|\.write\(|writeFile|appendFile|unlink|os\.remove|rename|chmod|shutil\.|rmtree|truncate|subprocess|system\()[\s\S]*(scripts/hooks/|scripts/permit\.(sh|py)|scripts/guard-version|schemas/denylist\.default|\.harness-denylist|\.harness-db|\.claude/(settings(\.local)?\.json|CLAUDE\.md))
 
 # Write targets: git internals, secrets, the guard itself
 path (^|/)\.git(/|$)
@@ -60,4 +61,6 @@ path ^scripts/guard-version$
 path ^scripts/knowledge-trust\.sh$
 path ^schemas/denylist\.default$
 path ^\.harness-denylist$
-path ^\.harness-db/(trust|records)/
+# The harness database (runs, contracts, failure counts, gate records) is written
+# only by the harness scripts, never by a tool call.
+path (^|/)\.harness-db(/|$)

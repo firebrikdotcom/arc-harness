@@ -39,8 +39,13 @@ def read_only_segment(words):
     name = Path(words[0]).name
     if name == "git":
         rest = [word for word in words[1:] if not word.startswith("-")]
-        return bool(rest) and (rest[0] in GIT_READS or (rest[0] in ("branch", "tag", "remote", "stash", "worktree")
-                                                       and all(word in ("-a", "-r", "-v", "-vv", "--list", "-l", "list") for word in words[2:])))
+        if not rest:
+            return False
+        if rest[0] in ("stash", "worktree"):
+            # Bare `git stash` pushes; only the listing form reads.
+            return rest[1:] == ["list"]
+        return rest[0] in GIT_READS or (rest[0] in ("branch", "tag", "remote")
+                                        and all(word in ("-a", "-r", "-v", "-vv", "--list", "-l") for word in words[2:]))
     if name == "find":
         return not any(word in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls") for word in words)
     if name == "sed":
@@ -59,14 +64,15 @@ def management_command(payload):
         return False
     cwd = Path(payload.get("cwd") or ".")
     try:
-        targets, inline = permit.analyse(command, str(cwd))
-        segments = permit.split_segments(permit.tokenize(command))
+        analysis = permit.analyse(command, str(cwd), cwd.resolve())
+        text, bodies = permit.preprocess(command)
+        segments = permit.split_segments(permit.tokenize(text))
     except permit.Unparseable:
         return False
-    if inline or targets:
+    if analysis.inline or analysis.targets or analysis.opaque or bodies:
         return False
     for segment in segments:
-        words, _ = permit.segment_argv(segment)
+        words = permit.read_segment(segment, []).argv
         if words and not (management_segment(words, cwd) or read_only_segment(words)):
             return False
     return True

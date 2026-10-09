@@ -107,6 +107,13 @@ elif has_cmd node; then
   node - "$RULES" "$KIND" "$SUBJECT" <<'JS'
 const fs = require('fs');
 const [rulesPath, kind, subject] = process.argv.slice(2);
+// Without the Python parser no write target is known, so a command that names
+// a guard path at all is refused.
+const guard = /(scripts\/hooks|scripts\/permit\.|scripts\/guard-version|schemas\/denylist\.default|\.harness-denylist|\.harness-db|\.claude\/(settings|CLAUDE))/;
+if (kind === 'command' && guard.test(subject)) {
+  process.stdout.write(`DENY: command names a guard path and python3 is unavailable to judge its writes\n`);
+  process.exit(1);
+}
 const lines = fs.readFileSync(rulesPath, 'utf8').split('\n');
 for (let index = 0; index < lines.length; index += 1) {
   const line = lines[index];

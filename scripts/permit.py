@@ -5,16 +5,24 @@ Rules come from the project's .harness-denylist or schemas/denylist.default:
 
   command <regex>  matches the whole command text (destructive actions such as rm -rf /)
   path <regex>     matches a write target, relative to the project root when inside it
-  inline <regex>   matches inline interpreter code (python -c, node -e, ...) and any
-                   command that cannot be parsed, where write targets are unknowable
+  inline <regex>   matches inline interpreter code (python -c, node -e, heredocs fed to
+                   an interpreter, ...)
 
-A shell command is parsed into segments, and every file it would write (redirections,
-tee, cp, mv, rm, sed -i, dd of=, ...) is checked against the path rules. Reading or
-mentioning a protected file is allowed; writing it is not.
+A shell command is parsed into segments (following cd/pushd, env -C, sh -c, eval,
+heredocs and here-strings fed to a shell), and every file it would write is
+checked against the path rules: redirections, tee, cp/mv/install/ln, rm/rmdir,
+touch/mkdir, truncate, chmod/chown, dd of=, sed -i, perl -i, find -delete/-exec,
+git rm/mv/checkout/restore, rsync. Deleting, moving, or changing the mode of a
+directory is judged against everything beneath it, globs and braces against every
+protected path they could name, and a target built from a variable by its literal
+suffix. Commands whose writes cannot be known (xargs into a writer, tar, patch, ...)
+and commands that cannot be parsed are refused when they name a protected path.
+Reading or mentioning a protected file is allowed; writing it is not.
 
   permit.py check --command STRING [--project PATH] [--cwd PATH]
-  permit.py check --path PATH [--project PATH]
+  permit.py check --path PATH [--project PATH] [--cwd PATH]
   permit.py targets --command STRING [--project PATH] [--cwd PATH]
+  permit.py harness-call --command STRING [--project PATH] [--cwd PATH]
   permit.py rules [--project PATH]
 
 Exit 0 allowed, 1 denied, 2 usage or environment error.
@@ -22,25 +30,45 @@ Exit 0 allowed, 1 denied, 2 usage or environment error.
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import glob
 import os
 import re
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
 SEPARATORS = {";", "&&", "||", "|", "&", "|&", ";;", "(", ")", "{", "}"}
-REDIRECT_OUT = {">", ">>", ">|", "&>", "&>>"}
-REDIRECT_IN = {"<", "<<", "<<<", "<<-"}
-WRAPPERS = {"command", "exec", "nohup", "time", "nice", "builtin", "stdbuf"}
+REDIRECT_OUT = {">", ">>", ">|", "&>", "&>>", "<>"}
+REDIRECT_IN = {"<", "<&"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
-INTERPRETERS = {"python", "python3", "node", "perl", "ruby", "php"}
+INTERPRETERS = {"python", "python2", "python3", "node", "perl", "ruby", "php", "deno", "bun"}
+WRITERS = {"tee", "cp", "mv", "install", "ln", "rm", "rmdir", "unlink", "shred", "touch", "mkdir", "truncate",
+           "chmod", "chown", "chgrp", "dd", "sed", "perl", "rsync", "git", "find"}
+OPAQUE_WRITERS = {"tar", "unzip", "patch", "cpio", "bsdtar", "7z", "gunzip", "bunzip2", "xz", "zstd"}
 VARIABLE = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)|\$\w+|`[^`]*`")
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][\w.-]*)\1")
+GLOB_CHARS = re.compile(r"[*?\[]")
+CHMOD_MODE = re.compile(r"^([-+=]?[0-7]{1,4}|[ugoa]*([-+=][rwxXstugo]*)+(,[ugoa]*([-+=][rwxXstugo]*)+)*)$")
+# Paths the default rules protect; a rule set decides which of them actually are.
+PROBES = (".git/HEAD", ".env", ".ssh/id_rsa", "scripts/hooks/require-phase.sh", "scripts/permit.sh",
+          "scripts/permit.py", "scripts/guard-version", "scripts/knowledge-trust.sh", "schemas/denylist.default",
+          ".harness-denylist", ".harness-db/runs/x/state", ".harness-db/records/verify.state",
+          ".harness-db/trust/x", ".harness-db/targets/x/db/records/verify.state", ".claude/settings.json",
+          ".claude/settings.local.json", ".claude/CLAUDE.md")
 
 
 class Unparseable(Exception):
     pass
+
+
+class Analysis:
+    def __init__(self) -> None:
+        self.targets: list[tuple[str, tuple[str, ...], str]] = []  # (target, cwd candidates, file|tree)
+        self.inline: list[str] = []
+        self.opaque = False
+        self.words: list[str] = []
 
 
 def load_rules(project: Path) -> tuple[Path, list[tuple[str, str, int]]]:
@@ -69,38 +97,82 @@ def first_match(rules, rules_path, kind: str, subject: str) -> str | None:
     return None
 
 
-def logical_lines(command: str) -> str:
-    """Drop heredoc bodies and join physical lines into one ;-separated command."""
+# --- parsing ------------------------------------------------------------------
+
+def preprocess(command: str) -> tuple[str, list[str]]:
+    """Join physical lines into one ;-separated command, quote-aware: drop comments
+    and line continuations, and lift heredoc bodies out (returned in order)."""
     out: list[str] = []
+    bodies: list[str] = []
     pending: list[tuple[str, bool]] = []
-    lines = command.split("\n")
-    index = 0
-    while index < len(lines):
-        line = lines[index]
-        index += 1
-        if pending:
-            delimiter, strip = pending[0]
-            if (line.lstrip("\t") if strip else line) == delimiter:
-                pending.pop(0)
+    quote = None
+    word_start = True
+    index, length = 0, len(command)
+    while index < length:
+        char = command[index]
+        if quote:
+            out.append(char)
+            if quote == '"' and char == "\\" and index + 1 < length:
+                out.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
             continue
-        for match in HEREDOC.finditer(line):
-            pending.append((match.group(2), "<<-" in match.group(0)))
-        out.append(line)
-    joined = ""
-    for line in out:
-        stripped = line.rstrip()
-        if stripped.endswith("\\"):
-            joined += stripped[:-1] + " "
-        elif re.search(r"(\|\||&&|\|)\s*$", stripped):
-            joined += stripped + " "
-        else:
-            joined += stripped + " ; "
-    return joined
+        if char == "\\" and index + 1 < length:
+            if command[index + 1] != "\n":
+                out.append(command[index:index + 2])
+            index += 2
+            word_start = False
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(char)
+            word_start = False
+            index += 1
+            continue
+        if char == "#" and word_start:
+            newline = command.find("\n", index)
+            index = length if newline < 0 else newline
+            continue
+        if command.startswith("<<", index) and not command.startswith("<<<", index):
+            match = re.match(r"<<(-?)[ \t]*(['\"]?)([^\s'\";&|<>()]+)\2", command[index:])
+            if match:
+                pending.append((match.group(3), bool(match.group(1))))
+                out.append(" << " + shlex.quote(match.group(3)) + " ")
+                index += match.end()
+                word_start = False
+                continue
+        if char == "\n":
+            tail = "".join(out).rstrip()
+            out.append(" " if tail.endswith(("|", "&&", "||", "(", "{")) or not tail else " ; ")
+            index += 1
+            for delimiter, strip in pending:
+                body: list[str] = []
+                while index < length:
+                    newline = command.find("\n", index)
+                    line = command[index:] if newline < 0 else command[index:newline]
+                    index = length if newline < 0 else newline + 1
+                    if (line.lstrip("\t") if strip else line) == delimiter:
+                        break
+                    body.append(line)
+                bodies.append("\n".join(body))
+            pending = []
+            word_start = True
+            continue
+        out.append(char)
+        word_start = char in " \t;&|()<>"
+        index += 1
+    if quote:
+        raise Unparseable("unterminated quote")
+    bodies.extend("" for _ in pending)
+    return "".join(out), bodies
 
 
-def tokenize(command: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
     try:
-        lexer = shlex.shlex(logical_lines(command), posix=True, punctuation_chars=True)
+        lexer = shlex.shlex(text, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         lexer.commenters = ""
         return list(lexer)
@@ -139,120 +211,346 @@ def options_and_operands(argv: list[str], takes_value: set[str] = frozenset()) -
     return options, operands
 
 
-def command_writes(argv: list[str]) -> list[str]:
-    """Files the command named by argv[0] would write."""
-    name = os.path.basename(argv[0])
-    args = argv[1:]
-    if name == "tee":
-        return options_and_operands(args)[1]
-    if name in ("cp", "mv", "install", "ln"):
-        options, operands = options_and_operands(args, {"-t", "-S", "-m", "-o", "-g"})
-        for position, option in enumerate(options):
-            if option == "-t" and position + 1 < len(options):
-                return [options[position + 1]]
-            if option.startswith("--target-directory="):
-                return [option.split("=", 1)[1]]
-        return operands[-1:] if len(operands) >= 2 else operands
-    if name in ("rm", "unlink", "rmdir", "shred", "touch", "mkdir"):
-        return options_and_operands(args, {"-m"})[1]
-    if name == "truncate":
-        return options_and_operands(args, {"-s", "-r"})[1]
-    if name in ("chmod", "chown", "chgrp"):
-        return options_and_operands(args, {"--reference"})[1][1:]
-    if name == "dd":
-        return [arg[3:] for arg in args if arg.startswith("of=")]
-    if name in ("sed", "perl"):
-        in_place = any(arg == "-i" or arg.startswith("-i") or arg.startswith("--in-place") or
-                       (name == "perl" and re.fullmatch(r"-\w*i\w*", arg)) for arg in args)
-        if not in_place:
-            return []
-        options, operands = options_and_operands(args, {"-e", "-f", "--expression", "--file"})
-        scripted = any(option in ("-e", "-f", "--expression", "--file") for option in options)
-        return operands if scripted else operands[1:]
-    return []
+class Segment:
+    def __init__(self) -> None:
+        self.argv: list[str] = []
+        self.outputs: list[str] = []
+        self.stdin: list[str] = []   # heredoc bodies and here-strings
+        self.chdir: str | None = None
+        self.xargs = False
 
 
-def segment_argv(segment: list[str]) -> tuple[list[str], list[str]]:
-    """Split one segment into the command's argv and the files it redirects output to.
-    Leading variable assignments and wrappers (env, nohup, timeout, ...) are removed."""
+def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
+    """Split one segment into argv, output files, and stdin text; peel wrappers."""
+    segment = Segment()
     argv: list[str] = []
-    outputs: list[str] = []
     index = 0
-    while index < len(segment):
-        token = segment[index]
+    while index < len(tokens):
+        token = tokens[index]
+        nxt = tokens[index + 1] if index + 1 < len(tokens) else ""
         if token in REDIRECT_OUT or token == ">&":
-            if index + 1 < len(segment):
-                target = segment[index + 1]
-                if not (token == ">&" and (target.isdigit() or target == "-")) and target not in ("/dev/null", "/dev/stdout", "/dev/stderr"):
-                    outputs.append(target)
-                if argv and argv[-1].isdigit():
-                    argv.pop()
+            if nxt and not (token == ">&" and (nxt.isdigit() or nxt == "-")) and nxt not in ("/dev/null", "/dev/stdout", "/dev/stderr"):
+                segment.outputs.append(nxt)
+            if argv and argv[-1].isdigit():
+                argv.pop()
             index += 2
             continue
-        if token in REDIRECT_IN or token == "<&":
+        if token == "<<":
+            segment.stdin.append(bodies.pop(0) if bodies else "")
+            index += 2
+            continue
+        if token == "<<<":
+            segment.stdin.append(nxt)
+            index += 2
+            continue
+        if token in REDIRECT_IN:
             if argv and argv[-1].isdigit():
                 argv.pop()
             index += 2
             continue
         argv.append(token)
         index += 1
-    while argv and (re.match(r"^[A-Za-z_]\w*=", argv[0]) or os.path.basename(argv[0]) in WRAPPERS or argv[0] == "env"):
-        if argv[0] == "env":
+    # Peel prefixes that run another command.
+    while argv:
+        head = os.path.basename(argv[0])
+        if argv[0] == "!" or re.match(r"^[A-Za-z_]\w*=", argv[0]):
             argv = argv[1:]
+        elif head in ("command", "builtin"):
+            argv = argv[1:]
+            if argv and argv[0] in ("-v", "-V"):
+                return segment
+            while argv and argv[0] == "-p":
+                argv = argv[1:]
+        elif head in ("nohup", "time", "sudo", "doas"):
+            argv = [word for word in argv[1:]]
             while argv and argv[0].startswith("-"):
                 argv = argv[1:]
-            continue
-        argv = argv[1:]
-    if argv and os.path.basename(argv[0]) == "timeout":
-        argv = options_and_operands(argv[1:])[1][1:] if len(argv) > 2 else []
-    return argv, outputs
+        elif head == "exec":
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[2:] if argv[0] == "-a" else argv[1:]
+        elif head == "nice":
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[2:] if argv[0] == "-n" else argv[1:]
+        elif head == "stdbuf":
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[2:] if argv[0] in ("-i", "-o", "-e") else argv[1:]
+        elif head == "timeout":
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                argv = argv[2:] if argv[0] in ("-s", "-k", "--signal", "--kill-after") else argv[1:]
+            argv = argv[1:]  # the duration
+        elif head == "env":
+            argv = argv[1:]
+            while argv and (argv[0].startswith("-") or re.match(r"^[A-Za-z_]\w*=", argv[0])):
+                word = argv[0]
+                if word in ("-C", "--chdir") and len(argv) > 1:
+                    segment.chdir = argv[1]
+                    argv = argv[2:]
+                elif word.startswith("--chdir="):
+                    segment.chdir = word.split("=", 1)[1]
+                    argv = argv[1:]
+                elif word in ("-u", "--unset") and len(argv) > 1:
+                    argv = argv[2:]
+                elif word in ("-S", "--split-string") and len(argv) > 1:
+                    argv = shlex.split(argv[1]) + argv[2:]
+                elif word.startswith("--split-string="):
+                    argv = shlex.split(word.split("=", 1)[1]) + argv[1:]
+                else:
+                    argv = argv[1:]
+        elif head == "xargs":
+            segment.xargs = True
+            argv = argv[1:]
+            while argv and argv[0].startswith("-"):
+                takes = argv[0] in ("-I", "-n", "-L", "-P", "-d", "-s", "-E", "-a", "--arg-file", "--delimiter")
+                argv = argv[2:] if takes else argv[1:]
+        else:
+            break
+    segment.argv = argv
+    return segment
 
 
-def analyse(command: str, cwd: str, depth: int = 0) -> tuple[list[tuple[str, str]], list[str]]:
-    """Return ([(target, cwd), ...], [inline code, ...]) for one shell command."""
-    if depth > 3:
-        raise Unparseable("nested shell too deep")
-    targets: list[tuple[str, str]] = []
-    inline: list[str] = []
-    for segment in split_segments(tokenize(command)):
-        argv, outputs = segment_argv(segment)
-        targets.extend((target, cwd) for target in outputs)
+def command_writes(argv: list[str]) -> list[tuple[str, str]]:
+    """(path, file|tree) the command named by argv[0] would write. tree means the
+    path's whole subtree may be deleted, moved, or have its mode changed."""
+    name = os.path.basename(argv[0])
+    args = argv[1:]
+    if name == "tee":
+        return [(path, "file") for path in options_and_operands(args)[1]]
+    if name in ("cp", "install", "ln", "mv"):
+        options, operands = options_and_operands(args, {"-t", "-S", "-m", "-o", "-g", "--target-directory"})
+        recursive = name == "mv" or any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*|--recursive|--archive", option) for option in options)
+        kind = "tree" if recursive else "file"
+        destination = None
+        for position, option in enumerate(options):
+            if option in ("-t", "--target-directory") and position + 1 < len(options):
+                destination = options[position + 1]
+            elif option.startswith("--target-directory="):
+                destination = option.split("=", 1)[1]
+        if name == "mv":
+            # A move deletes its sources and replaces its destination.
+            return [(path, "tree") for path in operands + ([destination] if destination else [])]
+        if destination:
+            return [(destination, "tree" if recursive else "dir")]
+        return [(operands[-1], kind)] if len(operands) >= 2 else [(path, kind) for path in operands]
+    if name in ("rm", "rmdir", "unlink", "shred"):
+        return [(path, "tree") for path in options_and_operands(args)[1]]
+    if name in ("touch", "mkdir"):
+        return [(path, "file") for path in options_and_operands(args, {"-m", "-d", "-r", "-t"})[1]]
+    if name == "truncate":
+        return [(path, "file") for path in options_and_operands(args, {"-s", "-r"})[1]]
+    if name == "chmod":
+        operands = [word for word in args if not CHMOD_MODE.match(word) and not re.fullmatch(r"-[RvcfhHLP]+|--[a-z-]+(=.*)?", word)]
+        return [(path, "tree") for path in operands]
+    if name in ("chown", "chgrp"):
+        return [(path, "tree") for path in options_and_operands(args, {"--reference"})[1][1:]]
+    if name == "dd":
+        return [(arg[3:], "file") for arg in args if arg.startswith("of=")]
+    if name in ("sed", "perl"):
+        in_place = any(arg.startswith("--in-place") or re.fullmatch(r"-[A-Za-z]*i.*", arg) for arg in args if arg.startswith("-"))
+        if not in_place:
+            return []
+        options, operands = options_and_operands(args, {"-e", "-f", "--expression", "--file", "-E"})
+        scripted = any(option in ("-e", "-f", "--expression", "--file", "-E") or re.fullmatch(r"-[A-Za-z]*e", option) for option in options)
+        return [(path, "file") for path in (operands if scripted else operands[1:])]
+    if name == "rsync":
+        operands = options_and_operands(args)[1]
+        return [(operands[-1], "tree")] if len(operands) >= 2 else []
+    if name == "find":
+        if not any(word in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls", "-fprint0") for word in args):
+            return []
+        starts = []
+        for word in args:
+            if word.startswith("-") or word in ("(", "!", ")"):
+                break
+            starts.append(word)
+        return [(path, "tree") for path in (starts or ["."])]
+    if name == "git":
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            index += 2 if args[index] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+        if index >= len(args):
+            return []
+        sub, rest = args[index], args[index + 1:]
+        if sub in ("rm", "mv", "restore", "checkout", "clean", "apply", "checkout-index", "read-tree", "stash"):
+            return [(path, "tree") for path in options_and_operands(rest, {"-m", "-s", "--source", "-b", "-B"})[1]]
+        return []
+    return []
+
+
+def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
+    """Every write a shell command would make, with the directories it would run in."""
+    result = Analysis()
+    if depth > 4:
+        raise Unparseable("nested commands too deep")
+    text, bodies = preprocess(command)
+    tokens = tokenize(text)
+    result.words.extend(token for token in tokens if token not in SEPARATORS)
+    # Command substitutions run commands of their own.
+    substitutions = re.findall(r"\$\(((?:[^()]|\([^()]*\))*)\)", text) + re.findall(r"`([^`]*)`", text)
+    for body in bodies:
+        result.words.extend(body.split())
+    cwds: tuple[str, ...] = (cwd,)
+    stack: list[tuple[str, ...]] = []
+
+    def nested(text: str, where: tuple[str, ...]) -> None:
+        for place in where:
+            inner = analyse(text, place, project, depth + 1)
+            result.targets.extend(inner.targets)
+            result.inline.extend(inner.inline)
+            result.words.extend(inner.words)
+            result.opaque = result.opaque or inner.opaque
+
+    def move(destination: str | None) -> tuple[str, ...]:
+        if destination is None or destination in ("-", "~"):
+            return (str(project), os.path.expanduser("~")) if destination == "~" else cwds + (str(project),)
+        expanded = re.sub(r"^\$\{?HOME\}?(?=/|$)", os.path.expanduser("~"), os.path.expanduser(destination))
+        if VARIABLE.search(expanded):
+            return cwds + (str(project),)
+        return tuple(os.path.normpath(os.path.join(place, expanded)) for place in cwds)
+
+    for inner in substitutions:
+        nested(inner, cwds)
+    for tokens_of_segment in split_segments(tokens):
+        segment = read_segment(tokens_of_segment, bodies)
+        here = move(segment.chdir) if segment.chdir else cwds
+        result.targets.extend((path, here, "file") for path in segment.outputs)
+        argv = segment.argv
         if not argv:
             continue
         name = os.path.basename(argv[0])
-        if name == "cd":
-            destination = argv[1] if len(argv) > 1 else "~"
-            if not VARIABLE.search(destination):
-                cwd = os.path.normpath(os.path.join(cwd, os.path.expanduser(destination)))
+        stem = re.sub(r"[\d.]+$", "", name)
+        if name in ("cd", "pushd"):
+            operands = [word for word in argv[1:] if not re.fullmatch(r"-[PLe@]+", word)]
+            if name == "pushd":
+                stack.append(cwds)
+            cwds = move(operands[0] if operands else "~")
             continue
-        if name in SHELLS and "-c" in argv[1:]:
-            position = argv.index("-c")
-            if position + 1 < len(argv):
-                nested_targets, nested_inline = analyse(argv[position + 1], cwd, depth + 1)
-                targets.extend(nested_targets)
-                inline.extend(nested_inline)
+        if name == "popd":
+            cwds = stack.pop() if stack else cwds + (str(project),)
             continue
-        if re.sub(r"[\d.]+$", "", name) in INTERPRETERS:
+        if segment.xargs and (name in WRITERS | OPAQUE_WRITERS or name in SHELLS or stem in INTERPRETERS):
+            result.opaque = True
+        if name == "eval":
+            nested(" ".join(argv[1:]), here)
+            continue
+        if name in SHELLS:
+            script = None
+            for position, word in enumerate(argv[1:], 1):
+                if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+                    rest = [w for w in argv[position + 1:] if not w.startswith("-")]
+                    script = rest[0] if rest else ""
+                    break
+            if script is not None:
+                nested(script, here)
+            for text_in in segment.stdin:
+                nested(text_in, here)
+            continue
+        if stem in INTERPRETERS:
+            result.inline.append(" ".join(argv[1:]))
+            result.inline.extend(segment.stdin)
+            if name.startswith("perl"):
+                result.targets.extend((path, here, kind) for path, kind in command_writes(["perl", *argv[1:]]))
+            continue
+        if name in OPAQUE_WRITERS:
+            result.opaque = True
+            continue
+        if name == "git":
             for position, word in enumerate(argv[1:-1], 1):
-                if word in ("-c", "-e", "-E", "--eval", "-r"):
-                    inline.append(argv[position + 1])
-            continue
-        targets.extend((target, cwd) for target in command_writes(argv))
-    return targets, inline
+                if word == "-C":
+                    here = move(argv[position + 1])
+        if name == "find" and any(word in ("-exec", "-execdir", "-ok", "-okdir") for word in argv):
+            tail = argv[argv.index(next(w for w in argv if w in ("-exec", "-execdir", "-ok", "-okdir"))) + 1:]
+            if tail and (os.path.basename(tail[0]) in SHELLS or re.sub(r"[\d.]+$", "", os.path.basename(tail[0])) in INTERPRETERS):
+                result.opaque = True
+        result.targets.extend((path, here, kind) for path, kind in command_writes(argv))
+    return result
 
 
-def subjects(target: str, cwd: str, project: Path) -> list[str]:
-    """Rule subjects for one write target: project-relative inside the project, absolute
-    outside it. A target built from a variable is judged by its literal suffix too."""
-    expanded = re.sub(r"^\$\{?HOME\}?(?=/|$)", os.environ.get("HOME", "~"), os.path.expanduser(target))
+# --- judging ------------------------------------------------------------------
+
+def expand_braces(word: str) -> list[str]:
+    match = re.search(r"\{([^{}]*,[^{}]*)\}", word)
+    if not match:
+        return [word]
+    out = []
+    for part in match.group(1).split(","):
+        out.extend(expand_braces(word[:match.start()] + part + word[match.end():]))
+    return out[:64]
+
+
+def relative(path: str, project: Path) -> str:
+    resolved = os.path.realpath(path)
+    try:
+        rel = os.path.relpath(resolved, project)
+    except ValueError:
+        return resolved
+    return resolved if rel == ".." or rel.startswith("../") else rel
+
+
+def protected_probes(rules, rules_path) -> list[str]:
+    return [probe for probe in PROBES if first_match(rules, rules_path, "path", probe)]
+
+
+def judge_subject(subject: str, kind: str, project: Path, rules, rules_path) -> str | None:
+    # A directory operand stands for the paths beneath it.
+    directory = kind != "file" or os.path.isdir(subject if os.path.isabs(subject) else project / subject)
+    for candidate in (subject, subject.rstrip("/") + "/") if directory else (subject,):
+        denial = first_match(rules, rules_path, "path", candidate)
+        if denial:
+            return denial
+    if kind == "tree":
+        base = "" if subject in (".", "") else subject.rstrip("/") + "/"
+        absolute = subject if os.path.isabs(subject) else str(project / subject)
+        for probe in protected_probes(rules, rules_path):
+            if probe.startswith(base) or (os.path.isabs(subject) and (str(project / probe)).startswith(absolute.rstrip("/") + "/")):
+                return f"DENY: {subject} contains protected {probe} ({rules_path})"
+    return None
+
+
+def judge_target(target: str, cwds: tuple[str, ...], kind: str, project: Path, rules, rules_path) -> str | None:
+    expanded = re.sub(r"^\$\{?HOME\}?(?=/|$)", os.path.expanduser("~"), os.path.expanduser(target))
     if VARIABLE.search(expanded):
         suffix = VARIABLE.split(expanded)[-1].lstrip("/")
-        return [suffix, expanded] if suffix else [expanded]
-    path = Path(os.path.realpath(os.path.join(cwd, expanded)))
-    try:
-        return [str(path.relative_to(project))]
-    except ValueError:
-        return [str(path)]
+        if suffix:
+            denial = judge_subject(suffix, kind, project, rules, rules_path)
+            if denial:
+                return denial
+            for probe in protected_probes(rules, rules_path):
+                if probe.endswith("/" + suffix) or probe == suffix:
+                    return f"DENY: a variable path ending in {suffix} can name protected {probe}"
+        return None
+    for pattern in expand_braces(expanded):
+        for place in cwds:
+            joined = os.path.normpath(os.path.join(place, pattern))
+            if GLOB_CHARS.search(pattern):
+                pattern_rel = os.path.relpath(joined, project)
+                pattern_rel = joined if pattern_rel.startswith("..") else pattern_rel
+                for probe in protected_probes(rules, rules_path):
+                    if fnmatch.fnmatch(probe, pattern_rel) or (kind == "tree" and fnmatch.fnmatch(probe, pattern_rel + "/*")):
+                        return f"DENY: {target} can match protected {probe} ({rules_path})"
+                for match in glob.glob(joined)[:256]:
+                    denial = judge_subject(relative(match, project), kind, project, rules, rules_path)
+                    if denial:
+                        return denial
+                continue
+            denial = judge_subject(relative(joined, project), kind, project, rules, rules_path)
+            if denial:
+                return denial
+    return None
+
+
+def mentions_protected(words: list[str], cwd: str, project: Path, rules, rules_path) -> str | None:
+    """For writes that cannot be known: refuse when any word could name a protected path."""
+    for word in words:
+        if "/" not in word and not word.startswith("."):
+            continue
+        denial = judge_target(word.strip("'\""), (cwd, str(project)), "tree", project, rules, rules_path)
+        if denial:
+            return denial
+    return None
 
 
 def check_command(command: str, project: Path, cwd: str) -> str | None:
@@ -261,43 +559,85 @@ def check_command(command: str, project: Path, cwd: str) -> str | None:
     if denial:
         return denial
     try:
-        targets, inline = analyse(command, cwd)
+        analysis = analyse(command, cwd, project)
     except Unparseable:
-        return first_match(rules, rules_path, "inline", command)
-    for code in inline:
+        # Writes are unknowable: refuse if the text names a protected path at all.
+        words = re.findall(r"[^\s'\";&|<>()`$]+", command)
+        denial = mentions_protected(words, cwd, project, rules, rules_path)
+        return f"{denial} (the command cannot be parsed)" if denial else first_match(rules, rules_path, "inline", command)
+    for code in analysis.inline:
         denial = first_match(rules, rules_path, "inline", code)
         if denial:
             return denial
-    for target, target_cwd in targets:
-        for subject in subjects(target, target_cwd, project):
-            denial = first_match(rules, rules_path, "path", subject)
-            if denial:
-                return f"{denial} (write target {target})"
+    for target, cwds, kind in analysis.targets:
+        denial = judge_target(target, cwds, kind, project, rules, rules_path)
+        if denial:
+            return f"{denial} (write target {target})"
+    if analysis.opaque:
+        denial = mentions_protected(analysis.words, cwd, project, rules, rules_path)
+        if denial:
+            return f"{denial} (its writes cannot be known)"
     return None
 
 
 def project_targets(command: str, project: Path, cwd: str) -> list[str]:
-    """Write targets inside the project, project-relative. Unparseable commands report '?'."""
+    """Write targets inside the project, project-relative. '?' when unknowable."""
     try:
-        targets, _ = analyse(command, cwd)
+        analysis = analyse(command, cwd, project)
     except Unparseable:
         return ["?"]
-    found = []
-    for target, target_cwd in targets:
+    found = ["?"] if analysis.opaque else []
+    for target, cwds, _ in analysis.targets:
         expanded = os.path.expanduser(target)
         if VARIABLE.search(expanded):
+            suffix = VARIABLE.split(expanded)[-1].lstrip("/")
+            found.append(suffix or "?")
             continue
-        path = Path(os.path.realpath(os.path.join(target_cwd, expanded)))
-        try:
-            found.append(str(path.relative_to(project)))
-        except ValueError:
-            pass
+        for place in cwds:
+            for pattern in expand_braces(expanded):
+                rel = relative(os.path.join(place, pattern), project)
+                if not os.path.isabs(rel):
+                    found.append(rel)
     return found
+
+
+def harness_call(command: str, project: Path, cwd: str) -> str:
+    """pass: one plain harness or action-validate call the guard lets through;
+    human: a human-only harness command; no: anything else (judged normally)."""
+    if re.search(r"(?:^|[\s;&|(/])harness\s+(abort|failure|review\s+submit)\b", command):
+        return "human"
+    if re.search(r"knowledge-trust\.sh\s+approve\b", command):
+        return "human"
+    if any(char in command for char in "$`<>\n\\"):
+        return "no"
+    try:
+        tokens = tokenize(command)
+    except Unparseable:
+        return "no"
+    separators = [token for token in tokens if token in SEPARATORS]
+    segments = split_segments(tokens)
+    where = cwd
+    if len(segments) == 2 and separators in (["&&"], [";"]) and segments[0][0] == "cd" and len(segments[0]) == 2:
+        where = os.path.normpath(os.path.join(cwd, os.path.expanduser(segments[0][1])))
+        segments = segments[1:]
+    elif separators or len(segments) != 1:
+        return "no"
+    argv = segments[0]
+    if re.match(r"^[A-Za-z_]\w*=", argv[0]):
+        return "no"
+    executable = argv[0]
+    located = os.path.join(where, executable) if "/" in executable else (shutil.which(executable) or "")
+    real = os.path.realpath(located) if located else ""
+    if real == os.path.realpath(project / "scripts" / "harness"):
+        return "pass"
+    if real == os.path.realpath(project / "scripts" / "action.sh") and len(argv) == 3 and argv[1] == "validate":
+        return "pass"
+    return "no"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("action", choices=("check", "targets", "rules"))
+    parser.add_argument("action", choices=("check", "targets", "harness-call", "rules"))
     parser.add_argument("--command", dest="shell_command")
     parser.add_argument("--path")
     parser.add_argument("--project", default=os.environ.get("HARNESS_TARGET_ROOT") or str(HARNESS_ROOT))
@@ -316,9 +656,12 @@ def main() -> int:
             for kind, pattern, _ in rules:
                 print(f"{kind} {pattern}")
             return 0
-        if args.action == "targets":
+        if args.action in ("targets", "harness-call"):
             if args.shell_command is None:
-                parser.error("targets needs --command")
+                parser.error(args.action + " needs --command")
+            if args.action == "harness-call":
+                print(harness_call(args.shell_command, project, cwd))
+                return 0
             for target in project_targets(args.shell_command, project, cwd):
                 print(target)
             return 0
@@ -330,14 +673,8 @@ def main() -> int:
             kind = "command"
         else:
             rules_path, rules = load_rules(project)
-            subject = args.path
-            if os.path.isabs(subject):
-                resolved = Path(os.path.realpath(subject))
-                try:
-                    subject = str(resolved.relative_to(project))
-                except ValueError:
-                    subject = str(resolved)
-            denial = first_match(rules, rules_path, "path", subject)
+            subject = relative(os.path.join(cwd, os.path.expanduser(args.path)), project)
+            denial = judge_subject(subject, "file", project, rules, rules_path)
             kind = "path"
     except (OSError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
