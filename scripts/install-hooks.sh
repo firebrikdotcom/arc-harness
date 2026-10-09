@@ -52,22 +52,28 @@ SESSION_BIND = str(Path(root) / "scripts/session_hook.py")
 REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
 WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
 TODO_GATE = str(Path(root) / "scripts/workflow_gate.py")
+FAILURES = str(Path(root) / "scripts/failure_budget.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
            "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py",
-           "scripts/session_hook.py", "scripts/observe_commands.py")
+           "scripts/session_hook.py", "scripts/observe_commands.py", "scripts/failure_budget.py")
+# The repeated-failure stop reads each shell call's outcome.
+FAILURE_HOOK = {"matcher": "Bash|shell|exec_command", "hooks": [{"type": "command", "command": f'python3 "{FAILURES}"', "timeout": 30}]}
 SHARED = {
     "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}],
     "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}],
+    "PostToolUse": [FAILURE_HOOK],
 }
-# Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only.
+# Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only;
+# Claude Code reports failed calls on their own event.
 CLAUDE_ONLY = {
     "PreToolUse": [{"matcher": "Grep|Glob", "hooks": [{"type": "command", "command": f'"{REMIND}"', "timeout": 10}]}],
+    "PostToolUseFailure": [FAILURE_HOOK],
 }
 
 
 def entries_for(index: int) -> dict:
     extra = CLAUDE_ONLY if index == 0 else {}
-    entries = {event: SHARED[event] + extra.get(event, []) for event in SHARED}
+    entries = {event: SHARED.get(event, []) + extra.get(event, []) for event in {**SHARED, **extra}}
     # Use native lifecycle events; Stop is a turn boundary, not a session end.
     events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
     if index == 0:

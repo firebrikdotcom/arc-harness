@@ -14,6 +14,8 @@ DEFAULT_CAP_CONTINUES=3
 # A run left idle this long is stale: the guard refuses it and plan start
 # replaces it, so a later session never inherits an old run's phase.
 DEFAULT_RUN_IDLE_HOURS=24
+# The same command failing the same way this many times in a row pauses the run.
+DEFAULT_CAP_REPEAT_FAILURES=2
 SCRIPT_PATH=$0
 while [ -L "$SCRIPT_PATH" ]; do
   _link_dir=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
@@ -63,6 +65,7 @@ usage() {
   info "  budget --thread ID --tokens N [--watch]"
   info "                       Measure a Codex thread and interrupt its active turn at the cap."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
+  info "  failure record|clear Repeated-failure counter, fed by scripts/failure_budget.py (hook only)."
   info "  abort \"REASON\"       Abort the current run so a new one can start. The reason is required."
   info ""
   info "Budgets (environment overrides, read when the run is created):"
@@ -72,6 +75,7 @@ usage() {
   info "  HARNESS_BUDGET_TOKENS    default unknown (the CLI cannot count tokens)"
   info "  HARNESS_BUDGET_CONTINUES default $DEFAULT_CAP_CONTINUES (continues allowed per run)"
   info "  HARNESS_RUN_IDLE_HOURS   default $DEFAULT_RUN_IDLE_HOURS (idle hours before a run is stale; 0 disables)"
+  info "  HARNESS_BUDGET_REPEAT_FAILURES default $DEFAULT_CAP_REPEAT_FAILURES (identical failures in a row before a pause; 0 disables)"
   info ""
   info "Other environment variables:"
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
@@ -393,6 +397,7 @@ create_run() {
   state_set CAP_TOKENS "${HARNESS_BUDGET_TOKENS:-unknown}"
   state_set CAP_CONTINUES "${HARNESS_BUDGET_CONTINUES:-$DEFAULT_CAP_CONTINUES}"
   state_set CAP_IDLE_HOURS "${HARNESS_RUN_IDLE_HOURS:-$DEFAULT_RUN_IDLE_HOURS}"
+  state_set CAP_REPEAT_FAILURES "${HARNESS_BUDGET_REPEAT_FAILURES:-$DEFAULT_CAP_REPEAT_FAILURES}"
   state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
   state_set CONTINUES_USED 0
   state_set PHASE_BUILD_STARTED_EPOCH 0
@@ -453,6 +458,7 @@ budget_label() {
     TIME_MIN) printf 'time_min\n' ;;
     LOOPS) printf 'loops\n' ;;
     TOKENS) printf 'tokens\n' ;;
+    REPEAT_FAILURE) printf 'repeat_failure\n' ;;
     *) printf 'none\n' ;;
   esac
 }
@@ -479,6 +485,7 @@ write_pause_json() {
     cap "$(typed_number "$(state_get PAUSE_CAP)")" \
     phase "s:$(state_get PAUSE_PHASE)" \
     paused_at "s:$(state_get PAUSE_AT)" \
+    detail "s:$(state_get PAUSE_DETAIL)" \
     resolved "b:$_resolved" \
     resolved_at "$_resolved_at" \
     evaluation "$_evaluation"
@@ -518,6 +525,7 @@ pause_run() {
   _cap=$3
   _seq=$(( $(state_get PAUSE_SEQ 0) + 1 ))
 
+  [ "$_budget" = "REPEAT_FAILURE" ] || state_set PAUSE_DETAIL ""
   state_set RUN_STATUS paused
   state_set PAUSE_SEQ "$_seq"
   state_set PAUSE_BUDGET "$_budget"
@@ -532,7 +540,13 @@ pause_run() {
   write_run_json
   log_event "pause budget=$(budget_label "$_budget") used=$_used cap=$_cap"
 
-  info "PAUSE: $(budget_label "$_budget") budget reached (used=$_used cap=$_cap)."
+  if [ "$_budget" = "REPEAT_FAILURE" ]; then
+    info "PAUSE: the same failure happened $_used times (cap $_cap): $(state_get PAUSE_DETAIL)"
+    info "Stop editing. Show the user the exact error and the fix you propose; resume only on their"
+    info "instruction, with a note that states the new approach: harness continue \"<new approach>\""
+  else
+    info "PAUSE: $(budget_label "$_budget") budget reached (used=$_used cap=$_cap)."
+  fi
   info "Run: $(state_get RUN_ID)"
   info "Pause record: $_record"
   info "Evaluate the run, then resume with: harness continue \"<evaluation note>\""
@@ -907,6 +921,57 @@ cmd_step() {
   check_budgets
 }
 
+# --- repeated failures ------------------------------------------------------
+# Fed by scripts/failure_budget.py from the post-tool hooks, never by the agent:
+# the phase guard refuses `harness failure` in a tool call. A command's key and
+# its error's signature are hex digests; only the latest error per command is
+# kept, so a different error restarts the count and a success clears it.
+
+cmd_failure() {
+  _action=${1:-}
+  [ "$#" -gt 0 ] && shift
+  _key=""
+  _sig=""
+  _detail=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --command-key) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _key=$2; shift 2 ;;
+      --signature) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _sig=$2; shift 2 ;;
+      --detail) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _detail=$2; shift 2 ;;
+      *) info "FAIL: unknown argument: $1"; exit "$EXIT_USAGE" ;;
+    esac
+  done
+  case "$_action" in
+    record) [ -n "$_key" ] && [ -n "$_sig" ] || { info "FAIL: record needs --command-key and --signature."; exit "$EXIT_USAGE"; } ;;
+    clear) [ -n "$_key" ] || { info "FAIL: clear needs --command-key."; exit "$EXIT_USAGE"; } ;;
+    *) info "FAIL: failure takes record or clear."; exit "$EXIT_USAGE" ;;
+  esac
+  case "$_key$_sig" in
+    *[!0-9a-f]*) info "FAIL: keys and signatures are hex digests."; exit "$EXIT_USAGE" ;;
+  esac
+  load_current_run || return 0
+  [ "$(state_get RUN_STATUS)" = "active" ] || return 0
+  ! run_is_stale || return 0
+  _file="$RUN_DIR/failures"
+  touch "$_file"
+  _previous=$(awk -v k="$_key" -v s="$_sig" '$1 == k && $2 == s { n = $3 } END { print n + 0 }' "$_file")
+  grep -v "^$_key " "$_file" > "$_file.tmp.$$" || :
+  if [ "$_action" = "clear" ]; then
+    mv "$_file.tmp.$$" "$_file"
+    return 0
+  fi
+  _count=$(( _previous + 1 ))
+  printf '%s %s %s\n' "$_key" "$_sig" "$_count" >> "$_file.tmp.$$"
+  mv "$_file.tmp.$$" "$_file"
+  log_event "failure $_count of signature $(printf '%s' "$_sig" | cut -c1-12)"
+  _cap=$(state_get CAP_REPEAT_FAILURES "$DEFAULT_CAP_REPEAT_FAILURES")
+  case "$_cap" in ''|*[!0-9]*) _cap=$DEFAULT_CAP_REPEAT_FAILURES ;; esac
+  if [ "$_cap" -gt 0 ] && [ "$_count" -ge "$_cap" ]; then
+    state_set PAUSE_DETAIL "$(printf '%s' "$_detail" | tr '\n\t' '  ' | cut -c1-200)"
+    pause_run REPEAT_FAILURE "$_count" "$_cap"
+  fi
+}
+
 # --- continue ---------------------------------------------------------------
 
 cmd_continue() {
@@ -941,6 +1006,10 @@ cmd_continue() {
 
   _budget=$(state_get PAUSE_BUDGET)
   state_set "EXT_$_budget" "$(( $(state_get "EXT_$_budget" 0) + 1 ))"
+  if [ "$_budget" = "REPEAT_FAILURE" ]; then
+    # The new approach gets a clean count; the old failures stay in the log.
+    : > "$RUN_DIR/failures"
+  fi
   if [ "$_budget" = "TIME_MIN" ]; then
     # Restart the clock: an old run must not re-pause the moment it resumes.
     # The elapsed time before this evaluation stays visible in the pause record.
@@ -958,7 +1027,11 @@ cmd_continue() {
   log_event "continue budget=$(budget_label "$_budget")"
 
   info "OK: evaluation recorded, run $(state_get RUN_ID) resumed (continue $(state_get CONTINUES_USED)/$(state_get CAP_CONTINUES))."
-  info "Budget $(budget_label "$_budget") extended to $(effective_cap "$_budget")."
+  if [ "$_budget" = "REPEAT_FAILURE" ]; then
+    info "Repeated-failure count cleared for the new approach."
+  else
+    info "Budget $(budget_label "$_budget") extended to $(effective_cap "$_budget")."
+  fi
   info "Pause record: $_record"
   check_budgets
 }
@@ -1133,6 +1206,9 @@ case "$COMMAND" in
     ;;
   continue)
     cmd_continue "$@"
+    ;;
+  failure)
+    cmd_failure "$@"
     ;;
   abort)
     cmd_abort "$@"

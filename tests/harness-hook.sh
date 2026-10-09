@@ -104,6 +104,9 @@ expect_output "denied write"
 hook 2 '{"tool_name":"Edit","tool_input":{"file_path":"'"$H"'/scripts/hooks/require-phase.sh"}}'
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/knowledge-trust.sh approve"}}'
 expect_output "human decisions"
+# The repeated-failure counter is the post-tool hook's alone; the agent cannot reset it.
+hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness failure clear --command-key abc"}}'
+expect_output "fed by the post-tool hook"
 
 # Shell writes to the guard are judged by their real targets, however the path is spelled.
 bash_call 2 'echo x > scripts/hooks/require-phase.sh'
