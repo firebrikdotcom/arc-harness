@@ -84,7 +84,8 @@ def authorize(payload):
             context["request_id"] = str(uuid.uuid4())
             context.pop("confirmed_request", None)
             audit.record("plan_required", sid, context, description="Confirm or revise the complete todo plan for this prompt", status="required")
-            print(f"Todo gate: before execution, register a complete plan with {audit.ROOT}/scripts/harness workflow todo plan --session-id {sid} --items '[{{\"description\":\"Work item\",\"criterion\":\"Completion evidence\"}}]' --reason SUMMARY. Use todo show to get IDs, then todo update --id ID --status in_progress --reason SUMMARY. Existing plans need todo confirm or revision for each prompt. Questions with no execution use todo exempt --reason SUMMARY. Record evidence for completed items and pass verify/review before a completed outcome.")
+            print(f"Todo gate: confirm (todo confirm), revise (todo plan), or exempt (todo exempt, for a question) the plan for this prompt "
+                  f"via {audit.ROOT}/scripts/harness workflow todo ... --session-id {sid} --reason TEXT; reads need no todo.")
         elif event == "PreToolUse":
             tool = payload.get("tool_name", "")
             readonly = tool in READ_TOOLS or any(tool.endswith("__"+name) for name in GRAPH_READS)
