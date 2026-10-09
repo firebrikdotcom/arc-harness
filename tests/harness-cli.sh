@@ -70,7 +70,7 @@ record() {
 
 # findings VERDICT  Submit an independent reviewer's findings for the fixture (not a git tree).
 findings() {
-  printf '{"tree_hash":"none","reviewer":"fixture","verdict":"%s","findings":[]}\n' "$1" > "$TMP_ROOT/findings.json"
+  printf '{"tree_hash":"%s","reviewer":"fixture","verdict":"%s","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" "$1" > "$TMP_ROOT/findings.json"
   run 0 review submit "$TMP_ROOT/findings.json"
 }
 

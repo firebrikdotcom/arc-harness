@@ -73,8 +73,25 @@ GUARD_VARIABLES = {"HARNESS_HOOK_DISABLE", "HARNESS_RUN_IDLE_HOURS", "HARNESS_RE
                    "HARNESS_DB_ROOT", "HARNESS_REQUIRED_CHECKS", "HARNESS_REVIEWER_CMD", "HARNESS_REVIEW_BASE"}
 
 
+ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*\+?=")
+# Builtins that set a variable named by an argument (read NAME, printf -v NAME, ...).
+SETTERS = {"read", "printf", "mapfile", "readarray", "getopts", "declare", "typeset", "local", "export", "readonly"}
+
+
+def assigned_name(word: str) -> str:
+    return word.split("=", 1)[0].rstrip("+")
+
+
 def guard_variable(name: str) -> bool:
     return name in GUARD_VARIABLES or name.startswith("HARNESS_BUDGET_")
+
+
+def is_harness_cli(word: str, cwd: str) -> bool:
+    if os.path.basename(word) == "harness":
+        return True
+    if "/" in word:
+        return os.path.realpath(os.path.join(cwd, word)) == os.path.realpath(HARNESS_ROOT / "scripts" / "harness")
+    return False
 
 
 def harness_subcommand(argv: list[str]) -> tuple[str, str, bool]:
@@ -289,13 +306,13 @@ def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
     # Peel prefixes that run another command.
     while argv:
         head = os.path.basename(argv[0])
-        if re.match(r"^[A-Za-z_]\w*=", argv[0]):
-            segment.assigned.append(argv[0].split("=", 1)[0])
+        if ASSIGNMENT.match(argv[0]):
+            segment.assigned.append(assigned_name(argv[0]))
             argv = argv[1:]
         elif argv[0] == "!":
             argv = argv[1:]
         elif head in ("export", "declare", "typeset", "readonly", "local"):
-            segment.assigned.extend(word.split("=", 1)[0] for word in argv[1:] if not word.startswith("-"))
+            segment.assigned.extend(assigned_name(word) for word in argv[1:] if not word.startswith("-"))
             argv = []
         elif head in ("command", "builtin"):
             argv = argv[1:]
@@ -326,7 +343,7 @@ def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
             argv = argv[1:]  # the duration
         elif head == "env":
             argv = argv[1:]
-            while argv and (argv[0].startswith("-") or re.match(r"^[A-Za-z_]\w*=", argv[0])):
+            while argv and (argv[0].startswith("-") or ASSIGNMENT.match(argv[0])):
                 word = argv[0]
                 if word in ("-C", "--chdir") and len(argv) > 1:
                     segment.chdir = argv[1]
@@ -341,8 +358,8 @@ def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
                 elif word.startswith("--split-string="):
                     argv = shlex.split(word.split("=", 1)[1]) + argv[1:]
                 else:
-                    if "=" in word and not word.startswith("-"):
-                        segment.assigned.append(word.split("=", 1)[0])
+                    if ASSIGNMENT.match(word):
+                        segment.assigned.append(assigned_name(word))
                     argv = argv[1:]
         elif head == "xargs":
             segment.xargs = True
@@ -393,7 +410,9 @@ def command_writes(argv: list[str]) -> list[tuple[str, str]]:
     if name == "dd":
         return [(arg[3:], "file") for arg in args if arg.startswith("of=")]
     if name in ("sed", "perl"):
-        in_place = any(arg.startswith("--in-place") or re.fullmatch(r"-[A-Za-z]*i.*", arg) for arg in args if arg.startswith("-"))
+        # -i, possibly bundled after switches that take no argument (sed -ni, perl -pi).
+        bundle = r"-[nErsuz]*i.*" if name == "sed" else r"-[pnlaw0sStTWX]*i.*"
+        in_place = any(arg.startswith("--in-place") or re.fullmatch(bundle, arg) for arg in args if arg.startswith("-"))
         if not in_place:
             return []
         options, operands = options_and_operands(args, {"-e", "-f", "--expression", "--file", "-E"})
@@ -403,7 +422,13 @@ def command_writes(argv: list[str]) -> list[tuple[str, str]]:
         operands = options_and_operands(args)[1]
         return [(operands[-1], "tree")] if len(operands) >= 2 else []
     if name == "find":
-        if not any(word in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls", "-fprint0") for word in args):
+        writes = any(word in ("-delete", "-fprint", "-fprintf", "-fls", "-fprint0") for word in args)
+        for position, word in enumerate(args):
+            # -exec runs a command per file; only a writing command writes.
+            if word in ("-exec", "-execdir", "-ok", "-okdir") and position + 1 < len(args):
+                executed = os.path.basename(args[position + 1])
+                writes = writes or executed in WRITERS | OPAQUE_WRITERS
+        if not writes:
             return []
         starts = []
         for word in args:
@@ -418,7 +443,7 @@ def command_writes(argv: list[str]) -> list[tuple[str, str]]:
         if index >= len(args):
             return []
         sub, rest = args[index], args[index + 1:]
-        if sub in ("rm", "mv", "restore", "checkout", "clean", "apply", "checkout-index", "read-tree", "stash"):
+        if sub in ("rm", "mv", "restore", "checkout", "clean", "apply", "checkout-index", "read-tree"):
             return [(path, "tree") for path in options_and_operands(rest, {"-m", "-s", "--source", "-b", "-B"})[1]]
         return []
     return []
@@ -464,9 +489,23 @@ def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
             if guard_variable(name) and not result.refusal:
                 result.refusal = f"sets the guard setting {name}"
         if segment.argv and not result.refusal:
-            command_name = human_only(segment.argv)
-            if command_name:
-                result.refusal = f"runs {command_name}, which is a person's to run"
+            words = segment.argv
+            if os.path.basename(words[0]) in SETTERS:
+                for word in words[1:]:
+                    if guard_variable(assigned_name(word)):
+                        result.refusal = f"sets the guard setting {assigned_name(word)}"
+            # The CLI may be run by a launcher (bash FILE, xargs, find -exec,
+            # watch, a symlink): look for it at every position, not only first.
+            for position, word in enumerate(words):
+                if result.refusal:
+                    break
+                if is_harness_cli(word, cwds[0]) or os.path.basename(word) == "knowledge-trust.sh":
+                    candidate = ["harness" if is_harness_cli(word, cwds[0]) else word, *words[position + 1:]]
+                    command_name = human_only(candidate)
+                    if command_name:
+                        result.refusal = f"runs {command_name}, which is a person's to run"
+                    elif segment.xargs and is_harness_cli(word, cwds[0]):
+                        result.refusal = "runs the harness CLI with arguments from input, which is a person's to run"
         here = move(segment.chdir) if segment.chdir else cwds
         result.targets.extend((path, here, "file") for path in segment.outputs)
         argv = segment.argv
