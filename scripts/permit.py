@@ -70,16 +70,54 @@ HUMAN_ONLY = {"abort", "failure", "launch"}
 PASSABLE = {"plan", "build", "review", "status", "step", "continue", "contract", "brief", "workflow", "prune",
             "advise", "route", "help", "--help", "-h"}
 GUARD_VARIABLES = {"HARNESS_HOOK_DISABLE", "HARNESS_RUN_IDLE_HOURS", "HARNESS_RETAIN_RUNS", "HARNESS_HOME",
-                   "HARNESS_DB_ROOT", "HARNESS_REQUIRED_CHECKS", "HARNESS_REVIEWER_CMD", "HARNESS_REVIEW_BASE"}
+                   "HARNESS_DB_ROOT", "HARNESS_REQUIRED_CHECKS", "HARNESS_REVIEWER_CMD", "HARNESS_REVIEW_BASE",
+                   "HARNESS_CONFIRM_TTY"}
+# Programs that run a command given to them as words or a string; when one of
+# them (or a command word that is a glob, variable, or {}) carries a human-only
+# subcommand, the command is refused even though the CLI's name is hidden.
+INDIRECT = {"script", "flock", "parallel", "expect", "unbuffer", "tmux", "screen", "socat", "setsid", "su", "runuser",
+            "busybox", "watch", "entr", "chronic", "ionice", "chrt", "taskset", "unshare", "firejail"}
+HUMAN_WORDS = re.compile(r"(^|\s)(abort|failure|launch|review\s+submit)(\s|$)")
 
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*\+?=")
-# Builtins that set a variable named by an argument (read NAME, printf -v NAME, ...).
-SETTERS = {"read", "printf", "mapfile", "readarray", "getopts", "declare", "typeset", "local", "export", "readonly"}
+# Commands find -exec may run without writing anything.
+READERS = {"grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc", "ls", "stat", "file", "md5sum", "sha1sum",
+           "sha256sum", "cksum", "echo", "printf", "test", "[", "basename", "dirname", "realpath", "readlink",
+           "du", "diff", "cmp", "sed", "jq", "shellcheck", "true", "false"}
 
 
 def assigned_name(word: str) -> str:
     return word.split("=", 1)[0].rstrip("+")
+
+
+def set_variable_names(words: list[str]) -> list[str]:
+    """Variables a builtin would set: read NAME, printf -v NAME, declare NAME=...,
+    a nameref's referent (declare -n r=NAME), and a for-loop variable."""
+    name = os.path.basename(words[0])
+    args = words[1:]
+    found: list[str] = []
+    if name == "for" and args:
+        found.append(args[0])
+    elif name == "printf":
+        for position, word in enumerate(args):
+            if word == "-v" and position + 1 < len(args):
+                found.append(args[position + 1])
+            elif word.startswith("-v") and len(word) > 2:
+                found.append(word[2:])
+    elif name in ("read", "mapfile", "readarray", "getopts"):
+        found.extend(word for word in args if not word.startswith("-") and re.fullmatch(r"[A-Za-z_]\w*", word))
+    elif name in ("declare", "typeset", "local", "export", "readonly"):
+        options = "".join(word[1:] for word in args if word.startswith("-"))
+        if "p" in options and "n" not in options:
+            return []
+        for word in args:
+            if word.startswith("-"):
+                continue
+            found.append(assigned_name(word))
+            if "n" in options and "=" in word:
+                found.append(word.split("=", 1)[1])
+    return found
 
 
 def guard_variable(name: str) -> bool:
@@ -309,11 +347,9 @@ def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
         if ASSIGNMENT.match(argv[0]):
             segment.assigned.append(assigned_name(argv[0]))
             argv = argv[1:]
-        elif argv[0] == "!":
+        elif argv[0] in ("!", "do", "then", "else", "elif", "if", "while", "until", "{"):
+            # Shell keywords that precede a command in loops and conditionals.
             argv = argv[1:]
-        elif head in ("export", "declare", "typeset", "readonly", "local"):
-            segment.assigned.extend(assigned_name(word) for word in argv[1:] if not word.startswith("-"))
-            argv = []
         elif head in ("command", "builtin"):
             argv = argv[1:]
             if argv and argv[0] in ("-v", "-V"):
@@ -424,10 +460,18 @@ def command_writes(argv: list[str]) -> list[tuple[str, str]]:
     if name == "find":
         writes = any(word in ("-delete", "-fprint", "-fprintf", "-fls", "-fprint0") for word in args)
         for position, word in enumerate(args):
-            # -exec runs a command per file; only a writing command writes.
-            if word in ("-exec", "-execdir", "-ok", "-okdir") and position + 1 < len(args):
-                executed = os.path.basename(args[position + 1])
-                writes = writes or executed in WRITERS | OPAQUE_WRITERS
+            # -exec runs a command per file; it writes unless it is a known
+            # reader (wrappers such as env or nice are looked through).
+            if word in ("-exec", "-execdir", "-ok", "-okdir"):
+                tail = []
+                for item in args[position + 1:]:
+                    if item in (";", "+", "\\;"):
+                        break
+                    tail.append(item)
+                inner = read_segment(tail, []).argv if tail else []
+                executed = os.path.basename(inner[0]) if inner else ""
+                reader = executed in READERS and not (executed == "sed" and any(w.startswith("-i") for w in inner))
+                writes = writes or not reader
         if not writes:
             return []
         starts = []
@@ -459,6 +503,10 @@ def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
     result.words.extend(token for token in tokens if token not in SEPARATORS)
     # Command substitutions run commands of their own.
     substitutions = re.findall(r"\$\(((?:[^()]|\([^()]*\))*)\)", text) + re.findall(r"`([^`]*)`", text)
+    # ${NAME:=value} and ${NAME=value} assign as a side effect of expansion.
+    for name in re.findall(r"\$\{([A-Za-z_]\w*):?=", text):
+        if guard_variable(name) and not result.refusal:
+            result.refusal = f"sets the guard setting {name}"
     for body in bodies:
         result.words.extend(body.split())
     cwds: tuple[str, ...] = (cwd,)
@@ -490,10 +538,14 @@ def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
                 result.refusal = f"sets the guard setting {name}"
         if segment.argv and not result.refusal:
             words = segment.argv
-            if os.path.basename(words[0]) in SETTERS:
-                for word in words[1:]:
-                    if guard_variable(assigned_name(word)):
-                        result.refusal = f"sets the guard setting {assigned_name(word)}"
+            for name in set_variable_names(words):
+                if guard_variable(name) and not result.refusal:
+                    result.refusal = f"sets the guard setting {name}"
+            command_word = words[0]
+            if not result.refusal and (os.path.basename(command_word) in INDIRECT or command_word in ("{}", "eval")
+                                       or GLOB_CHARS.search(command_word) or "$" in command_word):
+                if HUMAN_WORDS.search(" ".join(words[1:])):
+                    result.refusal = "runs a human-only harness command through an indirect command word, which is a person's to run"
             # The CLI may be run by a launcher (bash FILE, xargs, find -exec,
             # watch, a symlink): look for it at every position, not only first.
             for position, word in enumerate(words):

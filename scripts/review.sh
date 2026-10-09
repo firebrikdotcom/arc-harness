@@ -15,8 +15,9 @@ usage() {
   info ""
   info "Runs project verification, prints the target/harness diff, and writes a review"
   info "packet (task contract, verification output, diff) for an independent reviewer."
-  info "With HARNESS_REVIEWER_CMD set, it runs that reviewer itself:"
-  info "  sh -c \"\$HARNESS_REVIEWER_CMD\" reviewer PACKET FINDINGS_OUT"
+  info "When a person has written a reviewer command into .harness-db/reviewer (one"
+  info "line; the guard keeps agents from writing it), review.sh runs that reviewer:"
+  info "  sh -c \"\$(cat .harness-db/reviewer)\" reviewer PACKET FINDINGS_OUT"
   info "The diff includes commits since HARNESS_REVIEW_BASE, else since the run's plan."
   info "Otherwise hand the packet to a reviewer in a fresh context and submit its JSON"
   info "with: harness review submit FILE. 'harness review done' requires an approving"
@@ -51,6 +52,7 @@ if [ ! -d "$PROJECT_ROOT" ]; then
 fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
+BASE_DB_ROOT=$HARNESS_DB_ROOT
 
 # A registered target (scripts/harness-target.sh) owns its own database
 # beneath the database root.
@@ -182,10 +184,11 @@ mv "$packet.tmp.$$" "$packet"
 findings="$records_dir/review-findings.json"
 info ""
 info "Review packet: $packet"
-if [ -n "${HARNESS_REVIEWER_CMD:-}" ]; then
-  info "Running the independent reviewer (HARNESS_REVIEWER_CMD)."
+reviewer_cmd=$(head -n 1 "$BASE_DB_ROOT/reviewer" 2>/dev/null || :)
+if [ -n "$reviewer_cmd" ]; then
+  info "Running the independent reviewer ($BASE_DB_ROOT/reviewer)."
   reviewer_status=0
-  sh -c "$HARNESS_REVIEWER_CMD" harness-reviewer "$packet" "$WORK/findings.json" || reviewer_status=$?
+  sh -c "$reviewer_cmd" harness-reviewer "$packet" "$WORK/findings.json" || reviewer_status=$?
   if [ "$reviewer_status" -ne 0 ] || [ ! -s "$WORK/findings.json" ]; then
     info "WARN: the reviewer exited $reviewer_status without findings; 'harness review done' will refuse until findings are submitted."
   else

@@ -7,6 +7,10 @@ ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$ROOT"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-jev.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+printf 'yes\n' > "$TMP_ROOT/confirm"
+HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
+export HARNESS_CONFIRM_TTY
 
 fail() {
   printf 'FAIL: %s\n' "$*"

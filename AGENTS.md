@@ -28,7 +28,7 @@ Each rule is written here so you know the goal, and enforced by a gate so it hol
 | Work inside a phase; edit only in build. | The guard blocks Write, Edit, and shell writes outside build (plan and review may write `progress.md`, `tasks/`, `task.json`, `review-findings.json`). |
 | Every run has a bounded contract: deliverables, non-goals, acceptance commands. | `plan done` needs `harness contract set` (or a recorded `contract waive`). |
 | Done means evidence, not a claim. | `build done` needs a passing `scripts/verify.sh` on the current files (a run with no checks fails) and every acceptance command to pass. |
-| The author does not approve their own work. | `review done` needs an independent reviewer's approving findings for the current files, and no non-goal path touched. Findings come from the reviewer a person configured (`HARNESS_REVIEWER_CMD`) or are submitted by a person; the guard refuses `review submit` from the agent. |
+| The author does not approve their own work. | `review done` needs an independent reviewer's approving findings for the current files, and no non-goal path touched. Findings come from the reviewer a person configured (`.harness-db/reviewer`) or are submitted by a person, who types `yes` on a terminal. |
 | Evidence is about this project. | Gates accept verify and review records only for the run's own project, and the guard refuses calls in a project other than the run's. |
 | Stop when the same failure repeats. | Two identical failures in a row pause the run; resuming needs the user and a new approach. |
 | Stay inside budgets. | Steps, loops, and continues are counted; a pause waits for the user. `abort` is the user's. |

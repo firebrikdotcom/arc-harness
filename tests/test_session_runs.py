@@ -34,7 +34,9 @@ class SessionRunsTests(unittest.TestCase):
                         HARNESS_JEV_CHECKPOINTS="0", HARNESS_AUDIT_ENABLED="0",
                         HARNESS_WORKFLOW_STATE=str(self.base / "workflow.sqlite"),
                         HARNESS_AUDIT_SETTINGS=str(self.base / "settings.json"),
-                        HARNESS_AUDIT_OUTBOX=str(self.base / "outbox.sqlite"))
+                        HARNESS_AUDIT_OUTBOX=str(self.base / "outbox.sqlite"),
+                        HARNESS_CONFIRM_TTY=str(self.base / "confirm"))
+        (self.base / "confirm").write_text("yes\n")
         (self.base / "settings.json").write_text('{"jev":false,"workflow":false}')
         result = subprocess.run([str(ROOT / "scripts/harness-target.sh"), "register", str(self.project)],
                                 env=self.env, text=True, capture_output=True, check=True)

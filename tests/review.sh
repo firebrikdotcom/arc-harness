@@ -7,6 +7,10 @@ REVIEW="$HARNESS_ROOT_UNDER_TEST/scripts/review.sh"
 CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-review.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+printf 'yes\n' > "$TMP_ROOT/confirm"
+HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
+export HARNESS_CONFIRM_TTY
 TMP_ROOT=$(CDPATH='' cd "$TMP_ROOT" && pwd -P)
 HARNESS_DB_ROOT="$TMP_ROOT/db"
 export HARNESS_DB_ROOT
@@ -69,7 +73,10 @@ tree=$(sed -n 's/^Tree hash: //p' "$1")
 printf '{"tree_hash":"%s","reviewer":"fixture-reviewer","verdict":"approve","findings":[]}\n' "$tree" > "$2"
 SH
 chmod +x "$REVIEWER"
-HARNESS_REVIEWER_CMD="$REVIEWER \"\$1\" \"\$2\"" "$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || fail "review with a reviewer failed"
+# A person configures the reviewer in the database; "$1" and "$2" are its arguments.
+# shellcheck disable=SC2016
+printf '%s "$1" "$2"\n' "$REVIEWER" > "$HARNESS_DB_ROOT/reviewer"
+"$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || fail "review with a reviewer failed"
 expect_output 'Running the independent reviewer'
 expect_output 'OK: fixture-reviewer approved'
 grep -q '"verdict":"approve"' "$RECORDS/review-findings.json" || fail "approving findings should be stored"
@@ -78,7 +85,8 @@ grep -q '"verdict":"approve"' "$RECORDS/review-findings.json" || fail "approving
 rm -f "$RECORDS/review-findings.json"
 # shellcheck disable=SC2016 # "$2" belongs to the generated reviewer script
 printf '#!/usr/bin/env sh\nprintf "%%s" "{not json" > "$2"\n' > "$REVIEWER"
-HARNESS_REVIEWER_CMD="$REVIEWER \"\$1\" \"\$2\"" "$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || true
+"$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || true
+rm -f "$HARNESS_DB_ROOT/reviewer"
 expect_output 'malformed'
 [ ! -f "$RECORDS/review-findings.json" ] || fail "malformed findings must not be stored"
 

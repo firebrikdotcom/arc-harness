@@ -2,8 +2,9 @@
 # Print a hash of PATH's project files as they are on disk. In a git work tree it
 # is a git tree: tracked files with their uncommitted edits plus untracked files
 # that are not ignored. Outside git it is a content hash of every file (version
-# control and dependency directories skipped). Either way the top-level phase
-# notes (progress.md, tasks/, task.json, review-findings.json) are left out: they
+# control and dependency directories skipped). Either way the phase notes at the
+# project root (progress.md, tasks/, task.json, review-findings.json; PATH may be
+# a subdirectory of a larger repository) are left out: they
 # are notes about the work, not the work, so writing them never voids a check.
 # Two equal hashes mean no project file changed in between. The real index is
 # never modified.
@@ -55,7 +56,7 @@ else
   rm -f "$TMP_INDEX"
 fi
 if GIT_INDEX_FILE=$TMP_INDEX git -C "$TOP" add -A -- . >/dev/null 2>&1 \
-  && GIT_INDEX_FILE=$TMP_INDEX git -C "$TOP" rm -r -q --cached --ignore-unmatch -- progress.md tasks task.json review-findings.json >/dev/null 2>&1 \
+  && GIT_INDEX_FILE=$TMP_INDEX git -C "$ROOT" rm -r -q --cached --ignore-unmatch -- progress.md tasks task.json review-findings.json >/dev/null 2>&1 \
   && hash=$(GIT_INDEX_FILE=$TMP_INDEX git -C "$TOP" write-tree 2>/dev/null); then
   printf '%s\n' "$hash"
 else
