@@ -118,9 +118,19 @@ grep -q 'no project-owned setup commands' "$OUT" || fail "plain directory not ha
 PDIR=$("$TARGET" lookup "$PLAIN") || fail "plain directory not registered"
 grep -q '^TARGET_KIND=dir$' "$PDIR/target.state" || fail "plain kind not recorded"
 
-# 8. The harness root itself stays silent.
+# 8. The harness root is not initialised as a target; it prints only its run brief.
 out=$(payload SessionStart "$ROOT" "" "" | sh "$HOOK")
-[ -z "$out" ] || fail "harness root should print nothing: $out"
+if printf '%s\n' "$out" | grep -q '^Harness auto-init'; then fail "harness root should not be initialised: $out"; fi
+printf '%s\n' "$out" | grep -q '^Harness' || fail "harness root should print its brief: $out"
+
+# 8b. A target gets a short project map, and the session brief names it.
+grep -q '^- Makefile (1)$' "$TDIR/map.md" || fail "the map should list top-level files"
+payload SessionStart "$WT" "" "" | sh "$HOOK" > "$OUT" 2>&1
+grep -q "^Project map: $TDIR/map.md" "$OUT" || fail "the session brief should name the project map"
+
+# 8c. Bootstrapping the harness root itself (as CI does) succeeds and writes nothing odd.
+"$INIT" --project "$ROOT" --yes > "$OUT" 2>&1 < /dev/null || fail "init on the harness root failed"
+if grep -q 'Registered harness target: FAIL' "$OUT"; then fail "a refused registration must not be reported as a target"; fi
 
 # 9. Manual init registers too.
 "$INIT" --project "$PLAIN" > "$OUT" 2>&1 < /dev/null || fail "manual init failed"
@@ -130,7 +140,9 @@ grep -q '^Registered harness target: ' "$OUT" || fail "manual init did not repor
 (cd "$WT" && "$CLI" plan start) > "$OUT" 2>&1 || fail "plan start failed from the worktree"
 [ -f "$TDIR/db/runs/current" ] || fail "run was not created in the target database"
 [ ! -e "$HARNESS_DB_ROOT/runs/current" ] || fail "run leaked into the shared database"
-(cd "$WT" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "plan done / build start failed"
+(cd "$WT" && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "plan done / build start failed"
+# The fixture worktree has no checks; its database accepts an empty verification.
+printf '%s\n' allow-empty > "$TDIR/db/required-checks"
 "$ROOT/scripts/verify.sh" --project "$WT" > "$OUT" 2>&1 || fail "verify failed on the worktree"
 [ -f "$TDIR/db/records/verify.state" ] || fail "verify record not written to the target database"
 (cd "$WT/sub" && "$CLI" build "done") > "$OUT" 2>&1 || fail "build done did not accept the target's verify record"

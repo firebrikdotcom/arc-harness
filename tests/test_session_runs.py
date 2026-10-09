@@ -24,15 +24,19 @@ class SessionRunsTests(unittest.TestCase):
         self.base = Path(self.temp.name).resolve()
         self.project = self.base / "project"
         self.project.mkdir()
+        (self.project / "Makefile").write_text("test:\n\t@true\n")
         self.env = dict(os.environ)
         for key in list(self.env):
-            if key.startswith(("HARNESS_", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_ENV_FILE")):
+            if key.startswith(("HARNESS_", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_ENV_FILE",
+                               "CLAUDECODE", "CODEX_SANDBOX")):
                 self.env.pop(key)
         self.env.update(HARNESS_ROOT=str(ROOT), HARNESS_DB_ROOT=str(self.base / "db"),
                         HARNESS_JEV_CHECKPOINTS="0", HARNESS_AUDIT_ENABLED="0",
                         HARNESS_WORKFLOW_STATE=str(self.base / "workflow.sqlite"),
                         HARNESS_AUDIT_SETTINGS=str(self.base / "settings.json"),
-                        HARNESS_AUDIT_OUTBOX=str(self.base / "outbox.sqlite"))
+                        HARNESS_AUDIT_OUTBOX=str(self.base / "outbox.sqlite"),
+                        HARNESS_CONFIRM_TTY=str(self.base / "confirm"))
+        (self.base / "confirm").write_text("yes\n")
         (self.base / "settings.json").write_text('{"jev":false,"workflow":false}')
         result = subprocess.run([str(ROOT / "scripts/harness-target.sh"), "register", str(self.project)],
                                 env=self.env, text=True, capture_output=True, check=True)
@@ -56,6 +60,7 @@ class SessionRunsTests(unittest.TestCase):
                   '[{"id":"check","description":"Check","criterion":"Checks pass"}]', "--reason", "test")
         self.call(sid, "workflow", "todo", "update", "--id", "check", "--status", "in_progress", "--reason", "test")
         self.call(sid, "plan", "start")
+        self.call(sid, "contract", "waive", "fixture task")
         self.call(sid, "plan", "done")
         self.call(sid, "build", "start")
 
@@ -108,6 +113,9 @@ class SessionRunsTests(unittest.TestCase):
         for sid in ("a", "b"):
             self.call(sid, "workflow", "todo", "update", "--id", "check", "--status", "completed",
                       "--reason", "tested", "--evidence", "sensors passed")
+            findings = self.base / ("findings-" + sid + ".json")
+            findings.write_text(json.dumps({"tree_hash": subprocess.run(["sh", str(ROOT / "scripts/tree-hash.sh"), str(self.project)], capture_output=True, text=True).stdout.strip(), "reviewer": "fixture", "verdict": "approve", "findings": []}))
+            self.call(sid, "review", "submit", str(findings))
             self.call(sid, "review", "done")
         previous = self.run_id("a")
         self.call("a", "plan", "start")
@@ -115,6 +123,7 @@ class SessionRunsTests(unittest.TestCase):
         self.assertIn("loops     0/1", self.call("a", "status"))
         self.assertTrue(records_dir(self.db, "a").is_dir())
         self.call("a", "workflow", "todo", "update", "--id", "check", "--status", "in_progress", "--reason", "next task")
+        self.call("a", "contract", "waive", "fixture task")
         self.call("a", "plan", "done")
         self.call("a", "build", "start")
         self.assertIn("belongs to another run", self.call("a", "build", "done", expected=4))

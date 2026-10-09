@@ -32,6 +32,12 @@ if [ -x "$HARNESS_ROOT/scripts/init.sh" ] && [ -d "$cwd" ]; then
   "$HARNESS_ROOT/scripts/init.sh" --project "$cwd" --auto 2>/dev/null | grep '^Harness auto-init:' || :
 fi
 
+# Resume from durable state, not from memory: the run, its contract, any pause,
+# the last steps, and the project map.
+if [ -x "$HARNESS_ROOT/scripts/harness" ] && [ -d "$cwd" ]; then
+  (cd "$cwd" && "$HARNESS_ROOT/scripts/harness" brief 2>/dev/null | head -n 20) || :
+fi
+
 if [ -f "$HOOK_DIR/session-route.sh" ]; then
   printf '%s' "$payload" | sh "$HOOK_DIR/session-route.sh" || :
 fi

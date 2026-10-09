@@ -7,6 +7,10 @@ ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$ROOT"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-jev.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+printf 'yes\n' > "$TMP_ROOT/confirm"
+HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
+export HARNESS_CONFIRM_TTY
 
 fail() {
   printf 'FAIL: %s\n' "$*"
@@ -34,7 +38,8 @@ TARGET="$TMP_ROOT/target"
 mkdir -p "$TARGET"
 git -C "$TARGET" init -q
 printf '<!-- harness-cli:start -->\n<!-- harness-cli:end -->\n' > "$TARGET/AGENTS.md"
-git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid add AGENTS.md
+printf 'test:\n\t@true\n' > "$TARGET/Makefile"
+git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid add AGENTS.md Makefile
 git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid commit -q -m init
 
 payload() {
@@ -66,8 +71,11 @@ out=$(payload SessionStart "$TMP_ROOT/plain" "" "" | sh scripts/hooks/session-ro
 payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh >/dev/null
 [ ! -d "$HARNESS_DB_ROOT/advice" ] || fail "observe hook wrote advice without a run"
 
+# The run belongs to the target project: its CLI calls run there.
+hj() { (cd "$TARGET" && "$ROOT/scripts/harness" "$@"); }
+
 # 5. With a run, the third identical command emits one progress checkpoint; harness commands are ignored.
-HARNESS_JEV_CHECKPOINTS=0 scripts/harness plan start >/dev/null
+HARNESS_JEV_CHECKPOINTS=0 hj plan start >/dev/null
 for _ in 1 2 3 4; do
   payload PreToolUse "$TARGET" Bash "scripts/harness status" | sh scripts/hooks/jev-observe.sh >/dev/null
 done
@@ -84,22 +92,25 @@ payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh 
 grep -q '"resolver": "tool_repeat"' "$HARNESS_DB_ROOT"/advice-pending/*.json || fail "tool repeat left no pending oracle"
 
 # 6. Phase gates, verify, and review emit checkpoints and label them from the real results.
-plan_out=$(scripts/harness plan "done")
+hj contract waive "fixture task" >/dev/null
+plan_out=$(hj plan "done")
 printf '%s\n' "$plan_out" | grep -c 'Jev: handoff_assessment/phase-plan-2 shadow recommendation' >/dev/null || fail "plan done emitted no checkpoint: $plan_out"
 # The fourth identical command above recurred after the checkpoint: the oracle labels it stuck.
 printf '%s\n' "$plan_out" | grep -c 'Jev: labeled progress_assessment/tool-repeat-2 under_escalated' >/dev/null || fail "plan done did not label the tool repeat: $plan_out"
-build_out=$(scripts/harness build start)
+build_out=$(hj build start)
 printf '%s\n' "$build_out" | grep -c 'Jev: reasoning_allocation/phase-build-2' >/dev/null || fail "build start emitted no checkpoint: $build_out"
 [ "$(count "$HARNESS_DB_ROOT/advice-pending")" = "2" ] || fail "expected two pending oracles"
 verify_out=$(scripts/verify.sh --project "$TARGET" 2>&1) || fail "verify failed: $verify_out"
 printf '%s\n' "$verify_out" | grep -c 'Jev: evidence_assessment/verify-predict-2 shadow recommendation' >/dev/null || fail "verify emitted no prediction"
 printf '%s\n' "$verify_out" | grep -c 'Jev: labeled evidence_assessment/verify-predict-2 correct' >/dev/null || fail "verify did not label its prediction"
 printf '%s\n' "$verify_out" | grep -c 'Jev: labeled reasoning_allocation/phase-build-2 correct' >/dev/null || fail "verify did not label the allocation"
-scripts/harness build "done" >/dev/null
-scripts/harness review start >/dev/null
+hj build "done" >/dev/null
+hj review start >/dev/null
 review_out=$(scripts/review.sh --project "$TARGET" 2>&1) || fail "review failed: $review_out"
 printf '%s\n' "$review_out" | grep -c 'Jev: handoff_assessment/review-handoff-2 shadow recommendation ready_for_handoff' >/dev/null || fail "review emitted no handoff checkpoint"
-done_out=$(scripts/harness review "done")
+printf '{"tree_hash":"%s","reviewer":"fixture","verdict":"approve","findings":[]}\n' "$(sh scripts/tree-hash.sh "$TARGET")" > "$TMP_ROOT/findings.json"
+hj review submit "$TMP_ROOT/findings.json" >/dev/null
+done_out=$(hj review "done")
 printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/phase-plan-2 correct' >/dev/null || fail "review done did not label the plan handoff"
 printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/review-handoff-2 correct' >/dev/null || fail "review done did not label the review handoff"
 printf '%s\n' "$done_out" | grep -c 'Jev: pilot 6/30 labeled shadow decisions' >/dev/null || fail "pilot counter missing: $done_out"

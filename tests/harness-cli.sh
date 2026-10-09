@@ -8,6 +8,10 @@ CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 unset HARNESS_ROOT
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-cli.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+printf 'yes\n' > "$TMP_ROOT/confirm"
+HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
+export HARNESS_CONFIRM_TTY
 # The CLI reports physical paths, so compare against the resolved temp root.
 TMP_ROOT=$(CDPATH='' cd "$TMP_ROOT" && pwd -P)
 
@@ -64,8 +68,14 @@ state_dir() {
 record() {
   mkdir -p "$HARNESS_DB_ROOT/records"
   epoch=$(( $(date +%s) + ${3:-0} ))
-  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "GIT_HEAD=fixture" "EXIT=$2" \
+  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "PROJECT_ROOT=$FIXTURE" "GIT_HEAD=fixture" "EXIT=$2" \
     > "$HARNESS_DB_ROOT/records/$1.state"
+}
+
+# findings VERDICT  Submit an independent reviewer's findings for the fixture (not a git tree).
+findings() {
+  printf '{"tree_hash":"%s","reviewer":"fixture","verdict":"%s","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" "$1" > "$TMP_ROOT/findings.json"
+  run 0 review submit "$TMP_ROOT/findings.json"
 }
 
 # --- harness root discovery -------------------------------------------------
@@ -114,6 +124,7 @@ new_case
 run 0 plan start
 run 4 review start
 expect_output "cannot start review: build is 'pending'"
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 4 review start
 expect_output "cannot start review: build is 'pending'"
@@ -125,6 +136,21 @@ run 0 build "done"
 expect_output "Gate: verify record"
 run 0 review start
 record review 0
+run 4 review "done"
+expect_output "no review findings"
+# Approval needs a person typing yes on a terminal; none attached, or anything else, stores nothing.
+printf '{"tree_hash":"%s","reviewer":"x","verdict":"approve","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" > "$TMP_ROOT/self.json"
+HARNESS_CONFIRM_TTY=$TMP_ROOT/no-such-terminal run 4 review submit "$TMP_ROOT/self.json"
+expect_output "asks a person to confirm on a terminal"
+printf 'no\n' > "$TMP_ROOT/refuse"
+HARNESS_CONFIRM_TTY=$TMP_ROOT/refuse run 4 review submit "$TMP_ROOT/self.json"
+expect_output "not confirmed"
+run 4 review "done"
+expect_output "no review findings"
+findings block
+run 4 review "done"
+expect_output "verdict is block"
+findings approve
 run 0 review "done"
 expect_output "Run complete"
 run 0 status
@@ -139,6 +165,7 @@ expect_output "is complete. Start a new run"
 
 new_case
 run 0 plan start
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 0 build start
 run 4 build "done"
@@ -158,12 +185,14 @@ record review 0 -100
 run 4 review "done"
 expect_output "predates review start"
 record review 0
+findings approve
 run 0 review "done"
 
 # --- phase done requires an active phase ------------------------------------
 
 new_case
 run 0 plan start
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 4 plan "done"
 expect_output "cannot mark plan done: plan is 'done'"
@@ -234,6 +263,7 @@ grep -q 'narrowing to one file' "$PAUSE_RECORD" || fail "pause record should sto
 
 # Work resumes after the evaluation, and the extended cap pauses again later.
 run 0 step --note "narrow the plan"
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 0 status
 expect_output "steps     5/6"
@@ -286,6 +316,7 @@ expect_output "time_min  600/unknown"
 
 new_case
 run 0 plan start
+run 0 contract waive "fixture task"
 run 0 plan "done"
 run 0 build start
 record verify 0
@@ -332,6 +363,34 @@ run 4 abort "again"
 expect_output "already aborted"
 run 0 plan start
 expect_output "Run created"
+
+# --- stale runs -------------------------------------------------------------
+
+new_case
+run 0 plan start
+RUN_STATE=$(state_dir)
+sed -i.bak "s/^LAST_ACTIVITY_EPOCH=.*/LAST_ACTIVITY_EPOCH=$(( $(date +%s) - 90000 ))/" "$RUN_STATE/state" && rm -f "$RUN_STATE/state.bak"
+run 0 status
+expect_output "Run:.*(stale)"
+expect_output "idle for more than 24 hours"
+run 4 step --note "work on a stale run"
+expect_output "is stale"
+run 4 plan "done"
+expect_output "is stale"
+run 0 plan start
+expect_output "expired after more than 24 idle hours"
+expect_output "Run created"
+grep -q '^RUN_STATUS=expired$' "$RUN_STATE/state" || fail "stale run should be marked expired"
+
+# Activity keeps a run fresh, and a zero idle limit disables staleness.
+new_case
+HARNESS_RUN_IDLE_HOURS=0
+export HARNESS_RUN_IDLE_HOURS
+run 0 plan start
+RUN_STATE=$(state_dir)
+sed -i.bak "s/^LAST_ACTIVITY_EPOCH=.*/LAST_ACTIVITY_EPOCH=1/" "$RUN_STATE/state" && rm -f "$RUN_STATE/state.bak"
+run 0 step --note "no idle limit"
+unset HARNESS_RUN_IDLE_HOURS
 
 # --- token accounting -------------------------------------------------------
 

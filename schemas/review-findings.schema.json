@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Independent review findings",
+  "description": "Written by a reviewer in a fresh context from the packet scripts/review.sh produces, submitted with `harness review submit FILE`, and required by `harness review done`. scripts/review_findings.py enforces it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tree_hash", "reviewer", "verdict", "findings"],
+  "properties": {
+    "tree_hash": {"type": "string", "description": "scripts/tree-hash.sh of the project when reviewed; printed in the packet. Any later edit voids the review."},
+    "reviewer": {"type": "string", "maxLength": 200, "description": "Who reviewed, e.g. subagent:code-reviewer or claude -p."},
+    "verdict": {"enum": ["approve", "block"]},
+    "summary": {"type": "string", "maxLength": 4000},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["severity", "file", "claim", "evidence"],
+        "properties": {
+          "severity": {"enum": ["blocker", "major", "minor"]},
+          "file": {"type": "string"},
+          "line": {"type": ["integer", "null"], "minimum": 1},
+          "claim": {"type": "string", "maxLength": 4000},
+          "evidence": {"type": "string", "maxLength": 4000},
+          "status": {"enum": ["open", "fixed", "wontfix"], "default": "open"}
+        }
+      }
+    }
+  }
+}

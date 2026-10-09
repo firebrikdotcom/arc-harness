@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -571,6 +572,14 @@ class PhaseCheckpointTests(unittest.TestCase):
         result = self.run_event("verify-start", env={**self.env, "HARNESS_TYPESAFE_ROUTER": str(self.root / "missing.py")})
         self.assertEqual(result.returncode, 0)
         self.assertIn("checkpoint skipped", result.stdout)
+
+    def test_session_start_asks_for_a_pilot_decision_once_the_target_is_met(self) -> None:
+        with patch.object(MODULE.advice, "pilot", return_value={"labeled": 410, "target": 30}), \
+             patch.object(MODULE.task_route, "route_task", return_value={"recommendation": "proceed", "source": "typesafe"}):
+            line = MODULE.session_start(self.project, self.db, self.root / "router.py")
+        self.assertIn("Pilot complete (410 labeled, 30 needed)", line)
+        self.assertIn("promote or retire", line)
+        self.assertNotIn("Pilot: 410/30", line)
 
     def test_session_start_writes_one_shadow_route_from_enum_metadata(self) -> None:
         (self.project / "util.py").write_text("y = 2\n")  # python outweighs markdown: area backend

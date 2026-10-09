@@ -25,7 +25,7 @@ Follow existing patterns first. If the repository already has a style, test patt
 - Prefer fast, deterministic tests.
 - Cover meaningful behavior and edge cases, not implementation trivia.
 - Keep fixtures small and local unless shared fixtures already exist.
-- If a test cannot be added, document why in `progress.md`.
+- If a test cannot be added, say why in the review findings or the handoff.
 - For starter projects, prefer native checks first: `go test`, `composer` scripts, `cargo test`, package-manager scripts, and shell syntax/lint checks.
 
 ## Error Handling
@@ -54,6 +54,6 @@ Follow existing patterns first. If the repository already has a style, test patt
 
 - Update `docs/setup.md` when setup, commands, dependencies, or environment variables change.
 - Update `docs/architecture.md` when module boundaries or dependencies change.
-- Update `progress.md` after every meaningful step.
+- Record meaningful steps with `scripts/harness step --note`.
 - For cross-project orchestration, keep target-specific registries, task notes, run logs, generated indexes, and project documents in ignored local database state such as `.harness-db/`.
 - Do not track project database records in this template repo unless they are intentionally generalized into reusable template documentation.

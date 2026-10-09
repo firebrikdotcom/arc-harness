@@ -11,6 +11,13 @@ DEFAULT_CAP_STEPS=200
 DEFAULT_CAP_TIME_MIN=unknown
 DEFAULT_CAP_LOOPS=1
 DEFAULT_CAP_CONTINUES=3
+# A run left idle this long is stale: the guard refuses it and plan start
+# replaces it, so a later session never inherits an old run's phase.
+DEFAULT_RUN_IDLE_HOURS=24
+# The same command failing the same way this many times in a row pauses the run.
+DEFAULT_CAP_REPEAT_FAILURES=2
+# plan start archives finished runs beyond this many per database.
+DEFAULT_RETAIN_RUNS=50
 SCRIPT_PATH=$0
 while [ -L "$SCRIPT_PATH" ]; do
   _link_dir=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
@@ -47,9 +54,15 @@ usage() {
   info "  plan start|done      Open or close the planning phase."
   info "  build start|done     Open or close the build phase (needs plan done)."
   info "  review start|done    Open or close the review phase (needs build done)."
+  info "  review submit FILE   Store an independent reviewer's findings for review done."
+  info "  contract set FILE | waive REASON | show"
+  info "                       The run's task contract (schemas/task.schema.json); plan done needs it."
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
+  info "  brief                What a new session needs: run, contract, pause, recent steps, map."
+  info "  prune [--keep N] [--dry-run]"
+  info "                       Archive finished runs beyond the newest N (plan start does this too)."
   info "  workflow task|todo|decision|outcome|flush  Record session task metadata or retry delivery."
   info "  route --state PATH   Route compact task metadata before an agent starts."
   info "  launch --state PATH --default-command PATH"
@@ -59,6 +72,7 @@ usage() {
   info "  budget --thread ID --tokens N [--watch]"
   info "                       Measure a Codex thread and interrupt its active turn at the cap."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
+  info "  failure record|clear Repeated-failure counter, fed by scripts/failure_budget.py (hook only)."
   info "  abort \"REASON\"       Abort the current run so a new one can start. The reason is required."
   info ""
   info "Budgets (environment overrides, read when the run is created):"
@@ -67,6 +81,9 @@ usage() {
   info "  HARNESS_BUDGET_LOOPS     default $DEFAULT_CAP_LOOPS"
   info "  HARNESS_BUDGET_TOKENS    default unknown (the CLI cannot count tokens)"
   info "  HARNESS_BUDGET_CONTINUES default $DEFAULT_CAP_CONTINUES (continues allowed per run)"
+  info "  HARNESS_RUN_IDLE_HOURS   default $DEFAULT_RUN_IDLE_HOURS (idle hours before a run is stale; 0 disables)"
+  info "  HARNESS_BUDGET_REPEAT_FAILURES default $DEFAULT_CAP_REPEAT_FAILURES (identical failures in a row before a pause; 0 disables)"
+  info "  HARNESS_RETAIN_RUNS      default $DEFAULT_RETAIN_RUNS (runs kept per database before plan start archives older ones)"
   info ""
   info "Other environment variables:"
   info "  HARNESS_ROOT     Skip harness-root discovery and use this directory."
@@ -75,7 +92,9 @@ usage() {
   info ""
   info ""
   info "Gates: 'build done' needs a passing scripts/verify.sh record newer than 'build start';"
-  info "'review done' needs a scripts/review.sh record newer than 'review start'."
+  info "'review done' needs a scripts/review.sh record newer than 'review start' and an"
+  info "independent reviewer's approving findings for the current files (review submit)."
+  info "Both records are void once project files change."
   info ""
   info "Exit codes: 0 ok, $EXIT_USAGE usage/environment, $EXIT_BUDGET budget pause, $EXIT_PHASE phase-order or gate violation."
 }
@@ -145,6 +164,11 @@ setup_paths() {
   fi
   require_json_runtime
   TARGET_ROOT=$ROOT
+  # Outside the harness checkout, an unregistered project is its own target.
+  case "$(pwd -P)" in
+    "$ROOT"|"$ROOT"/*) ;;
+    *) TARGET_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P) ;;
+  esac
   DB_ROOT=${HARNESS_DB_ROOT:-$ROOT/.harness-db}
   # A registered target (see scripts/harness-target.sh) keeps its own runs,
   # gate records, routes, and checkpoints beneath the database root, so
@@ -311,6 +335,57 @@ require_run() {
   fi
 }
 
+# run_idle_seconds  Seconds since the run's last recorded activity. Runs created
+# before activity tracking fall back to the modification time of their log.
+run_idle_seconds() {
+  _last=$(state_get LAST_ACTIVITY_EPOCH "")
+  if [ -z "$_last" ]; then
+    _last=$(date -r "$RUN_DIR/log" +%s 2>/dev/null || date -r "$STATE_FILE" +%s 2>/dev/null || now_epoch)
+  fi
+  printf '%s\n' "$(( $(now_epoch) - _last ))"
+}
+
+idle_cap_hours() {
+  _hours=$(state_get CAP_IDLE_HOURS "$DEFAULT_RUN_IDLE_HOURS")
+  case "$_hours" in
+    ''|*[!0-9]*) _hours=$DEFAULT_RUN_IDLE_HOURS ;;
+  esac
+  printf '%s\n' "$_hours"
+}
+
+run_is_stale() {
+  case "$(state_get RUN_STATUS)" in
+    active|paused) ;;
+    *) return 1 ;;
+  esac
+  _hours=$(idle_cap_hours)
+  [ "$_hours" -gt 0 ] || return 1
+  [ "$(run_idle_seconds)" -gt "$(( _hours * 3600 ))" ]
+}
+
+display_status() {
+  if run_is_stale; then
+    printf 'stale\n'
+  else
+    state_get RUN_STATUS
+  fi
+}
+
+refuse_stale_run() {
+  if run_is_stale; then
+    info "FAIL: run $(state_get RUN_ID) has been idle for more than $(idle_cap_hours) hours and is stale."
+    info "Start a new run: harness plan start"
+    exit "$EXIT_PHASE"
+  fi
+}
+
+expire_run() {
+  state_set RUN_STATUS expired
+  write_run_json
+  log_event "expired after more than $(idle_cap_hours) idle hours"
+  info "Run $(state_get RUN_ID) expired after more than $(idle_cap_hours) idle hours."
+}
+
 create_run() {
   _run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   bind_run "$_run_id"
@@ -319,6 +394,8 @@ create_run() {
 
   state_set RUN_ID "$_run_id"
   state_set SESSION_KEY "$(sh "$SCRIPT_DIR/run-paths.sh" key "$DB_ROOT")"
+  # The project this run changes; every gate judges evidence about it alone.
+  state_set RUN_TARGET "$TARGET_ROOT"
   state_set RUN_STARTED_AT "$(now_iso)"
   state_set RUN_STARTED_EPOCH "$(now_epoch)"
   state_set RUN_STATUS active
@@ -334,6 +411,9 @@ create_run() {
   state_set CAP_LOOPS "${HARNESS_BUDGET_LOOPS:-$DEFAULT_CAP_LOOPS}"
   state_set CAP_TOKENS "${HARNESS_BUDGET_TOKENS:-unknown}"
   state_set CAP_CONTINUES "${HARNESS_BUDGET_CONTINUES:-$DEFAULT_CAP_CONTINUES}"
+  state_set CAP_IDLE_HOURS "${HARNESS_RUN_IDLE_HOURS:-$DEFAULT_RUN_IDLE_HOURS}"
+  state_set CAP_REPEAT_FAILURES "${HARNESS_BUDGET_REPEAT_FAILURES:-$DEFAULT_CAP_REPEAT_FAILURES}"
+  state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
   state_set CONTINUES_USED 0
   state_set PHASE_BUILD_STARTED_EPOCH 0
   state_set PHASE_REVIEW_STARTED_EPOCH 0
@@ -349,6 +429,118 @@ create_run() {
   mv "$CURRENT_FILE.tmp.$$" "$CURRENT_FILE"
   info "Run created: $_run_id"
   info "State: $RUN_DIR"
+  _archived=$(prune_runs "${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}" 0)
+  [ "$_archived" = "0" ] || info "Retention: archived $_archived finished run(s) beyond the newest ${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}."
+}
+
+# run_ids  The run directories in RUNS_DIR (named <UTC timestamp>-<pid>).
+run_ids() {
+  [ -d "$RUNS_DIR" ] || return 0
+  for _path in "$RUNS_DIR"/*; do
+    _name=${_path##*/}
+    case "$_name" in
+      [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*) [ -d "$_path" ] && printf '%s\n' "$_name" ;;
+    esac
+  done
+}
+
+# prune_runs KEEP DRY_RUN  Archives runs beyond the newest KEEP into
+# RUNS_DIR/archive/<id>.tar.gz. A run some session still has active or paused is
+# never archived. Prints the number of runs archived (or that would be).
+prune_runs() {
+  _keep=$1
+  _dry=$2
+  _count=0
+  [ -d "$RUNS_DIR" ] || { printf '0\n'; return 0; }
+  case "$_keep" in ''|*[!0-9]*) _keep=$DEFAULT_RETAIN_RUNS ;; esac
+  _live=$(cat "$RUNS_DIR/current" "$RUNS_DIR"/sessions/*/current 2>/dev/null | sort -u)
+  _index=0
+  for _id in $(run_ids | sort -r); do
+    _index=$((_index + 1))
+    [ "$_index" -gt "$_keep" ] || continue
+    _status=$(sed -n 's/^RUN_STATUS=//p' "$RUNS_DIR/$_id/state" 2>/dev/null | tail -n 1)
+    if printf '%s\n' "$_live" | grep -qx "$_id"; then
+      case "$_status" in active|paused) continue ;; esac
+    fi
+    _count=$((_count + 1))
+    [ "$_dry" = "1" ] && continue
+    mkdir -p "$RUNS_DIR/archive"
+    tar -czf "$RUNS_DIR/archive/$_id.tar.gz" -C "$RUNS_DIR" "$_id" && rm -rf "${RUNS_DIR:?}/$_id"
+  done
+  printf '%s\n' "$_count"
+}
+
+cmd_prune() {
+  _keep=${HARNESS_RETAIN_RUNS:-$DEFAULT_RETAIN_RUNS}
+  _dry=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --keep) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _keep=$2; shift 2 ;;
+      --dry-run) _dry=1; shift ;;
+      *) info "FAIL: unknown argument: $1"; exit "$EXIT_USAGE" ;;
+    esac
+  done
+  case "$_keep" in ''|*[!0-9]*) info "FAIL: --keep needs a number."; exit "$EXIT_USAGE" ;; esac
+  _count=$(prune_runs "$_keep" "$_dry")
+  if [ "$_dry" = "1" ]; then
+    info "Would archive $_count run(s) beyond the newest $_keep in $RUNS_DIR."
+  else
+    info "Archived $_count run(s) beyond the newest $_keep into $RUNS_DIR/archive."
+  fi
+}
+
+# --- brief --------------------------------------------------------------------
+# What a new session needs to resume, printed at session start: this session's
+# run or the latest one, its contract, any pause, the last steps, and the map.
+
+latest_run_id() {
+  run_ids | sort | tail -n 1
+}
+
+cmd_brief() {
+  _mine=1
+  _map="$(dirname "$DB_ROOT")/map.md"
+  if ! load_current_run; then
+    _mine=0
+    _latest=$(latest_run_id)
+    if [ -z "$_latest" ] || [ ! -f "$RUNS_DIR/$_latest/state" ]; then
+      info "Harness: no runs yet for $TARGET_ROOT. Start with: harness plan start"
+      [ -f "$_map" ] && info "Project map: $_map"
+      return 0
+    fi
+    bind_run "$_latest"
+  fi
+  info "Harness brief for $TARGET_ROOT"
+  _summary="$(state_get RUN_ID) ($(display_status), phase $(state_get CURRENT_PHASE))"
+  if [ "$_mine" = "1" ]; then
+    info "This session's run: $_summary"
+  else
+    info "No run in this session yet (harness plan start). Latest run: $_summary"
+  fi
+  if [ -f "$(contract_file)" ] && has_cmd python3; then
+    python3 - "$(contract_file)" <<'PY' 2>/dev/null || :
+import json, sys
+data = json.load(open(sys.argv[1]))
+if "waived" in data:
+    print("Contract: waived (" + data["waived"][:160] + ")")
+else:
+    print("Contract: " + data["goal"][:160])
+    print("Acceptance: " + ", ".join(item["id"] for item in data["acceptance"]))
+PY
+  fi
+  if [ "$(state_get RUN_STATUS)" = "paused" ]; then
+    _detail=$(state_get PAUSE_DETAIL)
+    info "Paused on: $(budget_label "$(state_get PAUSE_BUDGET)")${_detail:+ ($_detail)}"
+  fi
+  if [ -f "$RUN_DIR/log" ]; then
+    _recent=$(grep -v '	step tool:' "$RUN_DIR/log" | tail -n 10 | cut -c1-200)
+    if [ -n "$_recent" ]; then
+      info "Recent steps:"
+      printf '%s\n' "$_recent" | sed 's/^/  /'
+    fi
+  fi
+  [ -f "$_map" ] && info "Project map: $_map"
+  return 0
 }
 
 log_event() {
@@ -393,6 +585,7 @@ budget_label() {
     TIME_MIN) printf 'time_min\n' ;;
     LOOPS) printf 'loops\n' ;;
     TOKENS) printf 'tokens\n' ;;
+    REPEAT_FAILURE) printf 'repeat_failure\n' ;;
     *) printf 'none\n' ;;
   esac
 }
@@ -419,6 +612,7 @@ write_pause_json() {
     cap "$(typed_number "$(state_get PAUSE_CAP)")" \
     phase "s:$(state_get PAUSE_PHASE)" \
     paused_at "s:$(state_get PAUSE_AT)" \
+    detail "s:$(state_get PAUSE_DETAIL)" \
     resolved "b:$_resolved" \
     resolved_at "$_resolved_at" \
     evaluation "$_evaluation"
@@ -448,7 +642,8 @@ write_run_json() {
     tokens_cap "$(typed_number "$(effective_cap TOKENS)")" \
     continues_used "n:$(state_get CONTINUES_USED 0)" \
     continues_cap "n:$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")" \
-    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")"
+    paused_budget "s:$(budget_label "$(state_get PAUSE_BUDGET)")" \
+    stale "b:$(if run_is_stale; then printf true; else printf false; fi)"
 }
 
 pause_run() {
@@ -457,6 +652,7 @@ pause_run() {
   _cap=$3
   _seq=$(( $(state_get PAUSE_SEQ 0) + 1 ))
 
+  [ "$_budget" = "REPEAT_FAILURE" ] || state_set PAUSE_DETAIL ""
   state_set RUN_STATUS paused
   state_set PAUSE_SEQ "$_seq"
   state_set PAUSE_BUDGET "$_budget"
@@ -471,7 +667,13 @@ pause_run() {
   write_run_json
   log_event "pause budget=$(budget_label "$_budget") used=$_used cap=$_cap"
 
-  info "PAUSE: $(budget_label "$_budget") budget reached (used=$_used cap=$_cap)."
+  if [ "$_budget" = "REPEAT_FAILURE" ]; then
+    info "PAUSE: the same failure happened $_used times (cap $_cap): $(state_get PAUSE_DETAIL)"
+    info "Stop editing. Show the user the exact error and the fix you propose; resume only on their"
+    info "instruction, with a note that states the new approach: harness continue \"<new approach>\""
+  else
+    info "PAUSE: $(budget_label "$_budget") budget reached (used=$_used cap=$_cap)."
+  fi
   info "Run: $(state_get RUN_ID)"
   info "Pause record: $_record"
   info "Evaluate the run, then resume with: harness continue \"<evaluation note>\""
@@ -480,7 +682,7 @@ pause_run() {
 
 check_budgets() {
   case "$(state_get RUN_STATUS)" in
-    complete|aborted) return 0 ;;
+    complete|aborted|expired) return 0 ;;
   esac
   for _budget in STEPS TIME_MIN LOOPS TOKENS; do
     _cap=$(effective_cap "$_budget")
@@ -507,6 +709,7 @@ block_when_paused() {
 
 count_step() {
   state_set STEPS_USED "$(( $(state_get STEPS_USED 0) + 1 ))"
+  state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
 }
 
 # --- gate records -----------------------------------------------------------
@@ -566,9 +769,181 @@ require_gate_record() {
     info "Fix the failures and run $_cmd again."
     exit "$EXIT_PHASE"
   fi
+  # The record must be about this run's project, not another one that passes.
+  _project=$(record_get "$_file" PROJECT_ROOT)
+  if [ "$(physical_dir "$_project")" != "$(physical_dir "$(run_target)")" ]; then
+    info "FAIL: cannot mark $1 done: the last $_kind record covers ${_project:-an unnamed project}, not this run's project $(run_target)."
+    info "Run $_cmd --project $(run_target)."
+    exit "$EXIT_PHASE"
+  fi
+  # The record proves the files as they were then; any project edit since voids it.
+  _tree=$(record_get "$_file" TREE_HASH)
+  if [ -n "$_tree" ] && [ "$_tree" != "none" ] && [ -d "$_project" ]; then
+    _now_tree=$(sh "$SCRIPT_DIR/tree-hash.sh" "$_project")
+    if [ "$_now_tree" != "$_tree" ]; then
+      info "FAIL: cannot mark $1 done: project files changed after the last $_kind run."
+      info "Run $_cmd again on the current files."
+      exit "$EXIT_PHASE"
+    fi
+  fi
 
   info "Gate: $_kind record $(record_get "$_file" RECORD_AT) exit=0 head=$(record_get "$_file" GIT_HEAD)"
   log_event "$1 gate: $_kind record at $(record_get "$_file" RECORD_AT) head=$(record_get "$_file" GIT_HEAD)"
+}
+
+# --- task contract ----------------------------------------------------------
+# A run's contract (schemas/task.schema.json) lives at RUN_DIR/task.json.
+
+contract_file() {
+  printf '%s\n' "$RUN_DIR/task.json"
+}
+
+contract_tool() {
+  if ! has_cmd python3; then
+    info "FAIL: python3 is required to check the task contract."
+    exit "$EXIT_PHASE"
+  fi
+  python3 "$SCRIPT_DIR/task_contract.py" "$@"
+}
+
+require_contract() {
+  if ! contract_tool validate "$(contract_file)" >/dev/null; then
+    contract_tool validate "$(contract_file)" || :
+    info "FAIL: cannot mark plan done without a task contract."
+    info "Write one (tasks/task.example.json, schemas/task.schema.json) and run: harness contract set FILE"
+    info "or record why this run has none: harness contract waive \"<reason>\""
+    exit "$EXIT_PHASE"
+  fi
+  state_set CONTRACT_BASE "$(git -C "$(run_target)" rev-parse HEAD 2>/dev/null || printf '')"
+}
+
+run_contract_criteria() {
+  info "Contract acceptance criteria:"
+  if ! contract_tool criteria "$(contract_file)" --project "$(run_target)"; then
+    info "FAIL: cannot mark build done: an acceptance criterion failed."
+    exit "$EXIT_PHASE"
+  fi
+  log_event "build gate: contract criteria passed"
+}
+
+check_contract_non_goals() {
+  if ! contract_tool nongoals "$(contract_file)" --project "$(run_target)" --base "$(state_get CONTRACT_BASE)"; then
+    info "FAIL: cannot mark review done: the change touched a non-goal path. Revert it or re-plan."
+    exit "$EXIT_PHASE"
+  fi
+}
+
+cmd_contract() {
+  _action=${1:-}
+  [ "$#" -gt 0 ] && shift
+  require_run
+  refuse_stale_run
+  block_when_paused
+  case "$_action" in
+    set)
+      if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then info "FAIL: contract set needs one JSON file."; exit "$EXIT_USAGE"; fi
+      if [ "$(phase_status plan)" != "active" ]; then
+        info "FAIL: the contract is set while planning (plan is '$(phase_status plan)')."
+        exit "$EXIT_PHASE"
+      fi
+      contract_tool validate "$1" || exit "$EXIT_PHASE"
+      cp "$1" "$(contract_file).tmp.$$"
+      mv "$(contract_file).tmp.$$" "$(contract_file)"
+      log_event "contract set"
+      info "Contract stored: $(contract_file)"
+      ;;
+    waive)
+      if [ "$#" -ne 1 ] || [ -z "$1" ]; then info "FAIL: contract waive needs a reason."; exit "$EXIT_USAGE"; fi
+      if [ "$(phase_status plan)" != "active" ]; then
+        info "FAIL: a waiver is recorded while planning (plan is '$(phase_status plan)')."
+        exit "$EXIT_PHASE"
+      fi
+      json_write "$(contract_file)" waived "s:$1"
+      log_event "contract waived"
+      info "Contract waived; the reason is shown to the reviewer: $1"
+      ;;
+    show)
+      contract_tool show "$(contract_file)"
+      ;;
+    *)
+      info "FAIL: contract takes set FILE, waive REASON, or show."
+      exit "$EXIT_USAGE"
+      ;;
+  esac
+}
+
+# run_target  The project this run changes, recorded at plan start (older runs:
+# the current target root).
+run_target() {
+  state_get RUN_TARGET "$TARGET_ROOT"
+}
+
+physical_dir() {
+  if [ -n "$1" ] && [ -d "$1" ]; then
+    (CDPATH='' cd "$1" && pwd -P)
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# review_project  Reviews are always about the run's own project.
+review_project() {
+  run_target
+}
+
+# The reviewer that wrote the change cannot approve it: review done needs an
+# independent reviewer's verdict for the files as they are now.
+require_review_findings() {
+  if ! has_cmd python3; then
+    info "FAIL: python3 is required to check the independent review findings."
+    exit "$EXIT_PHASE"
+  fi
+  if ! python3 "$SCRIPT_DIR/review_findings.py" check --findings "$RECORDS_DIR/review-findings.json" --project "$(review_project)"; then
+    exit "$EXIT_PHASE"
+  fi
+  log_event "review gate: independent findings approved"
+}
+
+cmd_review_submit() {
+  if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+    info "FAIL: review submit needs one findings file (schemas/review-findings.schema.json)."
+    exit "$EXIT_USAGE"
+  fi
+  require_run
+  refuse_stale_run
+  block_when_paused
+  if [ "$(phase_status review)" != "active" ]; then
+    info "FAIL: review is '$(phase_status review)'; submit findings while it is active (harness review start)."
+    exit "$EXIT_PHASE"
+  fi
+  has_cmd python3 || { info "FAIL: python3 is required to check review findings."; exit "$EXIT_USAGE"; }
+  _status=0
+  python3 "$SCRIPT_DIR/review_findings.py" check --findings "$1" --project "$(review_project)" || _status=$?
+  if [ "$_status" -ge 2 ]; then
+    exit "$EXIT_PHASE"
+  fi
+  # Approval is a person's act, whatever the command's spelling: it is confirmed
+  # on a terminal, which an agent's shell does not have.
+  _tty=${HARNESS_CONFIRM_TTY:-/dev/tty}
+  if ! ( : < "$_tty" ) 2>/dev/null; then
+    info "FAIL: review submit asks a person to confirm on a terminal, and none is attached."
+    info "Run it in your own terminal: $SCRIPT_DIR/harness review submit $1"
+    exit "$EXIT_PHASE"
+  fi
+  printf 'Store these findings as the independent review of run %s? Type yes: ' "$(state_get RUN_ID)" >&2
+  _answer=""
+  read -r _answer < "$_tty" || :
+  if [ "$_answer" != "yes" ]; then
+    info "FAIL: not confirmed; nothing was stored."
+    exit "$EXIT_PHASE"
+  fi
+  mkdir -p "$RECORDS_DIR"
+  cp "$1" "$RECORDS_DIR/review-findings.json.tmp.$$"
+  mv "$RECORDS_DIR/review-findings.json.tmp.$$" "$RECORDS_DIR/review-findings.json"
+  count_step
+  write_run_json
+  log_event "review findings submitted (check exit $_status)"
+  info "Findings stored: $RECORDS_DIR/review-findings.json"
 }
 
 # --- Jev shadow checkpoints --------------------------------------------------
@@ -611,6 +986,10 @@ cmd_phase_start() {
   _phase=$1
 
   if load_current_run; then
+    if [ "$_phase" = "plan" ] && run_is_stale; then
+      expire_run
+    fi
+    refuse_stale_run
     _run_status=$(state_get RUN_STATUS)
     case "$_run_status" in
       active|paused)
@@ -677,6 +1056,7 @@ cmd_phase_start() {
 cmd_phase_done() {
   _phase=$1
   require_run
+  refuse_stale_run
   block_when_paused
 
   _status=$(phase_status "$_phase")
@@ -687,6 +1067,14 @@ cmd_phase_done() {
   fi
 
   require_gate_record "$_phase"
+  case "$_phase" in
+    plan) require_contract ;;
+    build) run_contract_criteria ;;
+    review)
+      require_review_findings
+      check_contract_non_goals
+      ;;
+  esac
   if [ "$_phase" = "review" ] && [ -f "$SCRIPT_DIR/workflow_todos.py" ]; then
     python3 "$SCRIPT_DIR/workflow_audit.py" gate --check plan || exit "$EXIT_PHASE"
   fi
@@ -748,6 +1136,7 @@ cmd_step() {
   done
 
   require_run
+  refuse_stale_run
   block_when_paused
 
   if [ "$(state_get CURRENT_PHASE)" = "none" ]; then
@@ -777,6 +1166,57 @@ cmd_step() {
   check_budgets
 }
 
+# --- repeated failures ------------------------------------------------------
+# Fed by scripts/failure_budget.py from the post-tool hooks, never by the agent:
+# the phase guard refuses `harness failure` in a tool call. A command's key and
+# its error's signature are hex digests; only the latest error per command is
+# kept, so a different error restarts the count and a success clears it.
+
+cmd_failure() {
+  _action=${1:-}
+  [ "$#" -gt 0 ] && shift
+  _key=""
+  _sig=""
+  _detail=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --command-key) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _key=$2; shift 2 ;;
+      --signature) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _sig=$2; shift 2 ;;
+      --detail) [ "$#" -ge 2 ] || exit "$EXIT_USAGE"; _detail=$2; shift 2 ;;
+      *) info "FAIL: unknown argument: $1"; exit "$EXIT_USAGE" ;;
+    esac
+  done
+  case "$_action" in
+    record) if [ -z "$_key" ] || [ -z "$_sig" ]; then info "FAIL: record needs --command-key and --signature."; exit "$EXIT_USAGE"; fi ;;
+    clear) [ -n "$_key" ] || { info "FAIL: clear needs --command-key."; exit "$EXIT_USAGE"; } ;;
+    *) info "FAIL: failure takes record or clear."; exit "$EXIT_USAGE" ;;
+  esac
+  case "$_key$_sig" in
+    *[!0-9a-f]*) info "FAIL: keys and signatures are hex digests."; exit "$EXIT_USAGE" ;;
+  esac
+  load_current_run || return 0
+  [ "$(state_get RUN_STATUS)" = "active" ] || return 0
+  ! run_is_stale || return 0
+  _file="$RUN_DIR/failures"
+  touch "$_file"
+  _previous=$(awk -v k="$_key" -v s="$_sig" '$1 == k && $2 == s { n = $3 } END { print n + 0 }' "$_file")
+  grep -v "^$_key " "$_file" > "$_file.tmp.$$" || :
+  if [ "$_action" = "clear" ]; then
+    mv "$_file.tmp.$$" "$_file"
+    return 0
+  fi
+  _count=$(( _previous + 1 ))
+  printf '%s %s %s\n' "$_key" "$_sig" "$_count" >> "$_file.tmp.$$"
+  mv "$_file.tmp.$$" "$_file"
+  log_event "failure $_count of signature $(printf '%s' "$_sig" | cut -c1-12)"
+  _cap=$(state_get CAP_REPEAT_FAILURES "$DEFAULT_CAP_REPEAT_FAILURES")
+  case "$_cap" in ''|*[!0-9]*) _cap=$DEFAULT_CAP_REPEAT_FAILURES ;; esac
+  if [ "$_cap" -gt 0 ] && [ "$_count" -ge "$_cap" ]; then
+    state_set PAUSE_DETAIL "$(printf '%s' "$_detail" | tr '\n\t' '  ' | cut -c1-200)"
+    pause_run REPEAT_FAILURE "$_count" "$_cap"
+  fi
+}
+
 # --- continue ---------------------------------------------------------------
 
 cmd_continue() {
@@ -793,6 +1233,7 @@ cmd_continue() {
   fi
 
   require_run
+  refuse_stale_run
 
   if [ "$(state_get RUN_STATUS)" != "paused" ]; then
     info "FAIL: run $(state_get RUN_ID) is not paused (status: $(state_get RUN_STATUS))."
@@ -810,6 +1251,10 @@ cmd_continue() {
 
   _budget=$(state_get PAUSE_BUDGET)
   state_set "EXT_$_budget" "$(( $(state_get "EXT_$_budget" 0) + 1 ))"
+  if [ "$_budget" = "REPEAT_FAILURE" ]; then
+    # The new approach gets a clean count; the old failures stay in the log.
+    : > "$RUN_DIR/failures"
+  fi
   if [ "$_budget" = "TIME_MIN" ]; then
     # Restart the clock: an old run must not re-pause the moment it resumes.
     # The elapsed time before this evaluation stays visible in the pause record.
@@ -822,11 +1267,16 @@ cmd_continue() {
   _record=$(write_pause_json)
 
   state_set RUN_STATUS active
+  state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
   write_run_json
   log_event "continue budget=$(budget_label "$_budget")"
 
   info "OK: evaluation recorded, run $(state_get RUN_ID) resumed (continue $(state_get CONTINUES_USED)/$(state_get CAP_CONTINUES))."
-  info "Budget $(budget_label "$_budget") extended to $(effective_cap "$_budget")."
+  if [ "$_budget" = "REPEAT_FAILURE" ]; then
+    info "Repeated-failure count cleared for the new approach."
+  else
+    info "Budget $(budget_label "$_budget") extended to $(effective_cap "$_budget")."
+  fi
   info "Pause record: $_record"
   check_budgets
 }
@@ -899,8 +1349,12 @@ cmd_status() {
 
   info "Harness root: $ROOT"
   info "State root:   $DB_ROOT"
-  info "Run:          $(state_get RUN_ID) ($(state_get RUN_STATUS))"
+  info "Run:          $(state_get RUN_ID) ($(display_status))"
+  if run_is_stale; then
+    info "Stale:        idle for more than $(idle_cap_hours) hours; harness plan start replaces it"
+  fi
   info "Run state:    $RUN_DIR"
+  info "Target:       $(run_target)"
   info "Phase:        $(state_get CURRENT_PHASE)"
   info "  plan   $(phase_status plan)"
   info "  build  $(phase_status build)"
@@ -953,6 +1407,10 @@ case "$COMMAND" in
     fi
     ACTION=$1
     shift
+    if [ "$COMMAND $ACTION" = "review submit" ]; then
+      cmd_review_submit "$@"
+      exit 0
+    fi
     if [ "$#" -gt 0 ]; then
       info "FAIL: unknown argument: $1"
       exit "$EXIT_USAGE"
@@ -994,6 +1452,18 @@ case "$COMMAND" in
     ;;
   continue)
     cmd_continue "$@"
+    ;;
+  failure)
+    cmd_failure "$@"
+    ;;
+  contract)
+    cmd_contract "$@"
+    ;;
+  brief)
+    cmd_brief "$@"
+    ;;
+  prune)
+    cmd_prune "$@"
     ;;
   abort)
     cmd_abort "$@"

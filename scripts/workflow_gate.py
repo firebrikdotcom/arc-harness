@@ -6,33 +6,76 @@ from pathlib import Path
 import shlex
 import sys
 import uuid
+import permit
 import workflow_audit as audit
 from workflow_todos import assert_plan, assert_complete
 
 READ_TOOLS = {"Read", "Grep", "Glob", "read_file", "list_dir", "update_plan", "request_user_input", "request_user_input_async"}
 GRAPH_READS = {"search_graph", "trace_path", "get_code_snippet", "check_index_coverage", "query_graph", "get_architecture", "list_projects", "index_status"}
+# Commands that only read. Writes by redirection are caught separately by the parser.
+READ_ONLY = {"cat", "head", "tail", "wc", "ls", "tree", "grep", "egrep", "fgrep", "rg", "cut", "tr", "uniq",
+             "diff", "cmp", "file", "stat", "du", "df", "pwd", "echo", "printf", "which", "type", "basename",
+             "dirname", "realpath", "readlink", "date", "id", "whoami", "hostname", "uname", "jq", "column",
+             "nl", "od", "xxd", "md5sum", "sha1sum", "sha256sum", "cksum", "pdfinfo", "test", "[", "true",
+             "false", "cd", "less", "more", "env", "printenv", "nproc"}
+GIT_READS = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep", "describe", "shortlog",
+             "rev-list", "merge-base", "cat-file", "ls-tree", "for-each-ref", "show-ref", "whatchanged"}
+
+def matches(word, target, cwd):
+    path = Path(word)
+    return (path if path.is_absolute() else cwd/path).resolve() == audit.ROOT/target
+
+def management_segment(words, cwd):
+    if matches(words[0], "scripts/harness", cwd):
+        return len(words) >= 2 and words[1] in {"workflow", "plan", "build", "review", "status", "root", "step", "brief"}
+    if words[0] in {"python3", "/usr/bin/python3"} and len(words) > 2 and matches(words[1], "scripts/workflow_audit.py", cwd):
+        return words[2] in {"task", "todo", "decision", "outcome", "gate", "flush"}
+    if matches(words[0], "scripts/action.sh", cwd):
+        return len(words) == 3 and words[1] == "validate"
+    # The evidence sensors may always run: completion depends on them.
+    return matches(words[0], "scripts/verify.sh", cwd) or matches(words[0], "scripts/review.sh", cwd)
+
+def read_only_segment(words):
+    name = Path(words[0]).name
+    if name == "git":
+        rest = [word for word in words[1:] if not word.startswith("-")]
+        if not rest:
+            return False
+        if rest[0] in ("stash", "worktree"):
+            # Bare `git stash` pushes; only the listing form reads.
+            return rest[1:] == ["list"]
+        return rest[0] in GIT_READS or (rest[0] in ("branch", "tag", "remote")
+                                        and all(word in ("-a", "-r", "-v", "-vv", "--list", "-l") for word in words[2:]))
+    if name == "find":
+        return not any(word in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls") for word in words)
+    if name == "sed":
+        return not any(word.startswith("-i") or word.startswith("--in-place") for word in words)
+    if name == "sort":
+        return not any(word.startswith("-o") or word.startswith("--output") for word in words)
+    return name in READ_ONLY
 
 def management_command(payload):
+    """A shell call the todo gate lets through without an active todo: harness
+    bookkeeping, the verify and review sensors, and read-only commands, alone or
+    joined with &&, ;, or pipes. Command substitution and any write disqualify it."""
     data = payload.get("tool_input") or {}
     command = data.get("command", data.get("cmd", "")) if isinstance(data, dict) else ""
-    if not isinstance(command, str) or any(value in command for value in ("\n", "`", "$(")): return False
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        words = list(lexer)
-    except ValueError: return False
-    if not words or any(word and all(char in ";&|<>()" for char in word) for word in words): return False
+    if not isinstance(command, str) or not command.strip() or any(value in command for value in ("`", "$(", "<(", ">(")):
+        return False
     cwd = Path(payload.get("cwd") or ".")
-    def matches(word, target):
-        path = Path(word)
-        return (path if path.is_absolute() else cwd/path).resolve() == audit.ROOT/target
-    if matches(words[0], "scripts/harness"):
-        return (len(words) >= 2 and words[1] in {"workflow", "plan", "build", "review", "status", "root", "step"})
-    if words[0] in {"python3", "/usr/bin/python3"} and len(words)>2 and matches(words[1], "scripts/workflow_audit.py"):
-        return words[2] in {"task","todo","decision","outcome","gate","flush"}
-    if matches(words[0], "scripts/action.sh"):
-        return len(words)==3 and words[1]=="validate"
-    return False
+    try:
+        analysis = permit.analyse(command, str(cwd), cwd.resolve())
+        text, bodies = permit.preprocess(command)
+        segments = permit.split_segments(permit.tokenize(text))
+    except permit.Unparseable:
+        return False
+    if analysis.inline or analysis.targets or analysis.opaque or bodies:
+        return False
+    for segment in segments:
+        words = permit.read_segment(segment, []).argv
+        if words and not (management_segment(words, cwd) or read_only_segment(words)):
+            return False
+    return True
 
 def authorize(payload):
     event = payload.get("hook_event_name")
@@ -47,7 +90,8 @@ def authorize(payload):
             context["request_id"] = str(uuid.uuid4())
             context.pop("confirmed_request", None)
             audit.record("plan_required", sid, context, description="Confirm or revise the complete todo plan for this prompt", status="required")
-            print(f"Todo gate: before execution, register a complete plan with {audit.ROOT}/scripts/harness workflow todo plan --session-id {sid} --items '[{{\"description\":\"Work item\",\"criterion\":\"Completion evidence\"}}]' --reason SUMMARY. Use todo show to get IDs, then todo update --id ID --status in_progress --reason SUMMARY. Existing plans need todo confirm or revision for each prompt. Questions with no execution use todo exempt --reason SUMMARY. Record evidence for completed items and pass verify/review before a completed outcome.")
+            print(f"Todo gate: confirm (todo confirm), revise (todo plan), or exempt (todo exempt, for a question) the plan for this prompt "
+                  f"via {audit.ROOT}/scripts/harness workflow todo ... --session-id {sid} --reason TEXT; reads need no todo.")
         elif event == "PreToolUse":
             tool = payload.get("tool_name", "")
             readonly = tool in READ_TOOLS or any(tool.endswith("__"+name) for name in GRAPH_READS)
