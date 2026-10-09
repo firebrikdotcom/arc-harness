@@ -53,6 +53,8 @@ usage() {
   info "  build start|done     Open or close the build phase (needs plan done)."
   info "  review start|done    Open or close the review phase (needs build done)."
   info "  review submit FILE   Store an independent reviewer's findings for review done."
+  info "  contract set FILE | waive REASON | show"
+  info "                       The run's task contract (schemas/task.schema.json); plan done needs it."
   info "  step [--note TEXT] [--tokens N]"
   info "                       Record one agent step against the session budgets."
   info "  status [--json]      Show harness root, run, phases, and budget counters."
@@ -156,6 +158,11 @@ setup_paths() {
   fi
   require_json_runtime
   TARGET_ROOT=$ROOT
+  # Outside the harness checkout, an unregistered project is its own target.
+  case "$(pwd -P)" in
+    "$ROOT"|"$ROOT"/*) ;;
+    *) TARGET_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P) ;;
+  esac
   DB_ROOT=${HARNESS_DB_ROOT:-$ROOT/.harness-db}
   # A registered target (see scripts/harness-target.sh) keeps its own runs,
   # gate records, routes, and checkpoints beneath the database root, so
@@ -658,6 +665,87 @@ require_gate_record() {
   log_event "$1 gate: $_kind record at $(record_get "$_file" RECORD_AT) head=$(record_get "$_file" GIT_HEAD)"
 }
 
+# --- task contract ----------------------------------------------------------
+# A run's contract (schemas/task.schema.json) lives at RUN_DIR/task.json.
+
+contract_file() {
+  printf '%s\n' "$RUN_DIR/task.json"
+}
+
+contract_tool() {
+  if ! has_cmd python3; then
+    info "FAIL: python3 is required to check the task contract."
+    exit "$EXIT_PHASE"
+  fi
+  python3 "$SCRIPT_DIR/task_contract.py" "$@"
+}
+
+require_contract() {
+  if ! contract_tool validate "$(contract_file)" >/dev/null; then
+    contract_tool validate "$(contract_file)" || :
+    info "FAIL: cannot mark plan done without a task contract."
+    info "Write one (tasks/task.example.json, schemas/task.schema.json) and run: harness contract set FILE"
+    info "or record why this run has none: harness contract waive \"<reason>\""
+    exit "$EXIT_PHASE"
+  fi
+  state_set CONTRACT_BASE "$(git -C "$TARGET_ROOT" rev-parse HEAD 2>/dev/null || printf '')"
+}
+
+run_contract_criteria() {
+  info "Contract acceptance criteria:"
+  if ! contract_tool criteria "$(contract_file)" --project "$TARGET_ROOT"; then
+    info "FAIL: cannot mark build done: an acceptance criterion failed."
+    exit "$EXIT_PHASE"
+  fi
+  log_event "build gate: contract criteria passed"
+}
+
+check_contract_non_goals() {
+  if ! contract_tool nongoals "$(contract_file)" --project "$TARGET_ROOT" --base "$(state_get CONTRACT_BASE)"; then
+    info "FAIL: cannot mark review done: the change touched a non-goal path. Revert it or re-plan."
+    exit "$EXIT_PHASE"
+  fi
+}
+
+cmd_contract() {
+  _action=${1:-}
+  [ "$#" -gt 0 ] && shift
+  require_run
+  refuse_stale_run
+  block_when_paused
+  case "$_action" in
+    set)
+      [ "$#" -eq 1 ] && [ -f "$1" ] || { info "FAIL: contract set needs one JSON file."; exit "$EXIT_USAGE"; }
+      if [ "$(phase_status plan)" != "active" ]; then
+        info "FAIL: the contract is set while planning (plan is '$(phase_status plan)')."
+        exit "$EXIT_PHASE"
+      fi
+      contract_tool validate "$1" || exit "$EXIT_PHASE"
+      cp "$1" "$(contract_file).tmp.$$"
+      mv "$(contract_file).tmp.$$" "$(contract_file)"
+      log_event "contract set"
+      info "Contract stored: $(contract_file)"
+      ;;
+    waive)
+      [ "$#" -eq 1 ] && [ -n "$1" ] || { info "FAIL: contract waive needs a reason."; exit "$EXIT_USAGE"; }
+      if [ "$(phase_status plan)" != "active" ]; then
+        info "FAIL: a waiver is recorded while planning (plan is '$(phase_status plan)')."
+        exit "$EXIT_PHASE"
+      fi
+      json_write "$(contract_file)" waived "s:$1"
+      log_event "contract waived"
+      info "Contract waived; the reason is shown to the reviewer: $1"
+      ;;
+    show)
+      contract_tool show "$(contract_file)"
+      ;;
+    *)
+      info "FAIL: contract takes set FILE, waive REASON, or show."
+      exit "$EXIT_USAGE"
+      ;;
+  esac
+}
+
 # review_project  The project the last review covered, else the target root.
 review_project() {
   _project=""
@@ -827,9 +915,14 @@ cmd_phase_done() {
   fi
 
   require_gate_record "$_phase"
-  if [ "$_phase" = "review" ]; then
-    require_review_findings
-  fi
+  case "$_phase" in
+    plan) require_contract ;;
+    build) run_contract_criteria ;;
+    review)
+      require_review_findings
+      check_contract_non_goals
+      ;;
+  esac
   if [ "$_phase" = "review" ] && [ -f "$SCRIPT_DIR/workflow_todos.py" ]; then
     python3 "$SCRIPT_DIR/workflow_audit.py" gate --check plan || exit "$EXIT_PHASE"
   fi
@@ -1209,6 +1302,9 @@ case "$COMMAND" in
     ;;
   failure)
     cmd_failure "$@"
+    ;;
+  contract)
+    cmd_contract "$@"
     ;;
   abort)
     cmd_abort "$@"

@@ -58,6 +58,7 @@ class SessionRunsTests(unittest.TestCase):
                   '[{"id":"check","description":"Check","criterion":"Checks pass"}]', "--reason", "test")
         self.call(sid, "workflow", "todo", "update", "--id", "check", "--status", "in_progress", "--reason", "test")
         self.call(sid, "plan", "start")
+        self.call(sid, "contract", "waive", "fixture task")
         self.call(sid, "plan", "done")
         self.call(sid, "build", "start")
 
@@ -120,6 +121,7 @@ class SessionRunsTests(unittest.TestCase):
         self.assertIn("loops     0/1", self.call("a", "status"))
         self.assertTrue(records_dir(self.db, "a").is_dir())
         self.call("a", "workflow", "todo", "update", "--id", "check", "--status", "in_progress", "--reason", "next task")
+        self.call("a", "contract", "waive", "fixture task")
         self.call("a", "plan", "done")
         self.call("a", "build", "start")
         self.assertIn("belongs to another run", self.call("a", "build", "done", expected=4))

@@ -18,7 +18,7 @@ cp "$SOURCE_ROOT/scripts/run-paths.sh" "$SOURCE_ROOT/scripts/run_paths.py" "$HAR
 cp "$SOURCE_ROOT/scripts/workflow_audit.py" "$SOURCE_ROOT/scripts/workflow_todos.py" "$SOURCE_ROOT/scripts/audit_transport.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/verify.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh"
 cp "$SOURCE_ROOT/scripts/permit.sh" "$SOURCE_ROOT/scripts/permit.py" "$SOURCE_ROOT/scripts/guard-version" "$HARNESS_ROOT_UNDER_TEST/scripts/"
-cp "$SOURCE_ROOT/scripts/review_findings.py" "$SOURCE_ROOT/scripts/tree-hash.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/"
+cp "$SOURCE_ROOT/scripts/review_findings.py" "$SOURCE_ROOT/scripts/tree-hash.sh" "$SOURCE_ROOT/scripts/task_contract.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/knowledge-trust.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/knowledge-trust.sh"
 cp "$SOURCE_ROOT/scripts/hooks/require-phase.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/hooks/require-phase.sh"
 cp "$SOURCE_ROOT/schemas/denylist.default" "$HARNESS_ROOT_UNDER_TEST/schemas/denylist.default"
@@ -137,7 +137,7 @@ bash_call 0 'python3 -c "print(open(\"schemas/denylist.default\").read()[:10])"'
 bash_call 0 'echo note > /tmp/harness-hook-scratch.txt'
 
 # Build edits the project, and each call counts as a step.
-"$CLI" plan "done" >/dev/null
+"$CLI" contract waive "fixture task" && "$CLI" plan "done" >/dev/null
 "$CLI" build start >/dev/null
 before=$(steps_used)
 hook 0 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"}}'
@@ -218,7 +218,7 @@ hook 2 'not json'
 # An unapproved knowledge/ folder blocks everything until a human approves it.
 rm -rf "$HARNESS_DB_ROOT"
 "$CLI" plan start >/dev/null
-"$CLI" plan "done" >/dev/null
+"$CLI" contract waive "fixture task" && "$CLI" plan "done" >/dev/null
 "$CLI" build start >/dev/null
 KNOWLEDGE_DIR="$TMP_ROOT/proj/knowledge"
 mkdir -p "$KNOWLEDGE_DIR"

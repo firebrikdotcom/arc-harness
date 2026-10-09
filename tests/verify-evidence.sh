@@ -57,7 +57,7 @@ printf 'test:\n\t@true\n' > "$TARGET/Makefile"
 git -C "$TARGET" add Makefile
 git -C "$TARGET" -c user.email=t@example.com -c user.name=t commit -q -m init
 CLI="$ROOT/scripts/harness"
-(cd "$TARGET" && "$CLI" plan start && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "phases failed"
+(cd "$TARGET" && "$CLI" plan start && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "phases failed"
 "$VERIFY" --project "$TARGET" > "$OUT" 2>&1 || fail "verify failed"
 grep -q '^TREE_HASH=[0-9a-f]\{40\}' "$TDIR/db/records/verify.state" || fail "the record should carry a tree hash"
 printf '%s\n' 'late edit' > "$TARGET/notes.txt"

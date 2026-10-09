@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Task contract",
+  "description": "The bounded contract for one harness run. `harness contract set FILE` stores it; `plan done` requires it (or `harness contract waive REASON`), `build done` runs every acceptance command, and `review done` refuses changes in non-goal paths. scripts/task_contract.py enforces it.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "deliverables", "non_goals", "acceptance"],
+      "properties": {
+        "goal": {"type": "string", "description": "One sentence: the outcome."},
+        "deliverables": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "Exact files or artifacts produced."},
+        "constraints": {"type": "array", "items": {"type": "string"}, "description": "Dependencies allowed, style, budgets."},
+        "non_goals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["description"],
+            "properties": {
+              "description": {"type": "string"},
+              "paths": {"type": "array", "items": {"type": "string"}, "description": "Globs (or directories) that must stay untouched; checked at review done."}
+            }
+          }
+        },
+        "acceptance": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "criterion"],
+            "properties": {
+              "id": {"type": "string", "maxLength": 64},
+              "criterion": {"type": "string"},
+              "command": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "argv run in the project root at build done; exit 0 means met. At least one criterion needs one."}
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["waived"],
+      "properties": {"waived": {"type": "string", "description": "Why this run has no contract; shown to the reviewer."}}
+    }
+  ]
+}
