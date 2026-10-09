@@ -257,6 +257,18 @@ expect_output "UNTRUSTED"
 "$HARNESS_ROOT_UNDER_TEST/scripts/knowledge-trust.sh" approve --project "$TMP_ROOT/proj" >/dev/null
 hook 0 '{"tool_name":"Write","tool_input":{"file_path":"'"$TMP_ROOT"'/proj/x.txt"},"cwd":"'"$TMP_ROOT"'/proj"}'
 
+# Plan isolation holds for an external project worked from a subdirectory.
+EXT="$TMP_ROOT/ext"
+mkdir -p "$EXT/sub" "$EXT/src"
+git -C "$EXT" init -q
+rm -rf "$HARNESS_DB_ROOT"
+(cd "$EXT/sub" && "$CLI" plan start) >/dev/null
+hook 2 '{"tool_name":"Write","tool_input":{"file_path":"'"$EXT"'/src/a.c"},"cwd":"'"$EXT"'/sub"}'
+expect_output "plan phase does not edit project files (src/a.c)"
+hook 2 '{"tool_name":"Bash","tool_input":{"command":"echo x > ../src/a.c"},"cwd":"'"$EXT"'/sub"}'
+expect_output "plan phase does not write project files (src/a.c)"
+hook 0 '{"tool_name":"Write","tool_input":{"file_path":"'"$EXT"'/tasks/note.json"},"cwd":"'"$EXT"'/sub"}'
+
 # A run started for another project does not cover calls here.
 OTHER="$TMP_ROOT/other"
 mkdir -p "$OTHER"

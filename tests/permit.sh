@@ -142,6 +142,29 @@ for command in "cat $H" "grep -n x schemas/denylist.default" "ls scripts/hooks/"
 done
 allow_cmd "$(printf "cat > notes.md <<'EOF'\nrm -f %s\nEOF" "$H")"
 
+# Human-only commands and guard settings are judged on the parsed argv, so
+# quoting, option order, or a quoted assignment cannot hide them (second review).
+# shellcheck disable=SC2016 # the variables are part of the commands under test
+for command in "scripts/harness 'review' submit f.json" 'scripts/harness "abort"' 'scripts/harness fail""ure clear --command-key a' \
+  'scripts/harness --session-id abc abort' 'scripts/harness launch --state t.json --default-command c.json' \
+  'env "HARNESS_REVIEWER_CMD=cp /tmp/f.json $2" scripts/review.sh' "env 'HARNESS_HOOK_DISABLE=1' true" \
+  'export HARNESS_REVIEWER_""CMD=x' 'export HARNESS_REVIEW_BASE=HEAD'; do
+  deny_cmd "$command"
+done
+allow_cmd 'HARNESS_SESSION_ID= CLAUDE_CODE_SESSION_ID= sh tests/x.sh'
+PY_PERMIT="$HARNESS_ROOT_UNDER_TEST/scripts/permit.py"
+call_kind() {
+  [ "$(python3 "$PY_PERMIT" harness-call --command "$2" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = "$1" ] \
+    || fail "harness-call should say $1 for: $2"
+}
+call_kind pass 'scripts/harness status'
+call_kind pass 'scripts/harness review start'
+call_kind human "scripts/harness 'review' submit f.json"
+call_kind human 'scripts/harness --session-id abc abort'
+call_kind human 'true && scripts/harness launch --state t.json'
+call_kind no 'scripts/harness budget --thread x --tokens 5'
+call_kind no 'scripts/harness --session-id abc status'
+
 # Without python3 the Node fallback cannot see write targets, so it refuses any
 # command that names a guard path.
 if command -v node >/dev/null 2>&1; then

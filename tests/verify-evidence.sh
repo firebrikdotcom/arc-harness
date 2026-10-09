@@ -78,6 +78,8 @@ status=0
 grep -q "covers $EMPTY, not this run's project" "$OUT" || fail "the refusal should name both projects"
 "$VERIFY" --project "$TARGET" > "$OUT" 2>&1 || fail "verify failed"
 printf '%s\n' 'and recorded it' >> "$TARGET/progress.md"
+mkdir -p "$TARGET/tasks"
+printf '%s\n' '{"note":"phase notes"}' > "$TARGET/tasks/task.json"
 (cd "$TARGET" && "$CLI" build "done") > "$OUT" 2>&1 || fail "an unchanged project should keep its verify record"
 
 printf '%s\n' 'PASS: verification needs evidence, honours recorded categories, and expires on project edits'
