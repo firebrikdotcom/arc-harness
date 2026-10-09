@@ -63,12 +63,47 @@ class Unparseable(Exception):
     pass
 
 
+# Harness commands that are a person's (or the configured reviewer's) to run, and
+# the settings that tune or disable the guard; both are judged on the parsed argv,
+# so quoting or option order cannot hide them.
+HUMAN_ONLY = {"abort", "failure", "launch"}
+PASSABLE = {"plan", "build", "review", "status", "step", "continue", "contract", "brief", "workflow", "prune",
+            "advise", "route", "help", "--help", "-h"}
+GUARD_VARIABLES = {"HARNESS_HOOK_DISABLE", "HARNESS_RUN_IDLE_HOURS", "HARNESS_RETAIN_RUNS", "HARNESS_HOME",
+                   "HARNESS_DB_ROOT", "HARNESS_REQUIRED_CHECKS", "HARNESS_REVIEWER_CMD", "HARNESS_REVIEW_BASE"}
+
+
+def guard_variable(name: str) -> bool:
+    return name in GUARD_VARIABLES or name.startswith("HARNESS_BUDGET_")
+
+
+def harness_subcommand(argv: list[str]) -> tuple[str, str, bool]:
+    """(subcommand, its first argument, whether a --session-id was given)."""
+    rest, session = argv[1:], False
+    while rest and rest[0].startswith("-") and rest[0] not in ("--help", "-h"):
+        session = session or rest[0] == "--session-id"
+        rest = rest[2:] if rest[0] == "--session-id" else rest[1:]
+    return (rest[0] if rest else ""), (rest[1] if len(rest) > 1 else ""), session
+
+
+def human_only(argv: list[str]) -> str | None:
+    name = os.path.basename(argv[0]) if argv else ""
+    if name == "harness":
+        sub, second, _ = harness_subcommand(argv)
+        if sub in HUMAN_ONLY or (sub == "review" and second == "submit"):
+            return f"harness {sub}{' ' + second if sub == 'review' else ''}"
+    if name == "knowledge-trust.sh" and "approve" in argv[1:]:
+        return "knowledge-trust approve"
+    return None
+
+
 class Analysis:
     def __init__(self) -> None:
         self.targets: list[tuple[str, tuple[str, ...], str]] = []  # (target, cwd candidates, file|tree)
         self.inline: list[str] = []
         self.opaque = False
         self.words: list[str] = []
+        self.refusal: str | None = None  # a human-only command or a guard setting
 
 
 def load_rules(project: Path) -> tuple[Path, list[tuple[str, str, int]]]:
@@ -218,6 +253,7 @@ class Segment:
         self.stdin: list[str] = []   # heredoc bodies and here-strings
         self.chdir: str | None = None
         self.xargs = False
+        self.assigned: list[str] = []  # variable names this segment sets
 
 
 def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
@@ -253,8 +289,14 @@ def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
     # Peel prefixes that run another command.
     while argv:
         head = os.path.basename(argv[0])
-        if argv[0] == "!" or re.match(r"^[A-Za-z_]\w*=", argv[0]):
+        if re.match(r"^[A-Za-z_]\w*=", argv[0]):
+            segment.assigned.append(argv[0].split("=", 1)[0])
             argv = argv[1:]
+        elif argv[0] == "!":
+            argv = argv[1:]
+        elif head in ("export", "declare", "typeset", "readonly", "local"):
+            segment.assigned.extend(word.split("=", 1)[0] for word in argv[1:] if not word.startswith("-"))
+            argv = []
         elif head in ("command", "builtin"):
             argv = argv[1:]
             if argv and argv[0] in ("-v", "-V"):
@@ -299,6 +341,8 @@ def read_segment(tokens: list[str], bodies: list[str]) -> Segment:
                 elif word.startswith("--split-string="):
                     argv = shlex.split(word.split("=", 1)[1]) + argv[1:]
                 else:
+                    if "=" in word and not word.startswith("-"):
+                        segment.assigned.append(word.split("=", 1)[0])
                     argv = argv[1:]
         elif head == "xargs":
             segment.xargs = True
@@ -402,6 +446,7 @@ def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
             result.inline.extend(inner.inline)
             result.words.extend(inner.words)
             result.opaque = result.opaque or inner.opaque
+            result.refusal = result.refusal or inner.refusal
 
     def move(destination: str | None) -> tuple[str, ...]:
         if destination is None or destination in ("-", "~"):
@@ -415,6 +460,13 @@ def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
         nested(inner, cwds)
     for tokens_of_segment in split_segments(tokens):
         segment = read_segment(tokens_of_segment, bodies)
+        for name in segment.assigned:
+            if guard_variable(name) and not result.refusal:
+                result.refusal = f"sets the guard setting {name}"
+        if segment.argv and not result.refusal:
+            command_name = human_only(segment.argv)
+            if command_name:
+                result.refusal = f"runs {command_name}, which is a person's to run"
         here = move(segment.chdir) if segment.chdir else cwds
         result.targets.extend((path, here, "file") for path in segment.outputs)
         argv = segment.argv
@@ -565,6 +617,8 @@ def check_command(command: str, project: Path, cwd: str) -> str | None:
         words = re.findall(r"[^\s'\";&|<>()`$]+", command)
         denial = mentions_protected(words, cwd, project, rules, rules_path)
         return f"{denial} (the command cannot be parsed)" if denial else first_match(rules, rules_path, "inline", command)
+    if analysis.refusal:
+        return f"DENY: the command {analysis.refusal}"
     for code in analysis.inline:
         denial = first_match(rules, rules_path, "inline", code)
         if denial:
@@ -602,12 +656,16 @@ def project_targets(command: str, project: Path, cwd: str) -> list[str]:
 
 
 def harness_call(command: str, project: Path, cwd: str) -> str:
-    """pass: one plain harness or action-validate call the guard lets through;
-    human: a human-only harness command; no: anything else (judged normally)."""
-    if re.search(r"(?:^|[\s;&|(/])harness\s+(abort|failure|review\s+submit)\b", command):
-        return "human"
-    if re.search(r"knowledge-trust\.sh\s+approve\b", command):
-        return "human"
+    """pass: one plain call of this harness's bookkeeping CLI that the guard lets
+    through; human: a command that is a person's to run, anywhere in the command
+    (judged on the parsed argv, so quoting cannot hide it); no: anything else."""
+    try:
+        analysis = analyse(command, cwd, project)
+        if analysis.refusal and "person's" in analysis.refusal:
+            return "human"
+    except Unparseable:
+        if re.search(r"harness|knowledge-trust", command):
+            return "no"
     if any(char in command for char in "$`<>\n\\"):
         return "no"
     try:
@@ -629,6 +687,11 @@ def harness_call(command: str, project: Path, cwd: str) -> str:
     located = os.path.join(where, executable) if "/" in executable else (shutil.which(executable) or "")
     real = os.path.realpath(located) if located else ""
     if real == os.path.realpath(project / "scripts" / "harness"):
+        # Only bookkeeping skips the other checks; launch, budget, and anything
+        # aimed at another session are judged like every command.
+        sub, second, session = harness_subcommand(argv)
+        if session or sub not in PASSABLE or (sub == "review" and second not in ("start", "done")):
+            return "no"
         return "pass"
     if real == os.path.realpath(project / "scripts" / "action.sh") and len(argv) == 3 and argv[1] == "validate":
         return "pass"

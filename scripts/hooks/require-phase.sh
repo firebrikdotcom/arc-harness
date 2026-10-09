@@ -158,8 +158,17 @@ fi
 # 4. Denylist on the real call: the command's write targets, or the write path.
 [ -x "$PERMIT" ] || block "scripts/permit.sh is missing or not executable."
 subject=""
+# The project this call works in: the harness itself, or the git root of the cwd.
+work_root=$HARNESS_ROOT
+case "${cwd:-$HARNESS_ROOT}" in
+  "$HARNESS_ROOT"|"$HARNESS_ROOT"/*) ;;
+  *) work_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$cwd") ;;
+esac
+[ -d "$work_root" ] && work_root=$(CDPATH='' cd "$work_root" && pwd -P)
 case "$tool_name" in
   Bash)
+    # Without the Python parser no write target can be known; fail closed.
+    has_cmd python3 || block "python3 is required for the guard to judge shell commands."
     verdict=$("$PERMIT" check --command "$command" --project "$HARNESS_ROOT" --cwd "${cwd:-$HARNESS_ROOT}" 2>&1) || block "denied command. $verdict"
     ;;
   Write|Edit|MultiEdit|NotebookEdit)
@@ -173,7 +182,7 @@ case "$tool_name" in
     subject=$path
     case "$subject" in
       "$HARNESS_ROOT"/*) subject=${subject#"$HARNESS_ROOT"/} ;;
-      "$cwd"/*) [ -n "$cwd" ] && subject=${subject#"$cwd"/} ;;
+      "$work_root"/*) subject=${subject#"$work_root"/} ;;
     esac
     verdict=$("$PERMIT" check --path "$path" --project "$HARNESS_ROOT" 2>&1) || block "denied write to $path. $verdict"
     ;;
@@ -205,11 +214,6 @@ case "$phase" in
 esac
 
 # The run's evidence must be about the project this call works in.
-work_root=$HARNESS_ROOT
-case "${cwd:-$HARNESS_ROOT}" in
-  "$HARNESS_ROOT"|"$HARNESS_ROOT"/*) ;;
-  *) work_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$cwd") ;;
-esac
 run_target=$(printf '%s\n' "$status_out" | sed -n 's/^Target:[[:space:]]*//p' | head -n 1)
 if [ -n "$run_target" ] && [ -d "$run_target" ] && [ -d "$work_root" ] \
   && [ "$(CDPATH='' cd "$run_target" && pwd -P)" != "$(CDPATH='' cd "$work_root" && pwd -P)" ]; then
@@ -232,11 +236,6 @@ if [ "$phase" != "build" ]; then
       esac
       ;;
     Bash)
-      work_root=$HARNESS_ROOT
-      case "${cwd:-$HARNESS_ROOT}" in
-        "$HARNESS_ROOT"|"$HARNESS_ROOT"/*) ;;
-        *) work_root=$cwd ;;
-      esac
       targets=$("$PERMIT" targets --command "$command" --project "$work_root" --cwd "${cwd:-$HARNESS_ROOT}" 2>/dev/null || :)
       old_ifs=$IFS
       IFS=$nl
