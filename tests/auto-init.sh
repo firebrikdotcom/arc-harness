@@ -118,9 +118,15 @@ grep -q 'no project-owned setup commands' "$OUT" || fail "plain directory not ha
 PDIR=$("$TARGET" lookup "$PLAIN") || fail "plain directory not registered"
 grep -q '^TARGET_KIND=dir$' "$PDIR/target.state" || fail "plain kind not recorded"
 
-# 8. The harness root itself stays silent.
+# 8. The harness root is not initialised as a target; it prints only its run brief.
 out=$(payload SessionStart "$ROOT" "" "" | sh "$HOOK")
-[ -z "$out" ] || fail "harness root should print nothing: $out"
+if printf '%s\n' "$out" | grep -q '^Harness auto-init'; then fail "harness root should not be initialised: $out"; fi
+printf '%s\n' "$out" | grep -q '^Harness' || fail "harness root should print its brief: $out"
+
+# 8b. A target gets a short project map, and the session brief names it.
+grep -q '^- Makefile (1)$' "$TDIR/map.md" || fail "the map should list top-level files"
+payload SessionStart "$WT" "" "" | sh "$HOOK" > "$OUT" 2>&1
+grep -q "^Project map: $TDIR/map.md" "$OUT" || fail "the session brief should name the project map"
 
 # 9. Manual init registers too.
 "$INIT" --project "$PLAIN" > "$OUT" 2>&1 < /dev/null || fail "manual init failed"
