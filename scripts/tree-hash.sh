@@ -1,8 +1,9 @@
 #!/usr/bin/env sh
 # Print a git tree hash of PATH's working tree as it is on disk: tracked files
-# with their uncommitted edits plus untracked files that are not ignored. Two
-# equal hashes mean no project file changed in between. Prints "none" outside
-# a git work tree. The real index is never modified.
+# with their uncommitted edits plus untracked files that are not ignored, less
+# the top-level phase artifacts. Two equal hashes mean no project file changed
+# in between. Prints "none" outside a git work tree. The real index is never
+# modified.
 #
 #   scripts/tree-hash.sh [PATH]
 set -u
@@ -26,7 +27,11 @@ if [ -f "$INDEX" ]; then
 else
   rm -f "$TMP_INDEX"
 fi
+# The phase artifacts plan and review may write (progress.md, task.json,
+# review-findings.json at the top) are notes about the work, not the work, so
+# writing them never voids a check.
 if GIT_INDEX_FILE=$TMP_INDEX git -C "$TOP" add -A -- . >/dev/null 2>&1 \
+  && GIT_INDEX_FILE=$TMP_INDEX git -C "$TOP" rm -q --cached --ignore-unmatch -- progress.md task.json review-findings.json >/dev/null 2>&1 \
   && hash=$(GIT_INDEX_FILE=$TMP_INDEX git -C "$TOP" write-tree 2>/dev/null); then
   printf '%s\n' "$hash"
 else

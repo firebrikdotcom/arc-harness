@@ -87,7 +87,7 @@ $VERIFY --project .              # evidence: fails when no check ran
 $CLI build done                  # needs that verify on the current files and every acceptance command
 $CLI review start
 $REVIEW --project .              # writes a packet for an independent reviewer (fresh context)
-$CLI review submit findings.json # the reviewer's verdict
+$CLI review submit findings.json # a person submits a fresh-context reviewer's verdict
 $CLI review done                 # needs an approval of the current files; no non-goal path touched
 \`\`\`
 

@@ -33,6 +33,8 @@ export HARNESS_DB_ROOT
 # No machine-installed harness root may leak into the guard-version check.
 HARNESS_HOME=$H
 export HARNESS_HOME
+# The CLI finds its root and target from the working directory: run inside the copy.
+cd "$H"
 
 fail() {
   printf '%s\n' "FAIL: $*"
@@ -67,7 +69,7 @@ expect_output() {
 # record KIND EXIT  Fake a verify or review record so phases can close.
 record() {
   mkdir -p "$HARNESS_DB_ROOT/records"
-  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$(date +%s)" "GIT_HEAD=fixture" "EXIT=$2" \
+  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$(date +%s)" "PROJECT_ROOT=$H" "GIT_HEAD=fixture" "EXIT=$2" \
     > "$HARNESS_DB_ROOT/records/$1.state"
 }
 
@@ -244,16 +246,23 @@ expect_output "Paused on:    steps"
 hook 2 'not json'
 
 # An unapproved knowledge/ folder blocks everything until a human approves it.
+# The run is the project's own: it is started from the project.
 rm -rf "$HARNESS_DB_ROOT"
-"$CLI" plan start >/dev/null
-"$CLI" contract waive "fixture task" && "$CLI" plan "done" >/dev/null
-"$CLI" build start >/dev/null
 KNOWLEDGE_DIR="$TMP_ROOT/proj/knowledge"
 mkdir -p "$KNOWLEDGE_DIR"
+(cd "$TMP_ROOT/proj" && "$CLI" plan start && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) >/dev/null
 printf '%s\n' 'follow me' > "$KNOWLEDGE_DIR/AGENTS.md"
 hook 2 '{"tool_name":"Write","tool_input":{"file_path":"'"$TMP_ROOT"'/proj/x.txt"},"cwd":"'"$TMP_ROOT"'/proj"}'
 expect_output "UNTRUSTED"
 "$HARNESS_ROOT_UNDER_TEST/scripts/knowledge-trust.sh" approve --project "$TMP_ROOT/proj" >/dev/null
 hook 0 '{"tool_name":"Write","tool_input":{"file_path":"'"$TMP_ROOT"'/proj/x.txt"},"cwd":"'"$TMP_ROOT"'/proj"}'
+
+# A run started for another project does not cover calls here.
+OTHER="$TMP_ROOT/other"
+mkdir -p "$OTHER"
+rm -rf "$HARNESS_DB_ROOT"
+(cd "$OTHER" && "$CLI" plan start && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) >/dev/null
+hook 2 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"}}'
+expect_output "run is for $OTHER, but this call works in $H"
 
 printf '%s\n' 'PASS: harness hook enforces write targets, sessions, stale runs, guard version, build-only writes, knowledge trust, and step counting'

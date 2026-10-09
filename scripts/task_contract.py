@@ -101,7 +101,13 @@ def run_criteria(data: dict, project: Path) -> int:
             print(f"FAIL: {item['id']}: command refused by the denylist: {denial}")
             failed += 1
             continue
-        result = subprocess.run(item["command"], cwd=project, capture_output=True, text=True)
+        try:
+            result = subprocess.run(item["command"], cwd=project, capture_output=True, text=True,
+                                    timeout=int(os.environ.get("HARNESS_CRITERION_TIMEOUT", "900")))
+        except (OSError, subprocess.TimeoutExpired) as error:
+            failed += 1
+            print(f"FAIL: {item['id']}: {item['criterion']} ({command} did not run: {type(error).__name__}: {error})")
+            continue
         if result.returncode == 0:
             print(f"PASS: {item['id']}: {item['criterion']}")
         else:

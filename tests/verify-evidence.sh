@@ -65,9 +65,19 @@ status=0
 (cd "$TARGET" && "$CLI" build "done") > "$OUT" 2>&1 || status=$?
 [ "$status" -eq 4 ] || fail "build done should refuse a verify that predates an edit, exited $status"
 grep -q 'project files changed after the last verify run' "$OUT" || fail "the refusal should explain the stale record"
-# Writes outside the project do not void it.
+# Writes outside the project, and the phase notes inside it, do not void it.
 rm "$TARGET/notes.txt"
 printf '%s\n' 'scratch' > "$TMP_ROOT/outside.txt"
+printf '%s\n' 'verified the Makefile change' > "$TARGET/progress.md"
+# A passing verify of another project, written where this run looks, is not evidence for it.
+HARNESS_DB_ROOT="$TDIR/db" "$VERIFY" --project "$EMPTY" > "$OUT" 2>&1 || fail "verify of the other project failed"
+grep -q "^PROJECT_ROOT=$EMPTY\$" "$TDIR/db/records/verify.state" || fail "the other project's record should now be the latest"
+status=0
+(cd "$TARGET" && "$CLI" build "done") > "$OUT" 2>&1 || status=$?
+[ "$status" -eq 4 ] || fail "build done must refuse a record about another project, exited $status"
+grep -q "covers $EMPTY, not this run's project" "$OUT" || fail "the refusal should name both projects"
+"$VERIFY" --project "$TARGET" > "$OUT" 2>&1 || fail "verify failed"
+printf '%s\n' 'and recorded it' >> "$TARGET/progress.md"
 (cd "$TARGET" && "$CLI" build "done") > "$OUT" 2>&1 || fail "an unchanged project should keep its verify record"
 
 printf '%s\n' 'PASS: verification needs evidence, honours recorded categories, and expires on project edits'

@@ -64,7 +64,7 @@ state_dir() {
 record() {
   mkdir -p "$HARNESS_DB_ROOT/records"
   epoch=$(( $(date +%s) + ${3:-0} ))
-  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "GIT_HEAD=fixture" "EXIT=$2" \
+  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "PROJECT_ROOT=$FIXTURE" "GIT_HEAD=fixture" "EXIT=$2" \
     > "$HARNESS_DB_ROOT/records/$1.state"
 }
 
