@@ -128,6 +128,10 @@ grep -q '^- Makefile (1)$' "$TDIR/map.md" || fail "the map should list top-level
 payload SessionStart "$WT" "" "" | sh "$HOOK" > "$OUT" 2>&1
 grep -q "^Project map: $TDIR/map.md" "$OUT" || fail "the session brief should name the project map"
 
+# 8c. Bootstrapping the harness root itself (as CI does) succeeds and writes nothing odd.
+"$INIT" --project "$ROOT" --yes > "$OUT" 2>&1 < /dev/null || fail "init on the harness root failed"
+if grep -q 'Registered harness target: FAIL' "$OUT"; then fail "a refused registration must not be reported as a target"; fi
+
 # 9. Manual init registers too.
 "$INIT" --project "$PLAIN" > "$OUT" 2>&1 < /dev/null || fail "manual init failed"
 grep -q '^Registered harness target: ' "$OUT" || fail "manual init did not report the registration"
