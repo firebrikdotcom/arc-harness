@@ -76,10 +76,15 @@ Optional harness variables:
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
 - `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
 - `HARNESS_DB_ROOT`: harness database root for `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the hooks. Defaults to `HARNESS_ROOT/.harness-db`. Registered targets keep their own state beneath it at `targets/<id>/db/`.
-- `HARNESS_SESSION_ID`: explicit run identity, ahead of `CODEX_THREAD_ID` and `CLAUDE_SESSION_ID`; hashed for on-disk pointer and record paths. Native resumes preserve identity.
+- `HARNESS_SESSION_ID`: explicit run identity, ahead of `CODEX_THREAD_ID`, `CLAUDE_SESSION_ID`, and `CLAUDE_CODE_SESSION_ID`; hashed for on-disk pointer and record paths. Native resumes preserve identity.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
 - `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
 - `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
+- `HARNESS_BUDGET_REPEAT_FAILURES`: identical failures of one command in a row before the run pauses; default `2`, `0` disables.
+- `HARNESS_RUN_IDLE_HOURS`: idle hours before a run is stale and refused; default `24`, `0` disables.
+- `HARNESS_RETAIN_RUNS`: runs kept per database before `plan start` archives older finished ones; default `50`.
+- `HARNESS_REVIEWER_CMD`: shell command `scripts/review.sh` runs as the independent reviewer, with the packet and the findings output path as `$1` and `$2`.
+- `HARNESS_HOME`: the installed harness root for the guard-version check; defaults to the path `scripts/install-hooks.sh` records in `~/.config/harness/root`.
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
 - `HARNESS_VERIFY_SCOPE=full`: disables the docs-only scope and runs every verification category.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
