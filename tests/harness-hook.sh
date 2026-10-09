@@ -81,12 +81,22 @@ expect_output "no harness run exists"
 hook 2 '{"tool_name":"Edit","tool_input":{"file_path":"docs/setup.md"}}'
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness plan start"}}'
-hook 0 '{"tool_name":"Bash","tool_input":{"command":"cd /somewhere && scripts/harness status"}}'
-hook 0 '{"tool_name":"Bash","tool_input":{"command":"/abs/path/scripts/harness build done"}}'
+hook 0 '{"tool_name":"Bash","tool_input":{"command":"cd '"$H"' && scripts/harness status"}}'
+hook 0 '{"tool_name":"Bash","tool_input":{"command":"'"$H"'/scripts/harness build done"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/action.sh validate /tmp/a.json"}}'
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness plan start; rm -rf build"}}'
 # A newline is a command separator, not part of the harness arguments.
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness status\nrm -rf build"}}'
+# Only this harness's own CLI, alone, takes the shortcut: another binary named
+# scripts/harness, a cd that resolves elsewhere, a redirect, or a substitution do not.
+hook 2 '{"tool_name":"Bash","tool_input":{"command":"/tmp/evil/scripts/harness anything"}}'
+expect_output "no harness run exists"
+hook 2 '{"tool_name":"Bash","tool_input":{"command":"cd /somewhere && scripts/harness status"}}'
+bash_call 2 'cd /tmp > scripts/hooks/require-phase.sh && scripts/harness status'
+expect_output "denied command"
+# shellcheck disable=SC2016 # the substitution is part of the command under test
+bash_call 2 'cd "$(chmod -x scripts/hooks/require-phase.sh)" && scripts/harness status'
+expect_output "denied command"
 
 # Denylist applies to the real call, whatever the phase state.
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
@@ -102,24 +112,41 @@ hook 2 '{"tool_name":"Write","tool_input":{"file_path":"'"$H"'/.env"}}'
 hook 2 '{"tool_name":"Edit","tool_input":{"file_path":"'"$H"'/.claude/settings.json"}}'
 expect_output "denied write"
 hook 2 '{"tool_name":"Edit","tool_input":{"file_path":"'"$H"'/scripts/hooks/require-phase.sh"}}'
+# Unnormalised spellings of a guard path are resolved first.
+for spelled in "$H/docs/../scripts/hooks/require-phase.sh" "$H//scripts/hooks/require-phase.sh" "$H/./scripts/permit.py" "docs/../scripts/guard-version"; do
+  hook 2 '{"tool_name":"Write","tool_input":{"file_path":"'"$spelled"'"}}'
+  expect_output "denied write"
+done
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/knowledge-trust.sh approve"}}'
-expect_output "human decisions"
-# The repeated-failure counter is the post-tool hook's alone; the agent cannot reset it.
+expect_output "not for the agent"
+# The repeated-failure counter and review approval are not the agent's, alone or chained.
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness failure clear --command-key abc"}}'
-expect_output "fed by the post-tool hook"
+expect_output "not for the agent"
+hook 2 '{"tool_name":"Bash","tool_input":{"command":"true && scripts/harness failure clear --command-key abc"}}'
+expect_output "not for the agent"
+hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness review submit /tmp/f.json"}}'
+expect_output "not for the agent"
 
-# Shell writes to the guard are judged by their real targets, however the path is spelled.
-bash_call 2 'echo x > scripts/hooks/require-phase.sh'
+# Shell writes to the guard are judged by their real targets, however the path is
+# spelled; the denylist runs before the phase check, so each says "denied command".
+deny_bash() {
+  bash_call 2 "$1"
+  expect_output "denied command"
+}
+deny_bash 'echo x > scripts/hooks/require-phase.sh'
 expect_output "write target"
 # shellcheck disable=SC2016 # the variable is part of the command under test, not ours to expand
-bash_call 2 'D=.; printf x >> "$D/scripts/hooks/require-phase.sh"'
-bash_call 2 'cd scripts && cp /tmp/x hooks/require-phase.sh'
-bash_call 2 'sed -i s/a/b/ schemas/denylist.default'
-bash_call 2 'cat /tmp/x | tee -a scripts/permit.py'
-bash_call 2 'sh -c "rm scripts/guard-version"'
-bash_call 2 'python3 -c "open(\"scripts/hooks/require-phase.sh\", \"w\").write(\"\")"'
-bash_call 2 'export HARNESS_HOOK_DISABLE=1'
-bash_call 2 'echo hi > ~/.ssh/config'
+deny_bash 'D=.; printf x >> "$D/scripts/hooks/require-phase.sh"'
+deny_bash 'cd scripts && cp /tmp/x hooks/require-phase.sh'
+deny_bash 'sed -i s/a/b/ schemas/denylist.default'
+deny_bash 'cat /tmp/x | tee -a scripts/permit.py'
+deny_bash 'sh -c "rm scripts/guard-version"'
+deny_bash 'python3 -c "open(\"scripts/hooks/require-phase.sh\", \"w\").write(\"\")"'
+deny_bash 'export HARNESS_HOOK_DISABLE=1'
+deny_bash 'echo hi > ~/.ssh/config'
+deny_bash 'rm -rf scripts/hooks'
+deny_bash 'chmod -x scripts/hooks/require-phase.sh'
+deny_bash 'echo CAP_REPEAT_FAILURES=0 >> .harness-db/runs/x/state'
 
 # Active phase: plan reads freely but does not edit the project.
 "$CLI" plan start >/dev/null
@@ -150,7 +177,7 @@ bash_call 0 'rm -rf build && echo ok > docs/notes.md'
 # enforced by scripts/harness itself.
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness continue \"User explicitly requested continuation in chat.\""}}'
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"cd /x && /abs/scripts/harness abort \"restart\""}}'
-expect_output "human decisions"
+expect_output "not for the agent"
 
 # Another session's run never satisfies this session.
 hook 2 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"},"session_id":"other-session"}'

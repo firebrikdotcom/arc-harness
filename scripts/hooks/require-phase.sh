@@ -5,8 +5,10 @@ set -eu
 # In order, it:
 #   1. binds to the session in the hook payload, so each session uses its own
 #      run and a new session cannot inherit another session's phase;
-#   2. lets pure harness commands through (scripts/harness ..., scripts/action.sh
-#      validate ...), except the human-only ones: abort and knowledge-trust approve.
+#   2. lets one plain call of this harness's own CLI through (scripts/harness ...,
+#      scripts/action.sh validate ...; permit.py harness-call decides), and refuses
+#      the commands that are not the agent's, alone or chained: abort, review
+#      submit, the repeated-failure counter, and knowledge-trust approve.
 #      An agent may invoke continue only after an explicit user instruction in the
 #      current conversation; that conversation-level authorization is enforced by
 #      the agent instructions, not inspectable from this hook payload;
@@ -114,24 +116,20 @@ fi
 # 2. Pure harness commands, with human-only commands refused. continue is allowed
 # only when the agent has an explicit current-conversation user instruction.
 if [ "$tool_name" = "Bash" ]; then
-  stripped=$(printf '%s' "$command" | sed -E 's/^[[:space:]]*cd[[:space:]]+[^;&|]+(&&|;)[[:space:]]*//')
-  case "$stripped" in
-    *';'*|*'&'*|*'|'*|*'`'*|*"\$("*|*'>'*|*'<'*|*"$nl"*) stripped="" ;;
-  esac
-  case "$stripped" in
-    harness\ abort*|*/scripts/harness\ abort*|scripts/harness\ abort*|\
-    *knowledge-trust.sh\ approve*)
-      block "abort and knowledge-trust approve are human decisions. Ask the user to run them, e.g. with the ! prefix."
-      ;;
-    harness\ failure*|*/scripts/harness\ failure*|scripts/harness\ failure*)
-      block "the repeated-failure counter is fed by the post-tool hook, not by tool calls."
-      ;;
-    harness\ *|harness|*/scripts/harness\ *|*/scripts/harness|scripts/harness\ *|scripts/harness)
-      exit 0
-      ;;
-    scripts/action.sh\ validate\ *|*/scripts/action.sh\ validate\ *)
-      exit 0
-      ;;
+  if has_cmd python3; then
+    # One plain call (optionally after `cd DIR &&`) whose executable resolves to
+    # this harness's own CLI; any redirect, substitution, or second command is
+    # judged like every other command.
+    kind=$(python3 "$HARNESS_ROOT/scripts/permit.py" harness-call --command "$command" --project "$HARNESS_ROOT" --cwd "${cwd:-$HARNESS_ROOT}" 2>/dev/null || printf 'no')
+  else
+    kind=no
+    case "$command" in
+      *'harness abort'*|*'harness failure'*|*'harness review submit'*|*'knowledge-trust.sh approve'*) kind=human ;;
+    esac
+  fi
+  case "$kind" in
+    human) block "abort, review submit, the repeated-failure counter, and knowledge-trust approve are not for the agent: a person runs them (e.g. with the ! prefix), or the configured reviewer submits." ;;
+    pass) exit 0 ;;
   esac
 fi
 
@@ -166,12 +164,18 @@ case "$tool_name" in
     ;;
   Write|Edit|MultiEdit|NotebookEdit)
     [ -n "$path" ] || block "$tool_name call carries no file path."
+    # Resolve `..`, `//`, `/./`, and symlinks before any rule sees the path.
+    if has_cmd python3; then
+      path=$(python3 -c 'import os, sys; print(os.path.realpath(os.path.join(sys.argv[2], os.path.expanduser(sys.argv[1]))))' "$path" "${cwd:-$HARNESS_ROOT}")
+    else
+      path=$(node -e 'const p = require("path"); process.stdout.write(p.resolve(process.argv[2], process.argv[1]))' "$path" "${cwd:-$HARNESS_ROOT}")
+    fi
     subject=$path
     case "$subject" in
       "$HARNESS_ROOT"/*) subject=${subject#"$HARNESS_ROOT"/} ;;
       "$cwd"/*) [ -n "$cwd" ] && subject=${subject#"$cwd"/} ;;
     esac
-    verdict=$("$PERMIT" check --path "$subject" --project "$HARNESS_ROOT" 2>&1) || block "denied write to $path. $verdict"
+    verdict=$("$PERMIT" check --path "$path" --project "$HARNESS_ROOT" 2>&1) || block "denied write to $path. $verdict"
     ;;
 esac
 
