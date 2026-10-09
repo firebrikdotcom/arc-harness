@@ -205,7 +205,7 @@ hook 2 '{"tool_name":"Edit","tool_input":{"file_path":"docs/setup.md"}}'
 expect_output "review phase does not edit project files"
 hook 0 '{"tool_name":"Write","tool_input":{"file_path":"review-findings.json"}}'
 record review 0
-printf '%s\n' '{"tree_hash":"none","reviewer":"fixture","verdict":"approve","findings":[]}' > "$TMP_ROOT/findings.json"
+printf '{"tree_hash":"%s","reviewer":"fixture","verdict":"approve","findings":[]}\n' "$(sh "$H/scripts/tree-hash.sh" "$H")" > "$TMP_ROOT/findings.json"
 (cd "$H" && "$CLI" review submit "$TMP_ROOT/findings.json") > "$OUT" 2>&1 || fail "review submit failed"
 (cd "$H" && "$CLI" review "done") > "$OUT" 2>&1 || fail "review done failed"
 hook 2 '{"tool_name":"Write","tool_input":{"file_path":"docs/setup.md"}}'

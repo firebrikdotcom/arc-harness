@@ -112,7 +112,7 @@ class SessionRunsTests(unittest.TestCase):
             self.call(sid, "workflow", "todo", "update", "--id", "check", "--status", "completed",
                       "--reason", "tested", "--evidence", "sensors passed")
             findings = self.base / ("findings-" + sid + ".json")
-            findings.write_text(json.dumps({"tree_hash": "none", "reviewer": "fixture", "verdict": "approve", "findings": []}))
+            findings.write_text(json.dumps({"tree_hash": subprocess.run(["sh", str(ROOT / "scripts/tree-hash.sh"), str(self.project)], capture_output=True, text=True).stdout.strip(), "reviewer": "fixture", "verdict": "approve", "findings": []}))
             self.call(sid, "review", "submit", str(findings))
             self.call(sid, "review", "done")
         previous = self.run_id("a")

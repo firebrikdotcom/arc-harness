@@ -277,6 +277,12 @@ The guard binds to the session in each hook payload, so every session uses its o
 
 `scripts/guard-version` stamps the guard. `scripts/install-hooks.sh` records the installed checkout in `~/.config/harness/root` (or `HARNESS_HOME`); a checkout whose guard is older, such as a stale worktree of the harness, refuses work except `git` until it is updated.
 
+### What the guard can and cannot stop
+
+The guard judges what a command says it will do. It stops the mistakes and shortcuts an agent actually makes: editing outside build, skipping verification, approving its own review, resetting a failure count, retuning a budget, or touching the guard, its state, secrets, or git internals by any shell spelling that names the path. Three independent reviews probed it for bypasses, and every reproduction is a case in `tests/permit.sh` and `tests/harness-hook.sh`.
+
+It is not a sandbox. The agent runs as your user, so code it writes and then runs (a script file, or interpreter code that builds a path at run time) can write anything you can, and no command parser can see inside it. For a hard barrier against a deliberately adversarial agent, run it in an OS sandbox that denies writes to `scripts/hooks/`, `scripts/permit.*`, `scripts/guard-version`, `schemas/`, `.claude/settings*.json`, and `.harness-db/` (for example Claude Code's sandbox filesystem rules), and keep `review submit` and `abort` in a terminal the agent does not control.
+
 ### Brief, map, and retention
 
 At session start the hook prints `harness brief`: this session's run or the latest one, its contract, any pause and its reason, the last ten recorded steps (per-tool noise hidden), and the project map. `scripts/init.sh` regenerates the map (`targets/<id>/map.md`) at every init: top-level paths with file counts, the checks verify can run, and the docs to start from.

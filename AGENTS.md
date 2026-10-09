@@ -35,7 +35,7 @@ Each rule is written here so you know the goal, and enforced by a gate so it hol
 | Do not touch the guard, its state, secrets, or git internals. | The denylist refuses writes to them (including all of `.harness-db/`), however the command reaches them; reading them is fine. |
 | Resume from durable state, not memory. | Session start prints `harness brief`; runs left idle for a day expire. |
 
-If a gate blocks you, read its message: it says what to do next. Do not work around a gate; if it is wrong, say so.
+If a gate blocks you, read its message: it says what to do next. Do not work around a gate; if it is wrong, say so. The gates stop mistakes and shortcuts; they are not a sandbox (docs/setup.md, "What the guard can and cannot stop").
 
 ## Working style
 

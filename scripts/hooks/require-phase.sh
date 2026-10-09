@@ -223,7 +223,7 @@ fi
 # 7. Plan and review do not change the project; they may write their own artifacts.
 is_phase_artifact() {
   case "$1" in
-    progress.md|tasks/*|task.json|*/task.json|review-findings.json|*/review-findings.json) return 0 ;;
+    progress.md|tasks/*|task.json|review-findings.json) return 0 ;;
   esac
   return 1
 }

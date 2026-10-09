@@ -152,6 +152,21 @@ for command in "scripts/harness 'review' submit f.json" 'scripts/harness "abort"
   deny_cmd "$command"
 done
 allow_cmd 'HARNESS_SESSION_ID= CLAUDE_CODE_SESSION_ID= sh tests/x.sh'
+# Launchers, append assignments, and setter builtins (third review).
+# shellcheck disable=SC2016 # the variables are part of the commands under test
+for command in "bash scripts/harness 'review' submit f.json" "sh scripts/harness 'abort'" 'echo review submit f | xargs scripts/harness' \
+  "find f -exec scripts/harness 'review' submit {} \\;" '. ./scripts/harness review submit f' 'watch scripts/harness abort' \
+  "bash scripts/knowledge-trust.sh 'approve'" "HARNESS_REVIEWER_CMD+='cp f.json \"\$2\"' scripts/review.sh" \
+  'export HARNESS_REVIEW_BASE+=x' 'set -a; read -r HARNESS_REVIEWER_CMD <<< zz; scripts/review.sh' \
+  'printf -v HARNESS_DB_ROOT %s /tmp' 'find scripts -exec rm {} \;'; do
+  deny_cmd "$command"
+done
+# shellcheck disable=SC2016 # reading a variable is not setting it
+for command in "find . -name '*.sh' -exec grep -l foo {} +" 'find . -exec wc -l {} \;' 'git stash list' \
+  'perl -MList::Util -e "print 1" README.md' 'grep -n HARNESS_REVIEWER_CMD docs/setup.md' 'echo "$HARNESS_REVIEWER_CMD"'; do
+  allow_cmd "$command"
+done
+[ -z "$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/permit.py" targets --command 'git stash list')" ] || fail "git stash list writes nothing"
 PY_PERMIT="$HARNESS_ROOT_UNDER_TEST/scripts/permit.py"
 call_kind() {
   [ "$(python3 "$PY_PERMIT" harness-call --command "$2" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = "$1" ] \

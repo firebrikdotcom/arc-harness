@@ -30,6 +30,15 @@ status=0
 grep -q 'no checks ran' "$OUT" || fail "verify should say no checks ran"
 grep -q '^EXIT=1$' "$HARNESS_DB_ROOT/records/verify.state" || fail "the record should show the failure"
 
+# Outside git the hash covers file contents (less the phase notes), so evidence still expires.
+before=$(sh "$ROOT/scripts/tree-hash.sh" "$EMPTY")
+case "$before" in files-*) ;; *) fail "a non-git project should get a content hash, got $before" ;; esac
+printf '%s\n' 'note' > "$EMPTY/progress.md"
+[ "$(sh "$ROOT/scripts/tree-hash.sh" "$EMPTY")" = "$before" ] || fail "phase notes must not change the hash"
+printf '%s\n' 'code' > "$EMPTY/main.c"
+[ "$(sh "$ROOT/scripts/tree-hash.sh" "$EMPTY")" != "$before" ] || fail "a project edit must change the hash"
+rm -f "$EMPTY/main.c" "$EMPTY/progress.md"
+
 # allow-empty is an explicit, visible exemption.
 printf '%s\n' 'allow-empty  # documentation-only project' > "$EMPTY/.harness-required-checks"
 "$VERIFY" --project "$EMPTY" > "$OUT" 2>&1 || fail "allow-empty should accept a run with no checks"
