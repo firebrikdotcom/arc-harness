@@ -394,6 +394,8 @@ create_run() {
 
   state_set RUN_ID "$_run_id"
   state_set SESSION_KEY "$(sh "$SCRIPT_DIR/run-paths.sh" key "$DB_ROOT")"
+  # The project this run changes; every gate judges evidence about it alone.
+  state_set RUN_TARGET "$TARGET_ROOT"
   state_set RUN_STARTED_AT "$(now_iso)"
   state_set RUN_STARTED_EPOCH "$(now_epoch)"
   state_set RUN_STATUS active
@@ -767,9 +769,15 @@ require_gate_record() {
     info "Fix the failures and run $_cmd again."
     exit "$EXIT_PHASE"
   fi
+  # The record must be about this run's project, not another one that passes.
+  _project=$(record_get "$_file" PROJECT_ROOT)
+  if [ "$(physical_dir "$_project")" != "$(physical_dir "$(run_target)")" ]; then
+    info "FAIL: cannot mark $1 done: the last $_kind record covers ${_project:-an unnamed project}, not this run's project $(run_target)."
+    info "Run $_cmd --project $(run_target)."
+    exit "$EXIT_PHASE"
+  fi
   # The record proves the files as they were then; any project edit since voids it.
   _tree=$(record_get "$_file" TREE_HASH)
-  _project=$(record_get "$_file" PROJECT_ROOT)
   if [ -n "$_tree" ] && [ "$_tree" != "none" ] && [ -d "$_project" ]; then
     _now_tree=$(sh "$SCRIPT_DIR/tree-hash.sh" "$_project")
     if [ "$_now_tree" != "$_tree" ]; then
@@ -806,12 +814,12 @@ require_contract() {
     info "or record why this run has none: harness contract waive \"<reason>\""
     exit "$EXIT_PHASE"
   fi
-  state_set CONTRACT_BASE "$(git -C "$TARGET_ROOT" rev-parse HEAD 2>/dev/null || printf '')"
+  state_set CONTRACT_BASE "$(git -C "$(run_target)" rev-parse HEAD 2>/dev/null || printf '')"
 }
 
 run_contract_criteria() {
   info "Contract acceptance criteria:"
-  if ! contract_tool criteria "$(contract_file)" --project "$TARGET_ROOT"; then
+  if ! contract_tool criteria "$(contract_file)" --project "$(run_target)"; then
     info "FAIL: cannot mark build done: an acceptance criterion failed."
     exit "$EXIT_PHASE"
   fi
@@ -819,7 +827,7 @@ run_contract_criteria() {
 }
 
 check_contract_non_goals() {
-  if ! contract_tool nongoals "$(contract_file)" --project "$TARGET_ROOT" --base "$(state_get CONTRACT_BASE)"; then
+  if ! contract_tool nongoals "$(contract_file)" --project "$(run_target)" --base "$(state_get CONTRACT_BASE)"; then
     info "FAIL: cannot mark review done: the change touched a non-goal path. Revert it or re-plan."
     exit "$EXIT_PHASE"
   fi
@@ -864,12 +872,19 @@ cmd_contract() {
   esac
 }
 
-# review_project  The project the last review covered, else the target root.
+# run_target  The project this run changes, recorded at plan start (older runs:
+# the current target root).
+run_target() {
+  state_get RUN_TARGET "$TARGET_ROOT"
+}
+
+physical_dir() {
+  [ -n "$1" ] && [ -d "$1" ] && (CDPATH='' cd "$1" && pwd -P) || printf '%s\n' "$1"
+}
+
+# review_project  Reviews are always about the run's own project.
 review_project() {
-  _project=""
-  [ -f "$RECORDS_DIR/review.state" ] && _project=$(record_get "$RECORDS_DIR/review.state" PROJECT_ROOT)
-  [ -n "$_project" ] && [ -d "$_project" ] || _project=$TARGET_ROOT
-  printf '%s\n' "$_project"
+  run_target
 }
 
 # The reviewer that wrote the change cannot approve it: review done needs an
@@ -1320,6 +1335,7 @@ cmd_status() {
     info "Stale:        idle for more than $(idle_cap_hours) hours; harness plan start replaces it"
   fi
   info "Run state:    $RUN_DIR"
+  info "Target:       $(run_target)"
   info "Phase:        $(state_get CURRENT_PHASE)"
   info "  plan   $(phase_status plan)"
   info "  build  $(phase_status build)"

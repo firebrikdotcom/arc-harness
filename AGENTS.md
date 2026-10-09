@@ -28,10 +28,11 @@ Each rule is written here so you know the goal, and enforced by a gate so it hol
 | Work inside a phase; edit only in build. | The guard blocks Write, Edit, and shell writes outside build (plan and review may write `progress.md`, `tasks/`, `task.json`, `review-findings.json`). |
 | Every run has a bounded contract: deliverables, non-goals, acceptance commands. | `plan done` needs `harness contract set` (or a recorded `contract waive`). |
 | Done means evidence, not a claim. | `build done` needs a passing `scripts/verify.sh` on the current files (a run with no checks fails) and every acceptance command to pass. |
-| The author does not approve their own work. | `review done` needs an independent reviewer's approving findings for the current files, and no non-goal path touched. |
+| The author does not approve their own work. | `review done` needs an independent reviewer's approving findings for the current files, and no non-goal path touched. Findings come from the reviewer a person configured (`HARNESS_REVIEWER_CMD`) or are submitted by a person; the guard refuses `review submit` from the agent. |
+| Evidence is about this project. | Gates accept verify and review records only for the run's own project, and the guard refuses calls in a project other than the run's. |
 | Stop when the same failure repeats. | Two identical failures in a row pause the run; resuming needs the user and a new approach. |
 | Stay inside budgets. | Steps, loops, and continues are counted; a pause waits for the user. `abort` is the user's. |
-| Do not touch the guard, secrets, or git internals. | The denylist refuses writes to them, however the path is spelled; reading them is fine. |
+| Do not touch the guard, its state, secrets, or git internals. | The denylist refuses writes to them (including all of `.harness-db/`), however the command reaches them; reading them is fine. |
 | Resume from durable state, not memory. | Session start prints `harness brief`; runs left idle for a day expire. |
 
 If a gate blocks you, read its message: it says what to do next. Do not work around a gate; if it is wrong, say so.
@@ -56,7 +57,7 @@ scripts/verify.sh --project .              # evidence: fails when no check ran
 scripts/harness build done                  # needs that verify on the current files and every acceptance command
 scripts/harness review start
 scripts/review.sh --project .              # writes a packet for an independent reviewer (fresh context)
-scripts/harness review submit findings.json # the reviewer's verdict
+scripts/harness review submit findings.json # a person submits a fresh-context reviewer's verdict
 scripts/harness review done                 # needs an approval of the current files; no non-goal path touched
 ```
 

@@ -204,6 +204,18 @@ case "$phase" in
   *) block "no phase is active (phase=$phase). Open one first: scripts/harness plan start." ;;
 esac
 
+# The run's evidence must be about the project this call works in.
+work_root=$HARNESS_ROOT
+case "${cwd:-$HARNESS_ROOT}" in
+  "$HARNESS_ROOT"|"$HARNESS_ROOT"/*) ;;
+  *) work_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$cwd") ;;
+esac
+run_target=$(printf '%s\n' "$status_out" | sed -n 's/^Target:[[:space:]]*//p' | head -n 1)
+if [ -n "$run_target" ] && [ -d "$run_target" ] && [ -d "$work_root" ] \
+  && [ "$(CDPATH='' cd "$run_target" && pwd -P)" != "$(CDPATH='' cd "$work_root" && pwd -P)" ]; then
+  block "this session's run is for $run_target, but this call works in $work_root. Finish that run, or ask the user to abort it, then plan start from $work_root."
+fi
+
 # 7. Plan and review do not change the project; they may write their own artifacts.
 is_phase_artifact() {
   case "$1" in

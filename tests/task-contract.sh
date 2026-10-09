@@ -112,6 +112,21 @@ h 0 build start
 h 4 build "done"
 expect_output "refused by the denylist"
 
+# A criterion whose program is missing, or that hangs, fails cleanly.
+rm -rf "$HARNESS_DB_ROOT"
+h 0 plan start
+printf '%s\n' '{"goal":"x","deliverables":["y"],"non_goals":[],"acceptance":[{"id":"missing","criterion":"x","command":["no-such-program-zz"]},{"id":"slow","criterion":"y","command":["sleep","5"]}]}' > "$TMP_ROOT/odd.json"
+h 0 contract set "$TMP_ROOT/odd.json"
+h 0 plan "done"
+h 0 build start
+"$ROOT/scripts/verify.sh" --project "$PROJECT" > "$OUT" 2>&1 || fail "verify failed"
+status=0
+(cd "$PROJECT" && HARNESS_CRITERION_TIMEOUT=1 "$CLI" build "done") > "$OUT" 2>&1 || status=$?
+[ "$status" -eq 4 ] || fail "missing or hung criteria should fail build done, exited $status"
+expect_output "FAIL: missing: .*did not run: FileNotFoundError"
+expect_output "FAIL: slow: .*did not run: TimeoutExpired"
+if grep -q Traceback "$OUT"; then fail "no traceback for a missing criterion program"; fi
+
 # A waiver is explicit and travels to the reviewer.
 rm -rf "$HARNESS_DB_ROOT"
 h 0 plan start

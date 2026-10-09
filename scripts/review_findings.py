@@ -10,7 +10,8 @@ through tree_hash (scripts/tree-hash.sh), so an edit after the review voids them
   review_findings.py template --project PATH
 
 check exits 0 when the verdict is approve and no blocker or major finding is open,
-1 when the review blocks or is stale, 2 when the file is malformed.
+1 when the review blocks (or no findings exist), 2 when the file is malformed, and
+3 when the findings cover files that have since changed.
 """
 from __future__ import annotations
 
@@ -82,7 +83,7 @@ def check(path: Path, project: str) -> int:
     if data["tree_hash"] != current:
         print(f"FAIL: the review covered tree {data['tree_hash'][:12]}, but the project is now {current[:12]}.")
         print("Run scripts/review.sh again and review the current files.")
-        return 1
+        return 3
     open_findings = [item for item in findings if item.get("status", "open") == "open" and item["severity"] in ("blocker", "major")]
     if data["verdict"] != "approve" or open_findings:
         print(f"FAIL: the reviewer ({data['reviewer']}) verdict is {data['verdict']} with {len(open_findings)} open blocker/major finding(s):")
