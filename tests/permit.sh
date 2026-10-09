@@ -116,13 +116,15 @@ deny_path "$HARNESS_ROOT_UNDER_TEST/./scripts/permit.py"
 # Writes are judged by their targets, however the command reaches them; each case
 # below is a bypass an independent review reproduced against the first version.
 H=scripts/hooks/require-phase.sh
+# Deleting a directory that contains the project deletes its guard too.
+PARENT_DIR=$(dirname "$HARNESS_ROOT_UNDER_TEST")
 # shellcheck disable=SC2016 # substitutions and variables are part of the commands under test
 for command in "rm -rf scripts/hooks" "rm -rf .harness-db/records" "rm -rf .harness-db" "mv $H /tmp/x" "chmod -x $H" \
   "cp -t scripts/hooks /tmp/evil" "cp -r /tmp/evil scripts" "nice -n 5 rm -f $H" "pushd scripts && rm -f hooks/require-phase.sh" \
   "env -C scripts rm hooks/require-phase.sh" "rm scripts/hook*/require-phase.sh" "rm scripts/{hooks,x}/require-phase.sh" \
   "find scripts/hooks -delete" "find . -name '*.md' -delete" "echo $H | xargs rm" "git rm -f $H" "git checkout HEAD~3 -- $H" \
   "perl -pi -e 's/a/b/' $H" "bash -ec 'rm -f $H'" "sh -xc 'echo > $H'" "eval 'rm -f $H'" \
-  "cp /tmp/evil $H # don't" "python3 -Ic \"open('$H','w')\"" "tar -xf /tmp/a.tar $H" "rm -rf /home" \
+  "cp /tmp/evil $H # don't" "python3 -Ic \"open('$H','w')\"" "tar -xf /tmp/a.tar $H" "rm -rf $PARENT_DIR" \
   'cd "$(chmod -x scripts/hooks/require-phase.sh)" && ls' 'D=.; printf x >> "$D/scripts/hooks/require-phase.sh"' \
   'echo CAP_REPEAT_FAILURES=0 >> .harness-db/runs/x/state' 'cp /tmp/weak.json .harness-db/runs/x/task.json' \
   'true && scripts/harness failure clear --command-key abc' 'scripts/harness review submit f.json' \
