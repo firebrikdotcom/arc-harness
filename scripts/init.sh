@@ -78,6 +78,8 @@ cd "$PROJECT_ROOT" || exit 2
 # state. The home directory, /, and the harness root itself are not targets.
 if [ -x "$SCRIPT_DIR/harness-target.sh" ]; then
   TARGET_DIR=$("$SCRIPT_DIR/harness-target.sh" register "$PROJECT_ROOT" 2>/dev/null || :)
+  # A refusal (the harness root, home, /) prints a reason, not a directory.
+  [ -d "$TARGET_DIR" ] || TARGET_DIR=""
 fi
 
 PLAN_FILE=$(mktemp "${TMPDIR:-/tmp}/harness-init-plan.XXXXXX")
