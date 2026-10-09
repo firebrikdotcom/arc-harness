@@ -97,7 +97,13 @@ rm "$PROJECT/.harness-required-checks"
 (cd "$PROJECT" && "$CLI" plan start && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "phases failed"
 "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh" --project "$PROJECT" > "$OUT" 2>&1 || fail "verify failed"
 (cd "$PROJECT" && "$CLI" build "done" && "$CLI" review start) > "$OUT" 2>&1 || fail "build done / review start failed"
+# Work committed after the plan is part of the review, not only the dirty tree.
+printf '%s\n' 'COMMITTED_AFTER_PLAN' > "$PROJECT/committed.txt"
+git -C "$PROJECT" add committed.txt
+git -C "$PROJECT" -c user.email=t@example.com -c user.name=t commit -q -m "after plan"
 "$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || fail "review failed"
+grep -q '^+COMMITTED_AFTER_PLAN' "$RECORDS/review-packet.md" || fail "the packet should hold commits made since the plan"
+grep -q 'commits since .*' "$RECORDS/review-packet.md" || fail "the packet should list the commits since the plan"
 TREE=$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$PROJECT")
 status=0
 (cd "$PROJECT" && "$CLI" review "done") > "$OUT" 2>&1 || status=$?
