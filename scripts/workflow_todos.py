@@ -8,12 +8,19 @@ import uuid
 TERMINAL = {"completed", "removed"}
 STATUSES = {"pending", "in_progress", "completed", "blocked"}
 
+class TodoValidationError(ValueError):
+    """A policy message composed only from trusted text, safe to show in the CLI."""
+
+PLAN_HELP = ('--items must be a JSON array of objects with required description and criterion\n'
+             '(nonempty strings); optional id (unique string) and required (boolean).\n'
+             'Example:\n[{"id":"check","description":"Check devices","criterion":"Inventory reported"}]')
+
 def timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 def text(value, name):
     if not isinstance(value, str) or not value.strip() or len(value.encode()) > 2000:
-        raise ValueError(name + " must be nonempty and at most 2000 bytes")
+        raise TodoValidationError(name + " must be nonempty and at most 2000 bytes")
     return value
 
 def reset_task(context):
@@ -25,9 +32,9 @@ def unresolved(context):
 
 def assert_plan(context, active=False):
     if context.get("confirmed_request") != context.get("request_seq", 0) or context.get("plan_mode") != "execution" or not context.get("todos"):
-        raise ValueError("Register or confirm a complete todo plan for the current prompt: harness workflow todo plan --items JSON --reason SUMMARY")
+        raise TodoValidationError("Register or confirm a complete todo plan for the current prompt: harness workflow todo plan --items JSON --reason SUMMARY")
     if active and context.get("todos", {}).get(context.get("active_todo_id"), {}).get("status") != "in_progress":
-        raise ValueError("Select an active todo: harness workflow todo update --id ID --status in_progress --reason SUMMARY")
+        raise TodoValidationError("Select an active todo: harness workflow todo update --id ID --status in_progress --reason SUMMARY")
 
 def parse_time(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else datetime.min.replace(tzinfo=timezone.utc)
@@ -53,11 +60,11 @@ def assert_complete(context):
         return
     assert_plan(context)
     if unresolved(context):
-        raise ValueError("Required todos remain unresolved")
+        raise TodoValidationError("Required todos remain unresolved")
     for kind in ("verify", "review"):
         check = context.get("checks", {}).get(kind, {})
         if check.get("exit_code") != 0 or check.get("failures", 0) != 0 or not fresh(check, context):
-            raise ValueError("Fresh passing " + kind + " is required before completion (run scripts/" + kind + ".sh on the current files)")
+            raise TodoValidationError("Fresh passing " + kind + " is required before completion (run scripts/" + kind + ".sh on the current files)")
 
 def handle(args, sid, context, record):
     action = args.todo_action
@@ -67,7 +74,7 @@ def handle(args, sid, context, record):
     todos = context.setdefault("todos", {})
     if action == "exempt":
         if unresolved(context):
-            raise ValueError("An unresolved execution plan cannot be exempted; record a blocked outcome or revise the plan")
+            raise TodoValidationError("An unresolved execution plan cannot be exempted; record a blocked outcome or revise the plan")
         context["plan_mode"] = "question"
         context["confirmed_request"] = context.get("request_seq", 0)
         context.pop("active_todo_id", None)
@@ -75,24 +82,27 @@ def handle(args, sid, context, record):
         return
     if action == "confirm":
         if not todos or context.get("plan_mode") != "execution":
-            raise ValueError("An execution plan must exist before confirmation")
+            raise TodoValidationError("An execution plan must exist before confirmation")
         context["confirmed_request"] = context.get("request_seq", 0)
         record("plan_confirmed", sid, context, description=reason, revision=context.get("plan_revision", 1))
         return
     revision = context.get("plan_revision", 0) + 1
     if action == "plan":
-        items = json.loads(args.items)
+        try:
+            items = json.loads(args.items)
+        except json.JSONDecodeError as error:
+            raise TodoValidationError("Invalid --items JSON. " + PLAN_HELP) from error
         if not isinstance(items, list) or not 1 <= len(items) <= 200:
-            raise ValueError("Plan must contain 1 to 200 todos")
+            raise TodoValidationError("Plan must contain 1 to 200 todos")
         next_items = {}
         for item in items:
             if not isinstance(item, dict) or set(item) - {"id", "description", "criterion", "required"}:
-                raise ValueError("Todos accept id, description, criterion and required only")
+                raise TodoValidationError("Unsupported todo fields. " + PLAN_HELP)
             identifier = item.get("id", str(uuid.uuid4()))
             if not isinstance(identifier, str) or not identifier or len(identifier) > 128 or identifier in next_items:
-                raise ValueError("Todo IDs must be short, nonempty and unique")
+                raise TodoValidationError("Todo IDs must be short, nonempty and unique")
             if type(item.get("required", True)) is not bool:
-                raise ValueError("required must be a boolean")
+                raise TodoValidationError("required must be a boolean")
             previous = todos.get(identifier)
             current = {"id":identifier,"description":text(item.get("description"),"description"),"criterion":text(item.get("criterion"),"criterion"),"required":item.get("required",True),"status":"pending","evidence":""}
             if previous and all(previous[key] == current[key] for key in ("description", "criterion", "required")) and previous["status"] != "removed":
@@ -118,9 +128,9 @@ def handle(args, sid, context, record):
     elif action == "update":
         assert_plan(context)
         current = todos.get(args.id)
-        if not current or current["status"] == "removed": raise ValueError("Unknown or removed todo")
+        if not current or current["status"] == "removed": raise TodoValidationError("Unknown or removed todo; run harness workflow todo show to list registered IDs")
         if args.status == "in_progress" and context.get("active_todo_id") not in (None, args.id):
-            raise ValueError("Resolve or pause the active todo before selecting another")
+            raise TodoValidationError("Resolve or pause the active todo before selecting another")
         evidence = text(args.evidence, "evidence") if args.status == "completed" else ""
         previous_status = current["status"]
         current.update(status=args.status, evidence=evidence)

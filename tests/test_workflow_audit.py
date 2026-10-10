@@ -247,6 +247,54 @@ class WorkflowTests(unittest.TestCase):
                         "cat a | tee PRIVATE_PATH", "sort -o PRIVATE_PATH a"):
             self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":command})
 
+    def test_question_inventory_and_research_do_not_require_an_execution_plan(self):
+        self.config(False, False)
+        self.gate("UserPromptSubmit", prompt="Which wireless devices are available?")
+        self.policy("exempt", "--reason", "Read-only inventory")
+        for command in ("adb devices", "adb devices -l", "adb mdns services", "adb devices -l | head -n 3"):
+            self.gate("PreToolUse", tool_name="exec_command", tool_input={"cmd":command})
+        self.gate("PreToolUse", tool_name="webrun", tool_input={"search_query":[{"q":"ADB documentation"}]})
+        for command in ("adb connect host", "adb shell rm file", "adb kill-server", "adb devices -l > inventory",
+                        "adb devices -l && touch file", "adb mdns services extra"):
+            self.gate("PreToolUse", 2, tool_name="exec_command", tool_input={"cmd":command})
+        self.gate("Stop")
+        self.assertEqual(self.queued(), [])
+
+    def test_bookkeeping_uses_the_shell_working_directory(self):
+        self.gate("UserPromptSubmit", prompt="Work")
+        self.gate("PreToolUse", cwd=str(self.base), tool_name="exec_command",
+                  tool_input={"cmd":"scripts/harness workflow todo show", "workdir":str(ROOT)})
+        self.gate("PreToolUse", 2, cwd=str(ROOT), tool_name="exec_command",
+                  tool_input={"cmd":"scripts/harness workflow todo show", "workdir":str(self.base)})
+        self.gate("PreToolUse", 2, cwd=str(self.base), tool_name="exec_command",
+                  tool_input={"cmd":"scripts/harness workflow todo show && touch file", "workdir":str(ROOT)})
+
+    def test_plan_help_and_validation_allow_recovery_without_partial_state(self):
+        help_text = self.policy("plan", "--help").stdout
+        for field in ("description", "criterion", "boolean", "Example:"):
+            self.assertIn(field, help_text)
+        example = help_text.split("Example:\n", 1)[1].splitlines()[0]
+        self.assertEqual(json.loads(example)[0]["description"], "Check devices")
+        self.gate("UserPromptSubmit", prompt="Work")
+        self.policy("exempt", "--reason", "Initial question")
+        before = json.loads(self.policy("show").stdout)
+        for items, expected in (([{"id":"check", "text":"PRIVATE INPUT"}], "Unsupported todo fields"),
+                                ([{"id":"check", "title":"PRIVATE INPUT"}], "Unsupported todo fields"),
+                                ([{"description":"PRIVATE INPUT"}], "criterion must be nonempty")):
+            result = self.policy("plan", "--items", json.dumps(items), "--reason", "Plan", code=1)
+            self.assertIn("WORKFLOW TODO: " + expected, result.stderr)
+            self.assertNotIn("PRIVATE INPUT", result.stderr)
+            self.assertNotIn("COLLECTION UNAVAILABLE", result.stderr)
+            self.assertEqual(json.loads(self.policy("show").stdout), before)
+        malformed = self.policy("plan", "--items", '{"PRIVATE INPUT":', "--reason", "Plan", code=1)
+        self.assertIn("Invalid --items JSON", malformed.stderr)
+        self.assertNotIn("PRIVATE INPUT", malformed.stderr)
+        missing = self.policy("update", "--id", "check", "--status", "in_progress", "--reason", "Start", code=1)
+        self.assertIn("Register or confirm", missing.stderr)
+        self.policy("plan", "--items", json.dumps([{"id":"check", "description":"Check devices", "criterion":"Inventory reported"}]), "--reason", "Corrected plan")
+        self.policy("update", "--id", "check", "--status", "in_progress", "--reason", "Start")
+        self.gate("PreToolUse", tool_name="Bash", tool_input={"command":"touch file"})
+
     def test_completion_freshness_follows_project_files_not_unrelated_writes(self):
         project = self.base/"project"
         project.mkdir()

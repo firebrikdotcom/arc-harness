@@ -10,7 +10,7 @@ import permit
 import workflow_audit as audit
 from workflow_todos import assert_plan, assert_complete
 
-READ_TOOLS = {"Read", "Grep", "Glob", "read_file", "list_dir", "update_plan", "request_user_input", "request_user_input_async"}
+READ_TOOLS = {"Read", "Grep", "Glob", "read_file", "list_dir", "update_plan", "request_user_input", "request_user_input_async", "webrun", "web.run", "web__run"}
 GRAPH_READS = {"search_graph", "trace_path", "get_code_snippet", "check_index_coverage", "query_graph", "get_architecture", "list_projects", "index_status"}
 # Commands that only read. Writes by redirection are caught separately by the parser.
 READ_ONLY = {"cat", "head", "tail", "wc", "ls", "tree", "grep", "egrep", "fgrep", "rg", "cut", "tr", "uniq",
@@ -37,6 +37,9 @@ def management_segment(words, cwd):
 
 def read_only_segment(words):
     name = Path(words[0]).name
+    if name == "adb":
+        # Inventory only: never allow arbitrary adb shell, connect, or server actions.
+        return words[1:] in (["devices"], ["devices", "-l"], ["mdns", "services"])
     if name == "git":
         rest = [word for word in words[1:] if not word.startswith("-")]
         if not rest:
@@ -63,6 +66,11 @@ def management_command(payload):
     if not isinstance(command, str) or not command.strip() or any(value in command for value in ("`", "$(", "<(", ">(")):
         return False
     cwd = Path(payload.get("cwd") or ".")
+    workdir = data.get("workdir") or data.get("cwd")
+    if workdir:
+        if not isinstance(workdir, str):
+            return False
+        cwd = (cwd / workdir).resolve()
     try:
         analysis = permit.analyse(command, str(cwd), cwd.resolve())
         text, bodies = permit.preprocess(command)

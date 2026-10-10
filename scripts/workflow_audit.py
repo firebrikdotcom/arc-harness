@@ -383,9 +383,10 @@ def main() -> int:
     sub.add_parser("flush")
     gate = sub.add_parser("gate")
     gate.add_argument("--check", choices=("plan", "active", "complete"), required=True)
-    todo = sub.add_parser("todo")
+    todo = sub.add_parser("todo", description=todos.PLAN_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
+                          epilog="Register the plan successfully before updating an item. Questions with only read-only tools use exempt.")
     todo.add_argument("todo_action", choices=("plan", "confirm", "update", "exempt", "show"))
-    todo.add_argument("--items")
+    todo.add_argument("--items", help="JSON array of todos; see the schema and example above")
     todo.add_argument("--reason")
     todo.add_argument("--id")
     todo.add_argument("--status", choices=sorted(todos.STATUSES))
@@ -497,6 +498,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except todos.TodoValidationError as error:
+        print("WORKFLOW TODO: " + str(error), file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, sqlite3.Error, KeyError) as error:
         # Audit infrastructure remains advisory; never include raw input in diagnostics.
         # Policy refusals are the harness's own messages and say what to do next.
