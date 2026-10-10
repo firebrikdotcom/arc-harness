@@ -27,7 +27,8 @@ def matches(word, target, cwd):
 
 def management_segment(words, cwd):
     if matches(words[0], "scripts/harness", cwd):
-        return len(words) >= 2 and words[1] in {"workflow", "plan", "build", "review", "status", "root", "step", "brief"}
+        return (len(words) >= 2 and words[1] in {"workflow", "plan", "build", "review", "status", "root", "step", "brief"}
+                or len(words) >= 3 and words[1:3] == ["jev", "status"])
     if words[0] in {"python3", "/usr/bin/python3"} and len(words) > 2 and matches(words[1], "scripts/workflow_audit.py", cwd):
         return words[2] in {"task", "todo", "decision", "outcome", "gate", "flush"}
     if matches(words[0], "scripts/action.sh", cwd):

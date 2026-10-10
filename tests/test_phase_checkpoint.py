@@ -48,10 +48,25 @@ class PhaseCheckpointTests(unittest.TestCase):
         (self.db / "runs" / "current").write_text("run-1\n")
         self.write_state(RUN_STATUS="active", CURRENT_PHASE="build", STEPS_USED="4", LOOPS_USED="0",
                          PHASE_BUILD_STARTED_EPOCH="100", RUN_ID="run-1")
+        # The fixture database uses the legacy run and record paths, so the native session
+        # identity of whoever runs the suite must not leak in: not into subprocesses (self.env)
+        # and not into the in-process calls that read os.environ.
+        isolated = patch.dict(os.environ)
+        isolated.start()
+        self.addCleanup(isolated.stop)
+        for key in ("HARNESS_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "HARNESS_JEV_DELEGATION"):
+            os.environ.pop(key, None)
+        self.config_home = self.root / "config"
+        os.environ["HARNESS_CONFIG_HOME"] = str(self.config_home)
         self.env = {**os.environ, "HARNESS_JEV_CHECKPOINTS": "1", "HARNESS_TYPESAFE_ROUTER": str(FAKE_ROUTER),
-                    "FAKE_ROUTER_LOG_DIR": str(self.root / "logs"), "HARNESS_AUDIT_ENABLED": "0"}
+                    "FAKE_ROUTER_LOG_DIR": str(self.root / "logs"), "HARNESS_AUDIT_ENABLED": "0",
+                    "TYPESAFE_MODEL": "fixture"}
         for key in ("FAKE_ROUTER_FAIL", "FAKE_ROUTER_CHOICE", "FAKE_ROUTER_BOOL"):
             self.env.pop(key, None)
+
+    def switch_on(self) -> None:
+        self.config_home.mkdir(exist_ok=True)
+        (self.config_home / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": "fixture"}))
 
     def write_state(self, **values: str) -> None:
         (self.run_dir / "state").write_text("".join(f"{k}={v}\n" for k, v in values.items()))
@@ -592,6 +607,35 @@ class PhaseCheckpointTests(unittest.TestCase):
         sent = json.loads((self.root / "state.json").read_text())["state"]
         self.assertNotIn("secretive", json.dumps(sent))
         self.assertEqual(sent["task"], {"kind": "change", "area": "backend"})
+
+    def test_session_start_reports_the_delegated_route_when_the_switch_is_on(self) -> None:
+        self.switch_on()
+        result = self.run_event("session-start", env={**self.env, "FAKE_STATE_PATH": str(self.root / "state.json")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith(
+            "Jev delegated route for this session: proceed (source typesafe, active; follow it unless a deterministic rule decides)."),
+            result.stdout)
+        self.assertNotIn("--shadow", json.loads((self.root / "state.json").read_text())["args"])
+        route = json.loads(next((self.db / "routes").glob("*.json")).read_text())
+        self.assertEqual((route["routing_mode"], route["mode_source"], route["recommendation"]), ("active", "delegation", "proceed"))
+
+    def test_session_start_names_the_holdback_when_the_switch_cannot_apply(self) -> None:
+        self.switch_on()
+        env = {k: v for k, v in self.env.items() if k != "TYPESAFE_MODEL"}
+        (self.config_home / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": None}))
+        result = self.run_event("session-start", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Jev shadow route for this session", result.stdout)
+        self.assertIn("Delegation is on but held back: active routing requires an exact model pin", result.stdout)
+
+    def test_gate_checkpoints_stay_shadow_observations_when_the_switch_is_on(self) -> None:
+        self.switch_on()
+        result = self.run_event("plan-done")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("shadow recommendation", result.stdout)
+        self.assertIn("baseline kept", result.stdout)
+        record = self.advice_records()[0]
+        self.assertEqual((record["delegation"], record["delegated_action"]), ("shadow", None))
 
     def test_session_start_outside_git_skips(self) -> None:
         plain = self.root / "plain"

@@ -51,9 +51,19 @@ class TaskRoutingTests(unittest.TestCase):
         self.state_capture = self.root / "sent-state.json"
         self.db = self.root / "db"
         self.env = os.environ.copy()
-        self.env.update({"FAKE_STATE_PATH": str(self.state_capture), "HARNESS_DB_ROOT": str(self.db), "TYPESAFE_MODEL": "fixture"})
-        for key in ("HARNESS_TYPESAFE_ACTIVE", "HARNESS_TYPESAFE_OPERATOR_ACTIVATION", "HARNESS_TYPESAFE_ROLLOUT_PERCENT", "HARNESS_AUDIT_ENABLED", "HARNESS_AUDIT_URL"):
+        # The delegation switch under test is this temp dir's, never the machine's.
+        self.config_home = self.root / "config"
+        self.env.update({"FAKE_STATE_PATH": str(self.state_capture), "HARNESS_DB_ROOT": str(self.db), "TYPESAFE_MODEL": "fixture",
+                         "HARNESS_CONFIG_HOME": str(self.config_home)})
+        # Nothing here may depend on the caller's shell: not the machine's activation flags,
+        # and not the native session identity, which would move run and record paths.
+        for key in ("HARNESS_TYPESAFE_ACTIVE", "HARNESS_TYPESAFE_OPERATOR_ACTIVATION", "HARNESS_TYPESAFE_ROLLOUT_PERCENT",
+                    "HARNESS_AUDIT_ENABLED", "HARNESS_AUDIT_URL", "HARNESS_JEV_DELEGATION",
+                    "HARNESS_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
             self.env.pop(key, None)
+
+    def switch(self, action: str, *extra: str, env: dict | None = None) -> dict:
+        return json.loads(self.run_cli("jev", action, "--json", *extra, env=env).stdout)
 
     def run_cli(self, *args: str, expected: int = 0, env: dict | None = None) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
@@ -63,10 +73,11 @@ class TaskRoutingTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stderr + result.stdout)
         return result
 
-    def route(self, *, mode: str = "shadow", expected: int = 0, env: dict | None = None) -> subprocess.CompletedProcess[str]:
+    def route(self, *, mode: str | None = None, expected: int = 0, env: dict | None = None) -> subprocess.CompletedProcess[str]:
+        # No --mode means the switch decides, as the hook and a plain `harness route` do.
         return self.run_cli(
             "route", "--state", str(self.metadata), "--project", str(self.root),
-            "--router", str(self.router), "--mode", mode, expected=expected, env=env,
+            "--router", str(self.router), *(("--mode", mode) if mode else ()), expected=expected, env=env,
         )
 
     def eligible_env(self) -> dict[str, str]:
@@ -310,6 +321,88 @@ class TaskRoutingTests(unittest.TestCase):
         self.metadata.write_text(json.dumps({**METADATA, "user_choice_explicit": True}))
         self.assertEqual(json.loads(self.route().stdout)["source"], "deterministic")
         self.assertFalse(self.state_capture.exists())
+
+    def test_switch_off_by_default_routes_in_shadow(self):
+        self.assertEqual((self.switch("status")["enabled"], self.switch("status")["source"]), (False, "default"))
+        record = json.loads(self.route().stdout)
+        self.assertEqual((record["mode"], record["mode_source"], record["delegation"]), ("shadow", "default", False))
+
+    def test_switch_on_routes_active_and_persists(self):
+        state = self.switch("on", "--reason", "pilot reviewed")
+        self.assertEqual((state["enabled"], state["mode"], state["source"], state["model"]), (True, "active", "file", "fixture"))
+        stored = self.config_home / "jev-delegation.json"
+        self.assertTrue(stored.is_file())
+        self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(stored.read_text())["reason"], "pilot reviewed")
+        record = json.loads(self.route().stdout)
+        self.assertEqual((record["source"], record["recommendation"], record["routing_mode"]), ("typesafe", "proceed", "active"))
+        self.assertEqual((record["mode_source"], record["delegation"], record["rollout_selected"]), ("delegation", True, True))
+        self.assertNotIn("--shadow", json.loads(self.state_capture.read_text())["args"])
+        # A fresh shell sees the same switch: it lives in the file, not the environment.
+        self.assertTrue(self.switch("status")["enabled"])
+        self.assertFalse(self.switch("off")["enabled"])
+        self.assertEqual(json.loads(self.route().stdout)["routing_mode"], "shadow")
+
+    def test_switch_pins_the_model_the_router_requests(self):
+        self.switch("on", "--model", "jev-9.9.9")
+        env = {k: v for k, v in self.env.items() if k != "TYPESAFE_MODEL"}
+        self.router.write_text(FAKE_ROUTER.replace("'returned': os.environ.get('FAKE_MODEL', 'fixture')",
+                                                   "'returned': os.environ.get('TYPESAFE_MODEL', 'unset')"))
+        record = json.loads(self.route(env=env).stdout)
+        self.assertEqual((record["routing_mode"], record["model"]["returned"]), ("active", "jev-9.9.9"))
+        latest = self.run_cli("jev", "on", "--model", "jev-latest", expected=2)
+        self.assertIn("exact", latest.stderr)
+
+    def test_switch_on_without_an_exact_pin_holds_back_to_shadow_and_says_why(self):
+        self.config_home.mkdir()
+        (self.config_home / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": None}))
+        env = {k: v for k, v in self.env.items() if k != "TYPESAFE_MODEL"}
+        record = json.loads(self.route(env=env).stdout)
+        self.assertEqual((record["mode"], record["routing_mode"], record["recommendation"]), ("active", "shadow", "default"))
+        self.assertIn("exact model pin", record["delegation_gate"])
+        self.assertIn("--shadow", json.loads(self.state_capture.read_text())["args"])
+        # Asked for explicitly, the same gap is an error rather than a quiet holdback.
+        self.assertIn("active routing is gated", self.route(mode="active", env=env, expected=2).stderr)
+
+    def test_environment_and_flag_override_the_switch(self):
+        self.switch("on")
+        env = {**self.env, "HARNESS_JEV_DELEGATION": "off"}
+        self.assertEqual(self.switch("status", env=env)["source"], "environment")
+        self.assertEqual(json.loads(self.route(env=env).stdout)["routing_mode"], "shadow")
+        record = json.loads(self.route(mode="shadow").stdout)
+        self.assertEqual((record["routing_mode"], record["mode_source"]), ("shadow", "flag"))
+        bad = self.route(env={**self.env, "HARNESS_JEV_DELEGATION": "maybe"}, expected=2)
+        self.assertIn("HARNESS_JEV_DELEGATION", bad.stderr)
+
+    def test_corrupt_switch_file_is_an_input_error(self):
+        self.config_home.mkdir()
+        (self.config_home / "jev-delegation.json").write_text("{not json")
+        self.assertIn("delegation switch", self.route(expected=2).stderr)
+        self.assertIn("delegation switch", self.run_cli("jev", "status", expected=2).stderr)
+
+    def test_deterministic_gates_still_decide_with_the_switch_on(self):
+        self.switch("on")
+        for field in ("approval_required", "required_checks_pending", "user_choice_explicit"):
+            self.metadata.write_text(json.dumps({**METADATA, field: True}))
+            self.assertEqual(json.loads(self.route().stdout)["source"], "deterministic")
+        self.metadata.write_text(json.dumps({**METADATA, "reversibility": "irreversible"}))
+        self.assertEqual(json.loads(self.route().stdout)["recommendation"], "reasoning_model")
+        self.assertFalse(self.state_capture.exists())
+
+    def test_launcher_follows_jev_when_the_switch_is_on(self):
+        default = self.command_file("default.json", "DEFAULT")
+        routine = self.command_file("routine.json", "ROUTINE")
+        common = (
+            "launch", "--state", str(self.metadata), "--project", str(self.root),
+            "--router", str(self.router), "--default-command", str(default),
+            "--routine-command", str(routine),
+        )
+        self.assertEqual(self.run_cli(*common).stdout.strip(), "DEFAULT")
+        self.switch("on")
+        self.assertEqual(self.run_cli(*common).stdout.strip(), "ROUTINE")
+        self.assertEqual(self.run_cli(*common, "--mode", "shadow").stdout.strip(), "DEFAULT")
+        self.switch("off")
+        self.assertEqual(self.run_cli(*common).stdout.strip(), "DEFAULT")
 
 
 if __name__ == "__main__":

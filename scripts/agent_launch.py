@@ -70,9 +70,9 @@ def read_command(path: Path | None) -> list[str] | None:
     return value
 
 
-def selected_profile(route: dict, mode: str) -> str | None:
+def selected_profile(route: dict, mode: str | None) -> str | None:
     recommendation = route["recommendation"]
-    if route["source"] == "typesafe" and route.get("routing_mode", mode) == "shadow":
+    if route["source"] == "typesafe" and (route.get("routing_mode") or route.get("mode") or mode) == "shadow":
         return "default"
     return {
         "ask_user": None,
@@ -86,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--project", type=Path, default=Path.cwd())
-    parser.add_argument("--mode", choices=("shadow", "active"), default="shadow")
+    parser.add_argument("--mode", choices=("shadow", "active"), default=None,
+                        help="default: active when 'harness jev status' is on, otherwise shadow")
     parser.add_argument("--router", type=Path, default=Path(os.environ.get("HARNESS_TYPESAFE_ROUTER", str(Path.home() / ".agents/skills/typesafe-routing/scripts/route.py"))))
     parser.add_argument("--db-root", type=Path, default=Path(os.environ.get("HARNESS_DB_ROOT", str(ROOT / ".harness-db"))))
     parser.add_argument("--agent", choices=("codex", "claude", "agy", "opencode"), help="use this executable as the default command")

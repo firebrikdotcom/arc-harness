@@ -4,7 +4,7 @@ Consider Jev at every meaningful decision point. Apply explicit instructions and
 
 ## Optional manual checkpoints
 
-The harness raises its own checkpoints at plan done, build start, verify, review, session start, and repeated commands, and labels them from the gate results that follow. These three manual calls are optional and stay in shadow mode (the answer is advice; permissions, failed checks, required checks, and completion gates still decide). Keep goals, facts, and choices redacted: no paths, source, question text, credentials, or personal data.
+The harness raises its own checkpoints at plan done, build start, verify, review, session start, and repeated commands, and labels them from the gate results that follow. These three manual calls are optional and follow the `harness jev` switch: off, the answer is advice and your baseline runs; on, the result's `action` is Jev's choice and you take it. Permissions, failed checks, required checks, and completion gates still decide in both modes. Keep goals, facts, and choices redacted: no paths, source, question text, credentials, or personal data.
 
 - Before the first broad Grep or Glob in an unfamiliar target: `scripts/harness advise --family tool_selection --baseline grep --goal "locate the code for one task" --choice grep="targeted grep" --choice retrieval="one semantic retrieval first" --fact "target unfamiliar"`
 - Before settling a review finding's severity: `scripts/harness advise --family evidence_assessment --baseline minor --goal "grade one review finding" --choice blocker="blocks merge" --choice major="fix before handoff" --choice minor="follow-up" --fact "finding reproduced: yes"`
@@ -34,7 +34,7 @@ Classifications, evidence judgments, and completion assessments are hypotheses. 
 1. Apply rules locally. When they settle the decision, act according to them without a Jev call. For a recorded checkpoint use `bypass_reason`: `explicit_rule`, `user_choice`, `required_check`, `known_failure`, `authorization`, `irreversible`, `unchanged_state`, or `not_bounded`. An empty questions map is allowed for bypasses.
 2. For an eligible judgment, record the intended action before requesting Jev. Use only a concise redacted goal, facts, constraints, and risks. No raw prompts, code, diffs, credentials, or personal data. Include an unknown/other choice when needed.
 3. Batch independent questions against the same context. Dependent questions require fresh evidence. Do not ask again without a meaningful change to evidence, options, or constraints.
-4. Run the checkpoint in shadow mode. Follow the pre-recorded baseline action within existing authorization. If new authoritative evidence changes the action, record that change; do not treat Jev's answer alone as new evidence.
+4. Run the checkpoint. What happens next is the persisted switch `scripts/harness jev status` (docs/setup.md, "The delegation switch"). Off, the checkpoint is a shadow comparison: follow the pre-recorded baseline within existing authorization, and do not treat Jev's answer alone as new evidence. On, the result's `action` is Jev's `recommendation` choice and `delegated` is true: take that action within existing authorization, unless a deterministic rule (permissions, required checks, failures, the user's choice) decides otherwise; the baseline is still recorded first, so the comparison survives. In both modes, if new authoritative evidence changes the action, record that change.
 5. After the decision resolves, record the action actually taken and an independently supported outcome. Agreement or accepting a suggestion does not establish correctness. Use `unknown` while it cannot be determined; leave the checkpoint unlabeled if evidence may arrive later.
 
 ## Version 2 input
@@ -80,13 +80,13 @@ This example records comparison only; the mandatory source-read rule still deter
 
 Input limit: 32,000 bytes; 1–8 questions per eligible checkpoint; 2–8 choices or score levels. All question instructions and criteria are supplied by the caller. Score positions start at zero and can be fractional; Boolean maps to native `noul`. Probabilities, confidence, and scores are distinct measurements. Absent distributions and usage remain `null`, not zero.
 
-The result includes `call_id`, `record_path`, `shadow`, `status`, `answers`, and `action` (the baseline). `status` is `evaluated`, `bypassed`, or `fallback`. Invalid responses, transport/credential errors, and returned model drift use the normal baseline path and record a fallback reason. Invalid input is rejected before sending. No confidence threshold promotes a v2 checkpoint automatically.
+The result includes `call_id`, `record_path`, `shadow`, `status`, `answers`, `delegation` (`shadow` or `active`), `delegated`, `baseline`, and `action`: the baseline when the switch is off, Jev's `recommendation` choice when it is on and the evaluation succeeded. `status` is `evaluated`, `bypassed`, or `fallback`. Invalid responses, transport/credential errors, and returned model drift use the normal baseline path and record a fallback reason; with the switch on they also set `delegation_gate` to say why the baseline was kept. Invalid input is rejected before sending. No confidence threshold promotes a v2 checkpoint automatically; only the switch does, and a person sets it.
 
 The baseline is persisted before evaluation and is not sent to Jev, avoiding anchoring on the agent's intended action. A `recommendation` Choice whose keys match `baseline_action` enables disagreement counts. Other typed answers remain available for independent assessment.
 
 ## Automatic checkpoints at harness seams
 
-Hand-authored checkpoints produced almost no evidence, so the harness now emits shadow checkpoints itself wherever it already has a deterministic oracle. `scripts/phase_checkpoint.py` derives enum-only signals and never includes paths, prompts, diffs, command text, run ids, or hashes. Everything is gated by `HARNESS_JEV_CHECKPOINTS=1` (exported by `scripts/jev-enable.sh`); without it every call is a silent no-op, and nested harness tests always run with it off.
+Hand-authored checkpoints produced almost no evidence, so the harness now emits shadow checkpoints itself wherever it already has a deterministic oracle. `scripts/phase_checkpoint.py` derives enum-only signals and never includes paths, prompts, diffs, command text, run ids, or hashes. Everything is gated by `HARNESS_JEV_CHECKPOINTS=1` (exported by `scripts/jev-enable.sh`); without it every call is a silent no-op, and nested harness tests always run with it off. These seams stay shadow observations whatever `harness jev` says: the gates they predict are mechanical, so there is no decision to hand over. The one exception is the session-start route, which is the delegated route to follow when the switch is on.
 
 | Seam | Family / question version | Baseline | Oracle that labels it |
 | --- | --- | --- | --- |
@@ -95,7 +95,7 @@ Hand-authored checkpoints produced almost no evidence, so the harness now emits 
 | `verify.sh` before checks | `evidence_assessment` / `verify-predict-2` | `run_full_verification` | that verification's exit code |
 | `review.sh` after verification | `handoff_assessment` / `review-handoff-2` | `ready_for_handoff` or `needs_more_work` | `review done`: loop count since the checkpoint |
 | third identical shell command (hook) | `progress_assessment` / `tool-repeat-2` | `retry_same_command` | whether the command recurred, or the run looped, before its phase and run ended |
-| session start in a harness target (hook) | task-entry route (`scripts/harness route`, shadow) | existing command | none automatic |
+| session start in a harness target (hook) | task-entry route (`scripts/harness route`; shadow, or active when `harness jev` is on) | existing command | none automatic |
 
 ### Facts every automatic checkpoint receives
 

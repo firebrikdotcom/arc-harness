@@ -24,6 +24,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from run_paths import records_dir  # noqa: E402
+import jev_delegation  # noqa: E402
 KINDS = {"change", "bug", "review", "research", "question", "ops"}
 AREAS = {"mobile", "frontend", "backend", "infrastructure", "docs", "other"}
 ACTIONS = {"start_routine_agent", "run_targeted_check", "start_deep_agent", "ask_for_missing_input"}
@@ -217,14 +218,45 @@ def rollout_bucket(data: dict[str, Any]) -> int:
     return int.from_bytes(hashlib.sha256(canonical.encode("utf-8")).digest()[:4], "big") % 100
 
 
+def switch_state() -> dict[str, Any]:
+    """The delegation switch; a corrupt switch file is an input error, not a crash."""
+    try:
+        return jev_delegation.state()
+    except jev_delegation.SwitchError as error:
+        raise InputError(str(error)) from error
+
+
+def pinned_model() -> str:
+    try:
+        return jev_delegation.pinned_model()
+    except jev_delegation.SwitchError as error:
+        raise InputError(str(error)) from error
+
+
+def resolve_mode(requested: str | None) -> tuple[str, str]:
+    """The mode to route in and where it came from: the flag, the switch, or the default."""
+    if requested:
+        return requested, "flag"
+    switch = switch_state()
+    return switch["mode"], ("delegation" if switch["enabled"] else "default")
+
+
 def active_eligible(router: Path) -> tuple[bool, str]:
-    if os.environ.get("HARNESS_TYPESAFE_ACTIVE") != "1":
-        return False, "set HARNESS_TYPESAFE_ACTIVE=1 after reviewing the outcome report"
-    model = os.environ.get("TYPESAFE_MODEL", "jev-latest")
+    delegated = switch_state()["enabled"]
+    if os.environ.get("HARNESS_TYPESAFE_ACTIVE") != "1" and not delegated:
+        return False, "run 'harness jev on' or set HARNESS_TYPESAFE_ACTIVE=1 after reviewing the outcome report"
+    model = pinned_model()
     if model.endswith("-latest"):
-        return False, "active routing requires an exact model pin"
-    if os.environ.get(ACTIVATION_ENV) == "1":
+        return False, "active routing requires an exact model pin (TYPESAFE_MODEL or harness jev on --model)"
+    if delegated or os.environ.get(ACTIVATION_ENV) == "1":
+        # The switch and the operator flag are explicit acknowledgements; the
+        # recorded-outcome evidence is reported by `harness jev status`, not required.
         return True, ""
+    return evidence_gate(router, model)
+
+
+def evidence_gate(router: Path, model: str) -> tuple[bool, str]:
+    """The recorded-outcome gate: 30 correct shadow task-entry outcomes in this exact cohort."""
     try:
         version = policy_version(router)
     except OSError as error:
@@ -278,8 +310,11 @@ def invoke_router(state: dict[str, Any], router: Path, mode: str) -> tuple[dict[
     command = [sys.executable, str(router), "route", "--strict", "--decision-family", "task_entry", "--policy-version", policy_version(router)]
     if mode == "shadow":
         command.append("--shadow")
+    # The router requests the model the harness pins, whether the pin comes from the shell or the switch.
+    environment = {**os.environ, "TYPESAFE_MODEL": pinned_model()}
     try:
-        result = subprocess.run(command, input=json.dumps(state), text=True, capture_output=True, timeout=35, check=False)
+        result = subprocess.run(command, input=json.dumps(state), text=True, capture_output=True, timeout=35,
+                                check=False, env=environment)
     except (OSError, subprocess.TimeoutExpired) as error:
         return None, f"router unavailable: {error}"
     if result.returncode:
@@ -332,12 +367,15 @@ def audit_route_record(record_path: Path) -> None:
         print(result.stderr.strip(), file=sys.stderr)
 
 
-def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str) -> dict[str, Any]:
+def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str | None) -> dict[str, Any]:
+    """Route one task. MODE None means: active when the delegation switch is on, else shadow."""
     data = load_metadata(metadata)
     fixed = deterministic_route(data)
     answer = error = None
     history: dict[str, str] | None = None
+    mode, mode_source = resolve_mode(mode)
     routing_mode = mode
+    delegation_gate = None
     # Hard deterministic gates do not depend on rollout configuration.
     percentage = DEFAULT_ROLLOUT_PERCENT if fixed else rollout_percent()
     bucket = None
@@ -348,12 +386,16 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
     else:
         if mode == "active":
             eligible, gate_reason = active_eligible(router)
-            if not eligible:
+            if not eligible and mode_source == "flag":
                 raise InputError(f"active routing is gated: {gate_reason}")
-            operator_activation = os.environ.get(ACTIVATION_ENV) == "1"
-            bucket = rollout_bucket(data)
-            if bucket >= percentage:
-                routing_mode = "shadow"
+            if not eligible:
+                # The switch is on but a requirement is missing: route in shadow and say why.
+                routing_mode, delegation_gate = "shadow", gate_reason
+            else:
+                operator_activation = os.environ.get(ACTIVATION_ENV) == "1"
+                bucket = rollout_bucket(data)
+                if bucket >= percentage:
+                    routing_mode = "shadow"
         history = history_facts(history_db(project, db_root))
         answer, error = invoke_router(api_state(data, history), router, routing_mode)
         if answer is None:
@@ -366,13 +408,15 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
             model = answer.get("model")
             if not isinstance(model, dict):
                 model = {}
-            if routing_mode == "active" and (model.get("returned") != os.environ.get("TYPESAFE_MODEL", "jev-latest") or model.get("drift")):
+            if routing_mode == "active" and (model.get("returned") != pinned_model() or model.get("drift")):
                 recommendation, reason, source = "default", "model drift or missing returned model", "fallback"
     record: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "at": datetime.now(timezone.utc).isoformat(),
         "project": str(project.resolve()),
         "mode": mode,
+        "mode_source": mode_source,
+        "delegation": mode_source == "delegation",
         "routing_mode": routing_mode,
         "source": source,
         "recommendation": recommendation,
@@ -383,6 +427,8 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
     }
     if history is not None:
         record["history"] = history
+    if delegation_gate:
+        record["delegation_gate"] = delegation_gate
     if bucket is not None:
         record["rollout_bucket"] = bucket
         record["rollout_selected"] = routing_mode == "active"
@@ -403,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", required=True, type=Path, help="compact enum-only task metadata JSON")
     parser.add_argument("--project", type=Path, default=Path.cwd())
-    parser.add_argument("--mode", choices=("shadow", "active"), default="shadow")
+    parser.add_argument("--mode", choices=("shadow", "active"), default=None,
+                        help="default: active when 'harness jev status' is on, otherwise shadow")
     parser.add_argument("--router", type=Path, default=Path(os.environ.get("HARNESS_TYPESAFE_ROUTER", str(Path.home() / ".agents/skills/typesafe-routing/scripts/route.py"))))
     parser.add_argument("--db-root", type=Path, default=Path(os.environ.get("HARNESS_DB_ROOT", str(ROOT / ".harness-db"))))
     args = parser.parse_args(argv)

@@ -54,6 +54,7 @@ grep '^- Before' "$JEV_DOC" | sed 's/^[^`]*`//; s/`$//' > "$TMP_ROOT/triggers"
   cd "$HARNESS_ROOT_UNDER_TEST"
   export HARNESS_TYPESAFE_ROUTER="$HARNESS_ROOT_UNDER_TEST/tests/fake_router.py"
   export HARNESS_DB_ROOT="$TMP_ROOT/db" FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
+  export HARNESS_CONFIG_HOME="$TMP_ROOT/config" TYPESAFE_MODEL=fixture HARNESS_JEV_DELEGATION=off
   while IFS= read -r trigger; do
     eval "$trigger" > "$TMP_ROOT/trigger.out" 2>&1 || fail "trigger command failed: $(cat "$TMP_ROOT/trigger.out")"
     grep -q '"advisory": true' "$TMP_ROOT/trigger.out" || fail "trigger command was not evaluated as advice"
