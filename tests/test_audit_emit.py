@@ -38,6 +38,7 @@ class AuditEmitterTests(unittest.TestCase):
         self.thread.start()
         self.temp = tempfile.TemporaryDirectory(prefix="harness-audit-emitter-")
         self.addCleanup(self.temp.cleanup)
+        self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.record = Path(self.temp.name) / "route.json"
         self.record.write_text(json.dumps({
@@ -54,6 +55,8 @@ class AuditEmitterTests(unittest.TestCase):
         self.env = {
             **os.environ,
             "HARNESS_AUDIT_ENABLED": "1",
+            "HARNESS_AUDIT_SETTINGS": str(Path(self.temp.name) / "settings.json"),
+            "HARNESS_AUDIT_OUTBOX": str(Path(self.temp.name) / "outbox.sqlite"),
             "HARNESS_AUDIT_URL": f"http://127.0.0.1:{self.server.server_port}",
         }
 

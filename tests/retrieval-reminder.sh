@@ -100,6 +100,11 @@ silent "malformed payload"
 # 5. A retrieval record for the live run suppresses the reminder; one from another run does not.
 mkdir -p "$DB/runs/run-1" "$DB/retrieval"
 printf 'run-1\n' > "$DB/runs/current"
+for session in s-three s-four s-paused s-complete; do
+  pointer=$(sh scripts/run-paths.sh current "$DB" --session-id "$session")
+  mkdir -p "$(dirname "$pointer")"
+  printf 'run-1\n' > "$pointer"
+done
 printf 'RUN_ID=run-1\nRUN_STATUS=active\n' > "$DB/runs/run-1/state"
 printf 'RECORD_KIND=jevgrep\nRUN_ID=run-0\n' > "$DB/retrieval/old.state"
 run Grep "$PROJECT" s-three

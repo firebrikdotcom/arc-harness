@@ -50,7 +50,11 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
 
-Once registered, `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the Jev hooks resolve the target from the current directory or `--project` and use its private database at `targets/<id>/db/`: runs, `runs/current`, gate records, routes, advice, and pending oracles are per target, so parallel worktrees never share one active run. `scripts/harness-target.sh list` shows the registered targets. Manual `scripts/init.sh --project PATH` registers the target as well.
+Once registered, harness commands use the target database at `targets/<id>/db/`. Run directories and aggregate routing history remain per target, but each native session owns its current pointer at `runs/sessions/<sha256-session-id>/current` and its check records at `records/sessions/<sha256-session-id>/`. Session selection uses `HARNESS_SESSION_ID`, then `CODEX_THREAD_ID`, then `CLAUDE_SESSION_ID`. Commands may instead use `harness --session-id ID COMMAND`. A new session never adopts the legacy directory-wide run. Resume, clear, and compaction with the same native ID preserve the run, phase, budget, and pause. Completing review closes that run; the next `plan start` in the same session creates a fresh run. Genuine pauses within a session still require explicit user continuation.
+
+Without a native identity, manual commands retain `runs/current` and `records/` for compatibility. Set `HARNESS_SESSION_ID` consistently on phase commands, verification, review, and child processes when working manually across separate terminals. Existing legacy runs remain available to manual commands and are neither reset nor aborted. Check records include their run ID; an earlier run's record cannot satisfy a new session run's gate.
+
+The installed SessionStart adapter binds the payload identity before bootstrap and routing, and writes the native environment file independently of audit collection. Terminal commands use their native `CODEX_THREAD_ID`. The installed command observer selects the payload session's run. Run `scripts/install-hooks.sh` after updating to install these adapters; existing unrelated hook groups are preserved. New native sessions load the updated hook configuration; already running sessions keep their loaded hooks. `scripts/harness-target.sh list` shows registered targets.
 
 Detected bootstrap inputs:
 
@@ -72,10 +76,19 @@ Optional harness variables:
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
 - `HARNESS_ROOT`: harness root for `scripts/harness` when automatic discovery should be skipped.
 - `HARNESS_DB_ROOT`: harness database root for `scripts/harness`, `scripts/verify.sh`, `scripts/review.sh`, and the hooks. Defaults to `HARNESS_ROOT/.harness-db`. Registered targets keep their own state beneath it at `targets/<id>/db/`.
+- `HARNESS_SESSION_ID`: explicit run identity, ahead of `CODEX_THREAD_ID`, `CLAUDE_SESSION_ID`, and `CLAUDE_CODE_SESSION_ID`; hashed for on-disk pointer and record paths. Native resumes preserve identity.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
 - `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
 - `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
+- `HARNESS_BUDGET_REPEAT_FAILURES`: identical failures of one command in a row before the run pauses; default `2`, `0` disables.
+- `HARNESS_RUN_IDLE_HOURS`: idle hours before a run is stale and refused; default `24`, `0` disables.
+- `HARNESS_RETAIN_RUNS`: runs kept per database before `plan start` archives older finished ones; default `50`.
+- `HARNESS_CONFIRM_TTY`: the terminal `harness review submit` reads its confirmation from; default `/dev/tty`. Tests point it at a file. Never set it in the environment an agent starts from, and agent commands may not assign it.
+- `HARNESS_REVIEW_BASE`: commit the review packet's committed diff starts from; default the run's `CONTRACT_BASE`.
+- `HARNESS_CRITERION_TIMEOUT`: seconds each contract acceptance command may run at `build done`; default `900`.
+- `HARNESS_HOME`: the installed harness root for the guard-version check; defaults to the path `scripts/install-hooks.sh` records in `~/.config/harness/root`.
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.
+- `HARNESS_VERIFY_SCOPE=full`: disables the docs-only scope and runs every verification category.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
 - `HARNESS_TYPESAFE_ACTIVE`: set to `1` only after the active-routing outcome gate is satisfied and reviewed.
 - `HARNESS_TYPESAFE_ROLLOUT_PERCENT`: optional integer from `0` to `100`; in active mode, only that percentage of eligible tasks follows JEV's live recommendation. The cohort is stable as the percentage increases; default `100`.
@@ -156,14 +169,25 @@ for t in tests/*.sh; do sh "$t"; done
 
 ## Denylist
 
-`scripts/permit.sh` holds the allow-unless-denied rules. `schemas/denylist.default` is the harness default; a project replaces it entirely by adding `.harness-denylist` at its root. Each line is `command <regex>` (matched against the whole shell command) or `path <regex>` (matched against a write target, relative to the project root when inside it). The default denies destroying root, home, or `.git`, privilege escalation, piping downloads into a shell, force pushes and history rewrites, publishing, and any edit to the guard itself: `.claude/settings.json`, `scripts/hooks/`, `scripts/permit.sh`, `schemas/denylist.default`, `.harness-denylist`, and the trust and gate records.
+`scripts/permit.sh` holds the allow-unless-denied rules; with `python3` it runs `scripts/permit.py`. `schemas/denylist.default` is the harness default; a project replaces it entirely by adding `.harness-denylist` at its root. Each line is one of:
+
+- `command <regex>`: matched against the whole shell command, for destructive actions: destroying root, home, or `.git`, privilege escalation, piping downloads into a shell, force pushes and history rewrites, and publishing. Decisions that are not the agent's are refused on the parsed command, wherever they appear and however they are quoted: `harness abort`, `harness review submit`, `harness failure`, `harness launch`, `knowledge-trust.sh approve`, and setting the guard's own variables by assignment, `env`, or `export` (`HARNESS_HOOK_DISABLE`, `HARNESS_BUDGET_*`, `HARNESS_RUN_IDLE_HOURS`, `HARNESS_RETAIN_RUNS`, `HARNESS_HOME`, `HARNESS_DB_ROOT`, `HARNESS_REQUIRED_CHECKS`, `HARNESS_REVIEWER_CMD`, `HARNESS_REVIEW_BASE`, `HARNESS_CONFIRM_TTY`), whether by assignment, `+=`, `export`, `env`, `read`, `printf -v`, a `for` variable, a nameref, or `${NAME:=...}`. A command word that is a glob, a variable, `{}`, or an indirect runner (`script`, `flock`, `parallel`, ...) carrying a human-only subcommand is refused too. The default rules repeat the plain forms as text patterns.
+- `path <regex>`: matched against a write target, relative to the project root when inside it and absolute otherwise. It protects git internals, secrets, the guard itself (`.claude/settings.json`, `scripts/hooks/`, `scripts/permit.sh`, `scripts/permit.py`, `scripts/guard-version`, `schemas/denylist.default`, `.harness-denylist`), and the whole harness database `.harness-db/` (runs, contracts, failure counts, gate records), which only the harness scripts write.
+- `inline <regex>`: matched against inline interpreter code (`python -c`, `node -e`, heredocs fed to an interpreter, ...).
+
+Shell commands are parsed, not pattern-matched for paths. `permit.py` strips comments, follows `cd`/`pushd`/`popd`, `env -C`, `sh -c` (and `-ec`, `-xc`, ...), `eval`, command substitutions, and heredocs or here-strings fed to a shell, peels wrappers (`nice`, `timeout`, `env`, `command`, ...), and collects every file the command would write: redirections, `tee`, `cp`/`mv`/`install`/`ln`, `rm`/`rmdir`, `touch`, `mkdir`, `truncate`, `chmod`/`chown`, `dd of=`, `sed -i`, `perl -i`, `find -delete`/`-exec`, `git rm`/`mv`/`checkout`/`restore`, and `rsync`. Each target is resolved against the working directory and symlinks. Deleting, moving, or changing the mode of a directory is judged against every protected path beneath it; a glob or brace list against every protected path it could match; a target built from a variable (`"$D/scripts/hooks/x"`) by its literal suffix. Commands whose writes cannot be known (`xargs` into a writer, `tar`, `patch`, an interpreter run by `find -exec`) and commands that cannot be parsed are refused when any word in them names a protected path. Reading or naming a protected file is allowed; writing it is not. Write and Edit paths are resolved (`..`, `//`, symlinks) before the rules see them.
 
 ```sh
-scripts/permit.sh check --command "git push --force"     # exit 1, DENY with the rule
-scripts/permit.sh check --path .env                      # exit 1
-scripts/permit.sh rules                                  # print the effective rules
+scripts/permit.sh check --command "git push --force"                   # exit 1, DENY with the rule
+scripts/permit.sh check --command 'cat scripts/hooks/require-phase.sh'  # exit 0: a read
+scripts/permit.sh check --command 'echo x > scripts/hooks/a.sh'        # exit 1: a write target
+scripts/permit.sh targets --command 'cp a docs/b.md' --cwd .           # project files it would write
+scripts/permit.sh check --path .env                                    # exit 1
+scripts/permit.sh rules                                                # print the effective rules
 sh tests/permit.sh
 ```
+
+Without `python3`, the Node fallback (used by `scripts/action.sh`) applies only the `command` and `path` regexes and refuses any command that names a guard path; the phase guard itself refuses every shell call without `python3`, since it cannot know what the call writes.
 
 `scripts/action.sh validate` runs this check after schema validation. The phase guard hook runs it on every real Write, Edit, and Bash call, so the check and the action are the same event.
 
@@ -209,7 +233,61 @@ scripts/harness advise --context /path/to/decision-context.json
 scripts/harness budget --thread THREAD_ID --tokens 40000 --watch
 scripts/harness continue "<evaluation note>"
 scripts/harness abort "<reason>"
+scripts/harness contract set task.json      # or: contract waive "<reason>", contract show
+scripts/harness review submit findings.json
+scripts/harness brief
+scripts/harness prune --keep 20 --dry-run
 ```
+
+## Gates that decide done
+
+The model creates, the sensors produce evidence, and the harness decides. Each rule below is written in AGENTS.md, so the agent knows the goal, and enforced here, so it holds under load.
+
+### Task contract
+
+A run is bounded by a contract (`schemas/task.schema.json`, example `tasks/task.example.json`): the goal, the exact deliverables, constraints, non-goals (with optional path globs), and acceptance criteria. At least one criterion carries a `command` (an argv list), so a machine decides when the task is done. During planning, `harness contract set FILE` validates and stores it in the run (`runs/<id>/task.json`); `plan done` refuses without it. A run with nothing to accept records why with `harness contract waive "<reason>"`, and the waiver travels to the reviewer.
+
+- `build done` runs every acceptance command in the target root, after the denylist approves it, and refuses if one fails. Criteria without a command are listed for the reviewer.
+- `review done` lists every file changed since `plan done` (committed, uncommitted, untracked) and refuses if one falls under a non-goal path.
+
+### Evidence
+
+`scripts/verify.sh` fails when no check ran at all: an empty run is not evidence. A project that truly has nothing to check declares `allow-empty` in `.harness-required-checks`, and the run says so. `scripts/init.sh` records the categories a target has tooling for (`test`, `lint`) in the target's database (`targets/<id>/db/required-checks`), never in the project; a project file or `HARNESS_REQUIRED_CHECKS` wins.
+
+Verify and review records carry `PROJECT_ROOT` and `TREE_HASH`, a git tree of the project's files as they were on disk (`scripts/tree-hash.sh`; tracked edits plus untracked files that are not ignored, less the phase notes `progress.md`, `tasks/`, `task.json`, and `review-findings.json` at the project root; outside a git work tree it is a content hash of the project's files). `build done` and `review done` accept a record only for the run's own project (`RUN_TARGET`, fixed at `plan start`), and they and the todo gate's completion check compare the tree with the current files: any project edit after the check voids it, and writes outside the project (notes, memory, scratch files) do not.
+
+### Independent review
+
+`scripts/review.sh` runs verify, prints the diff, and writes `review-packet.md` into the records: a brief for a reviewer who did not write the change, the tree hash, a findings template, the task contract, the full verification output, and the diff. The packet holds no conversation, so the reviewer judges the change rather than the narrative.
+
+- When a person has written a reviewer command into `.harness-db/reviewer` (one line; agents cannot write the harness database), review.sh runs it: `sh -c "$(cat .harness-db/reviewer)" reviewer PACKET FINDINGS_OUT`, for example a `claude -p` or `codex exec` wrapper that reads the packet and writes JSON. Valid findings for the current files are stored.
+- Otherwise the agent hands the packet to a fresh-context reviewer (a subagent), and a person stores its JSON from their own terminal: `harness review submit FILE`. Submit asks for `yes` typed on the terminal (`/dev/tty`), which an agent's shell does not have, so no spelling of the command lets the author approve its own work; the guard also refuses it from tool calls. `submit` refuses findings for files that have since changed.
+
+The diff in the packet includes the commits made since the run's plan (`CONTRACT_BASE`), or since `HARNESS_REVIEW_BASE` when a person sets it, as well as uncommitted and untracked changes.
+
+Findings follow `schemas/review-findings.schema.json`: `tree_hash`, `reviewer`, a `verdict` (`approve` or `block`), and findings with severity, file, line, claim, evidence, and status. `review done` requires an `approve` verdict for the current tree with no open blocker or major finding; `scripts/review_findings.py check` prints each open one.
+
+### Repeated-failure stop
+
+`scripts/failure_budget.py` runs on every shell call's result (PostToolUse, and PostToolUseFailure in Claude Code; installed by `scripts/install-hooks.sh`). It keys a failure by the command and signs it by the normalized error (numbers, hashes, and temporary paths removed) and reports it to `harness failure`. The same command failing with the same error twice in a row (`HARNESS_BUDGET_REPEAT_FAILURES`, default 2; 0 disables) pauses the run on the `repeat_failure` budget, and the notice goes back to the agent. A different error restarts the count; a success clears it. Resuming needs the user and a `harness continue` note that states the new approach, which clears the count. Only digests and the error's first line are stored. The guard refuses `harness failure` from a tool call, so the agent cannot reset it.
+
+### Sessions, stale runs, and the guard version
+
+The guard binds to the session in each hook payload, so every session uses its own run and a new session must open its own phase. `CLAUDE_CODE_SESSION_ID` is recognised alongside `HARNESS_SESSION_ID`, `CODEX_THREAD_ID`, and `CLAUDE_SESSION_ID`. A run idle longer than `HARNESS_RUN_IDLE_HOURS` (default 24; 0 disables) is stale: `status` shows it, the guard refuses it, and `plan start` marks it expired and opens a new run.
+
+`scripts/guard-version` stamps the guard. `scripts/install-hooks.sh` records the installed checkout in `~/.config/harness/root` (or `HARNESS_HOME`); a checkout whose guard is older, such as a stale worktree of the harness, refuses work except `git` until it is updated.
+
+### What the guard can and cannot stop
+
+Two gates do not depend on how a command is spelled. Review approval needs `yes` typed on a terminal, and the reviewer command lives in the harness database, which the agent cannot write through the guard. Everything else the guard enforces by reading the command. That stops the mistakes and shortcuts an agent actually makes: editing outside build, skipping verification, resetting a failure count, retuning a budget, or touching the guard, its state, secrets, or git internals through the many shell spellings tested in `tests/permit.sh` and `tests/harness-hook.sh`. Four independent reviews probed for bypasses, and every reproduction is a case there.
+
+A parser reads a command; it cannot run it. Shell indirection it has no case for, and above all code the agent writes and then runs (a script file, or interpreter code that builds a path at run time), can still reach what the guard protects, because the agent runs as your user. For a hard barrier against a deliberately adversarial agent, run it in an OS sandbox that denies writes to `scripts/hooks/`, `scripts/permit.*`, `scripts/guard-version`, `schemas/`, `.claude/settings*.json`, and `.harness-db/` (for example Claude Code's sandbox filesystem rules), and run `abort` and `review submit` in a terminal the agent does not control.
+
+### Brief, map, and retention
+
+At session start the hook prints `harness brief`: this session's run or the latest one, its contract, any pause and its reason, the last ten recorded steps (per-tool noise hidden), and the project map. `scripts/init.sh` regenerates the map (`targets/<id>/map.md`) at every init: top-level paths with file counts, the checks verify can run, and the docs to start from.
+
+`plan start` archives finished runs beyond the newest `HARNESS_RETAIN_RUNS` (default 50) into `runs/archive/<id>.tar.gz`; a run some session still has active or paused is never archived. `harness prune --keep N [--dry-run]` does the same on demand.
 
 ### Task-entry routing
 
@@ -243,7 +321,7 @@ scripts/harness launch --state /tmp/task-metadata.json --project /path/to/projec
 
 #### Target history in the routed state
 
-Every call that reaches TypeSafe also carries `signals.history`, seven bucketed enums that `scripts/task_route.py` computes from the target's own database (the 20 most recent runs under `runs/`, their `state` and `log`, and `records/verify.state`):
+Every call that reaches TypeSafe also carries `signals.history`, seven bucketed enums that `scripts/task_route.py` computes from the target's own database (the 20 most recent runs under `runs/`, their `state` and `log`, and the selected session's `verify.state`):
 
 | Fact | Meaning | Values |
 | --- | --- | --- |
@@ -369,8 +447,8 @@ Phase rules:
 - `build start` fails until `plan done` has run.
 - `review start` fails until `build done` has run.
 - `PHASE done` fails unless that phase is active.
-- `build done` fails unless `.harness-db/records/verify.state` exists, was written after `build start`, and reports `EXIT=0`. `scripts/verify.sh` writes that record on every run, pass or fail.
-- `review done` fails unless `.harness-db/records/review.state` was written after `review start`. `scripts/review.sh` writes it when it reaches the end.
+- `build done` fails unless the selected session's `verify.state` exists, was written after `build start`, and reports `EXIT=0`. `scripts/verify.sh` writes that record on every run, pass or fail.
+- `review done` fails unless the selected session's `review.state` was written after `review start`, belongs to this run, and reports a passing verification. `scripts/review.sh` writes it when it reaches the end.
 - Re-starting a phase that is already done counts against the loop budget.
 - After `review done` or `abort`, only `plan start` is accepted; it opens a new run.
 
@@ -439,7 +517,7 @@ It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to
 
 ## Agent Guide Block
 
-The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness Phases" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. Its Jev paragraph names three concrete points to ask Jev (grep versus retrieval in an unfamiliar target, a review finding's severity, a handoff with unresolved failures), each with an exact flag-form `harness advise --family ...` command; `tests/install-guides.sh` runs those commands against the offline fake router. For a project outside the harness root the block carries `HARNESS_ROOT=... /path/to/harness/scripts/harness` so the CLI can find its state.
+The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing; a `CLAUDE.md` that imports `@AGENTS.md` is left alone. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. The block is the short gated workflow (under 350 words, which `tests/install-guides.sh` enforces) and points at these docs; it is read at every session start, so detail lives here instead. The three optional Jev trigger commands are in [Jev decision checkpoints](jev-checkpoints.md), and the test runs them against the offline fake router. For a project outside the harness root the block uses the absolute CLI path.
 
 ```sh
 make install-guides
@@ -451,11 +529,11 @@ The `Makefile` deliberately has no `format`, `lint`, `typecheck`, `test`, or `bu
 
 ## Phase Guard Hook
 
-`.claude/settings.json` registers `scripts/hooks/require-phase.sh` as a Claude Code `PreToolUse` hook for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. The hook asks `scripts/harness status` for the run state and blocks the tool call (exit 2) unless a phase is active and the run is not paused, complete, or aborted. Bash calls whose whole command is `scripts/harness ...` or `scripts/action.sh validate ...` are allowed so the agent can open a phase; a chained command such as `scripts/harness plan start; rm -rf build` is not. The hook permits `scripts/harness continue` because it cannot inspect chat context; agents may use it only after an explicit current-conversation user instruction and must retain the required evaluation note. It continues to refuse agent-issued `scripts/harness abort` and `scripts/knowledge-trust.sh approve`.
+`.claude/settings.json` registers `scripts/hooks/require-phase.sh` as a Claude Code `PreToolUse` hook for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, and `Bash`. The hook binds to the session in its payload, asks `scripts/harness status` for that session's run, and blocks the tool call (exit 2) unless a phase is active and the run is not paused, stale, complete, aborted, or expired. A Bash call that is one plain bookkeeping invocation of this harness's own CLI (`plan`, `build`, `review start|done`, `status`, `step`, `continue`, `contract`, `brief`, `workflow`, `prune`, `advise`, `route`, or `scripts/action.sh validate ...`; optionally after `cd DIR &&`; the executable resolving to this checkout; no `--session-id`) skips the other checks so the agent can open a phase. Any other subcommand, such as `budget`, is judged like every command; a chained command such as `scripts/harness plan start; rm -rf build`, a newline, a redirect, a substitution, or another binary named `scripts/harness` is judged like any other command. The hook permits `scripts/harness continue` because it cannot inspect chat context; agents may use it only after an explicit current-conversation user instruction and must retain the required evaluation note. It refuses agent-issued `scripts/harness abort`, `review submit`, `failure`, and `scripts/knowledge-trust.sh approve`, alone or chained. Once a phase is active, it also refuses calls in a project other than the run's own (`Target:` in `harness status`).
 
-Before the phase check, the hook applies the denylist to the actual command or write path and refuses to work while a `knowledge/` folder is unapproved. Every allowed call is then recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. Use `HARNESS_BUDGET_TIME_MIN=<n>` only for a deliberately time-boxed run. Tokens stay `unknown` because the hook payload carries no token counts.
+Before the phase check, the hook refuses a guard older than the installed harness, applies the denylist to the files the command would write or the write path, and refuses to work while a `knowledge/` folder is unapproved. Plan and review do not change the project: outside build, project writes are blocked except their own artifacts (`progress.md`, `tasks/`, `task.json`, `review-findings.json`); files outside the project stay writable. Every allowed call is then recorded with `scripts/harness step --note "tool:NAME"`, so the step budget counts real tool calls instead of self-reports. Use `HARNESS_BUDGET_TIME_MIN=<n>` only for a deliberately time-boxed run. Tokens stay `unknown` because the hook payload carries no token counts.
 
-A person can switch the hook off for one session by exporting `HARNESS_HOOK_DISABLE=1` in the environment Claude Code starts from. The denylist refuses that string inside agent commands, so the agent cannot do it for itself.
+A person can switch the hook off for one session by exporting `HARNESS_HOOK_DISABLE=1` in the environment Claude Code starts from. The denylist refuses setting that variable inside agent commands, so the agent cannot do it for itself; mentioning it (for example in a grep) is fine.
 
 The hook is enforcement for Claude Code only. Other agents still rely on the written rules. Run its regression test with:
 
@@ -463,9 +541,13 @@ The hook is enforcement for Claude Code only. Other agents still rely on the wri
 sh tests/harness-hook.sh
 ```
 
-`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing `.harness-db/records/verify.state`, which `scripts/harness build done` requires.
+`scripts/verify.sh` automatically detects common Make, JavaScript/TypeScript, PHP, Go, Rust, and Bash commands. It runs available checks and skips missing checks clearly, and it never runs a command that rewrites files: only `format-check`, `fmt-check`, `check-format` Make targets and `format:check` or `prettier:check` scripts are used, and a plain `format` target or script is reported as a skip. When the project being verified is this harness itself (it has `scripts/harness` and `tests/*.sh`), the `harness:tests` check runs every script in `tests/`. Each run ends by writing its selected session's `verify.state` (legacy manual runs use `.harness-db/records/verify.state`), which `scripts/harness build done` requires.
 
-Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements.
+Projects can require verification categories by adding `.harness-required-checks` at the target root. Use one or more of `format`, `lint`, `typecheck`, `test`, and `build`, separated by whitespace or lines. A required category fails verification when it runs no checks. `HARNESS_REQUIRED_CHECKS` overrides the file for temporary or CI-specific requirements, and a registered target without either uses the categories `scripts/init.sh` recorded in its database. A run where no check ran fails unless the list includes `allow-empty`.
+
+Verification narrows itself for documentation-only work. It lists every file changed since the merge base with `@{upstream}` (falling back to `origin/HEAD`): committed, uncommitted, and untracked, with renames split into old and new paths. If every path matches the docs patterns, only format and lint run; typecheck, test, and build are skipped, required or not, and the run record carries `SCOPE=docs-only`. Any doubt runs the full set: no git, no base, no changed files, or a single non-doc path.
+
+The default docs patterns are `*.md`, `*.mdx`, and `*.markdown`, excluding `AGENTS.md`, `CLAUDE.md`, and `SKILL.md` at any depth because tests often assert on agent instructions. A target can replace them with `.harness-docs-paths`: one `case` pattern per line, `!` to exclude, `#` for comments. List only paths no test reads; CI still runs the full suite.
 
 Detection order:
 
@@ -513,7 +595,7 @@ With `HARNESS_JEV_CHECKPOINTS=1`, `harness plan done`, `harness build start`, `s
 
 ### Jev hooks for interactive sessions
 
-Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/hooks/jev-observe.sh` (PreToolUse for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. That checkpoint is labeled mechanically at a later checkpoint event: stuck when the same command recurs or the run loops afterwards, not stuck when its phase and run end without either. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
+Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one shadow task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line. `scripts/observe_commands.py` (installed PreToolUse observer for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. That checkpoint is labeled mechanically at a later checkpoint event: stuck when the same command recurs or the run loops afterwards, not stuck when its phase and run end without either. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
 
 ```sh
 scripts/install-hooks.sh            # ~/.claude/settings.json and ~/.codex/hooks.json, with backups
@@ -521,4 +603,47 @@ scripts/install-hooks.sh --dry-run
 scripts/install-hooks.sh --uninstall
 ```
 
-The installer only touches hook groups whose command points at these scripts, and writes the Grep/Glob reminder only to the Claude Code settings file. None of these hooks replaces `scripts/hooks/require-phase.sh`, which remains the only enforcement hook.
+The installer only touches hook groups whose command points at these scripts, and writes the Grep/Glob reminder only to the Claude Code settings file. It also installs the enforcing `scripts/failure_budget.py` (repeated-failure stop) and `scripts/workflow_gate.py` (todo gate) hooks and records the installed harness root for the guard-version check. None of them replaces `scripts/hooks/require-phase.sh`, the phase guard.
+
+
+### Audit collection controls and Workflow
+
+The audit workbench at `http://127.0.0.1:18080/` provides persisted, independent Jev and Workflow collection switches. Install the additive collector with `scripts/install-hooks.sh`, then start or restart the audit service. `/workflow` groups newly collected events by native session and task. See `services/harness-audit/README.md` for lifecycle coverage, metadata commands, API contracts, and limitations.
+
+- `HARNESS_AUDIT_SETTINGS`: shared local JSON switches (default harness `.harness-db/audit-settings.json`); use the same path for the service and collectors.
+- `HARNESS_AUDIT_OUTBOX`: durable SQLite delivery queue (default harness `.harness-db/audit-outbox.sqlite`); queued records retry while the service runs and are dropped when their collection category is disabled.
+- `HARNESS_WORKFLOW_STATE`: local session/task bindings (default harness `.harness-db/workflow-state.sqlite`).
+- `HARNESS_SESSION_ID`: exact native session binding for harness child commands; `CODEX_THREAD_ID` and `CLAUDE_SESSION_ID` are also recognized. Hooks use the session ID in their payload. Missing IDs are not guessed.
+- `HARNESS_AUDIT_ENABLED=0`: hard process opt-out. A persisted settings file otherwise controls both categories; before it exists, legacy `=1` enables collection.
+- `HARNESS_AUDIT_URL`: emission destination, now defaulting to `http://127.0.0.1:18080`.
+
+Collection switches do not change Jev's evaluations or routing. The dashboard's **Store user prompts** switch controls `workflow_prompts` (default false). When both it and Workflow are enabled, UserPromptSubmit hooks store complete prompts in UTF-8 chunks and the Workflow page shows them, labeling the first captured prompt as the initial goal. Turning it off stops capture and discards queued prompt records; saved history remains. Older settings files default to prompt capture off. Hook guidance reports the current configuration at session start; hooks re-read settings on every submission. Tool content is excluded; curated task/decision descriptions are explicitly supplied through `harness workflow`. Disabling a category retains stored history. The service delivery worker uses `python3` and the companion harness scripts. Telemetry delivery fails open. The separate todo gate blocks covered local execution tools and premature turn completion; it remains active even when collection is disabled. Existing authorization and phase checks still apply.
+
+The installed audit service sets `APP_URL=0.0.0.0` in launchd/systemd and listens on every IPv4 interface at port 18080. Open it through localhost or a machine IP address; telemetry can continue using `127.0.0.1`. The environment example uses the same binding. Existing `.env` files are preserved; installed service configuration overrides their host setting.
+
+Workflow session selectors show a label of at most five words, preferring the first named task, then the native session title, then the first captured prompt. IDs appear in Session metadata alongside the agent, model, and status. Native hooks identify their runtime explicitly and read model/title metadata from the exact matching local transcript or native session metadata database when available; unavailable fields show Unknown. Runtime changes remain in the timeline. `harness workflow refresh-metadata` recovers metadata for already observed sessions without importing prompt or tool content.
+
+Session metadata also displays the full working-directory path (`cwd`). The native hook directory takes precedence over recovered metadata. Directory changes are retained in the timeline; paths preserve case and spaces. Unavailable directories show Unknown.
+
+
+## Audited todo enforcement
+
+Install or update native hooks with `scripts/install-hooks.sh` on each machine, then restart existing native sessions to load them. The additive `scripts/workflow_gate.py` hook requires a structured plan, reconfirmation or revision for every prompt, and one active todo before covered local execution. Reads need no todo: Read, Grep, and Glob, plus shell commands that only read (`ls`, `cat`, `grep`, `git status`/`log`/`diff`, `find` without `-delete`/`-exec`, `sed -n`, ...), alone or joined with `&&`, `;`, or pipes, as long as nothing is redirected to a file and nothing is substituted with `$(...)`. Harness bookkeeping and the `scripts/verify.sh` and `scripts/review.sh` sensors also need none, so the checks completion depends on can always run. Inside an agent (`CLAUDECODE=1` or `CODEX_SANDBOX`), `harness workflow gate` without a session ID fails closed; a human at a terminal has no plan to check. `scripts/workflow_todos.py` keeps policy state in the local Workflow database even when audit collection is disabled. Collection settings control visibility and storage of emitted events, not this policy. `todo plan`, `update`, `confirm`, and `exempt` print one summary line; `todo show` prints the full list.
+
+```sh
+scripts/harness workflow task --name "Repair session navigation" --description "Fix navigation and verify the served dashboard"
+scripts/harness workflow todo plan --items '[{"id":"repair","description":"Repair navigation","criterion":"Navigation regression passes"},{"id":"checks","description":"Verify and review","criterion":"Fresh full verification and review pass"}]' --reason "Complete initial plan"
+scripts/harness workflow todo update --id repair --status in_progress --reason "Start repair"
+scripts/harness workflow todo update --id repair --status completed --evidence "Navigation regression passes" --reason "Repair verified"
+scripts/harness workflow todo update --id checks --status in_progress --reason "Run required checks"
+scripts/verify.sh --project /absolute/path/to/project
+scripts/review.sh --project /absolute/path/to/project
+scripts/harness workflow todo update --id checks --status completed --evidence "Full verification and review passed" --reason "Checks complete"
+scripts/harness workflow outcome --status completed --description "Navigation repaired and reviewed"
+```
+
+Add `--session-id ACTUAL_SESSION_ID` to Workflow commands outside a native session. `todo show` displays IDs, criteria, state and confirmation. For a new prompt, use `todo confirm --reason SUMMARY` or submit the complete revised list with `todo plan`. Keep IDs for retained items; omissions are audited removals with a reason. Changed criteria reset the item and require fresh checks. Completion requires evidence on each completed item, all required items resolved, and passing verify/review records made after the latest scope revision whose tree hash still matches the project's files (records without one fall back to the latest execution). Switching to a new task cannot silently discard unfinished required todos. Questions that require no execution use `todo exempt --reason SUMMARY`; unfinished execution plans must first be resolved or explicitly reported blocked.
+
+The task card displays criteria, status, evidence, and revision history. Select a todo to filter its timeline, including correlated tools and checks. Historical tasks have no fabricated todo list.
+
+The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return exit 2 with guidance. Telemetry outages do not bypass it. This enforces declared plans on covered native tools, not semantic completeness or a security sandbox: specialized tools outside native hook coverage, hook timeouts, and runtime configuration can bypass enforcement. Codex hosted WebSearch has no PreToolUse; a returned process handle is not tool completion. Stop may request another continuation rather than cancel a session. Existing phase/denylist gates and permissions remain authoritative. Review phase completion may precede deployment todos; explicit completed outcomes and Stop enforce the full task criteria.

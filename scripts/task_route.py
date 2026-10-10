@@ -22,6 +22,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+from run_paths import records_dir  # noqa: E402
 KINDS = {"change", "bug", "review", "research", "question", "ops"}
 AREAS = {"mobile", "frontend", "backend", "infrastructure", "docs", "other"}
 ACTIONS = {"start_routine_agent", "run_targeted_check", "start_deep_agent", "ask_for_missing_input"}
@@ -144,7 +146,7 @@ def history_facts(db_root: Path) -> dict[str, str]:
         looped += used > 0
         loops += used
         aborted += state.get("RUN_STATUS") == "aborted"
-    last = read_kv(db_root / "records" / "verify.state").get("EXIT")
+    last = read_kv(records_dir(db_root) / "verify.state").get("EXIT")
     return {
         "prior_runs": count_bucket(len(recent)),
         "verified_builds": count_bucket(verified),

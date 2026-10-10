@@ -66,8 +66,9 @@ mkdir -p "$marks" 2>/dev/null || exit 0
 touch "$marks/$key" 2>/dev/null || exit 0
 
 run_id=""
-if [ -f "$DB_ROOT/runs/current" ]; then
-  run_id=$(head -n 1 "$DB_ROOT/runs/current" 2>/dev/null || :)
+current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$DB_ROOT" --session-id "$session") || exit 0
+if [ -f "$current_file" ]; then
+  run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
   # A budget pause keeps the same live run; jg.sh records its id either way.
   if [ -n "$run_id" ] && ! grep -Eq '^RUN_STATUS=(active|paused)$' "$DB_ROOT/runs/$run_id/state" 2>/dev/null; then
     run_id=""

@@ -6,13 +6,18 @@
 # existing harness entries are replaced, other hooks are preserved, and each
 # file is backed up before it is rewritten.
 #
-#   scripts/install-hooks.sh [--claude PATH] [--codex PATH] [--uninstall] [--dry-run]
+#   scripts/install-hooks.sh [--claude PATH] [--codex PATH] [--root-file PATH] [--uninstall] [--dry-run]
+#
+# It also records this checkout as the installed harness root (default
+# ~/.config/harness/root); the phase guard refuses to run from a checkout whose
+# scripts/guard-version is older than the installed one.
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 CODEX_HOOKS="${HOME}/.codex/hooks.json"
+ROOT_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/harness/root"
 MODE=install
 DRY_RUN=0
 
@@ -20,10 +25,11 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --claude) CLAUDE_SETTINGS=$2; shift 2 ;;
     --codex) CODEX_HOOKS=$2; shift 2 ;;
+    --root-file) ROOT_FILE=$2; shift 2 ;;
     --uninstall) MODE=uninstall; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
-      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) printf 'FAIL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -41,23 +47,45 @@ from pathlib import Path
 root, mode, dry_run, *targets = sys.argv[1:]
 dry_run = dry_run == "1"
 SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
-OBSERVE = str(Path(root) / "scripts/hooks/jev-observe.sh")
+OBSERVE = str(Path(root) / "scripts/observe_commands.py")
+SESSION_BIND = str(Path(root) / "scripts/session_hook.py")
 REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
+WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
+TODO_GATE = str(Path(root) / "scripts/workflow_gate.py")
+FAILURES = str(Path(root) / "scripts/failure_budget.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
-           "scripts/retrieval-reminder.sh")
+           "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py",
+           "scripts/session_hook.py", "scripts/observe_commands.py", "scripts/failure_budget.py")
+# The repeated-failure stop reads each shell call's outcome.
+FAILURE_HOOK = {"matcher": "Bash|shell|exec_command", "hooks": [{"type": "command", "command": f'python3 "{FAILURES}"', "timeout": 30}]}
 SHARED = {
-    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'"{SESSION}"', "timeout": 30}]}],
-    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'"{OBSERVE}"', "timeout": 15}]}],
+    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}],
+    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}],
+    "PostToolUse": [FAILURE_HOOK],
 }
-# Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only.
+# Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only;
+# Claude Code reports failed calls on their own event.
 CLAUDE_ONLY = {
     "PreToolUse": [{"matcher": "Grep|Glob", "hooks": [{"type": "command", "command": f'"{REMIND}"', "timeout": 10}]}],
+    "PostToolUseFailure": [FAILURE_HOOK],
 }
 
 
 def entries_for(index: int) -> dict:
     extra = CLAUDE_ONLY if index == 0 else {}
-    return {event: SHARED[event] + extra.get(event, []) for event in SHARED}
+    entries = {event: SHARED.get(event, []) + extra.get(event, []) for event in {**SHARED, **extra}}
+    # Use native lifecycle events; Stop is a turn boundary, not a session end.
+    events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+    if index == 0:
+        events.append("PostToolUseFailure")
+    for event in events:
+        entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {"claude-code" if index == 0 else "codex"}', "timeout": 3 if event == "SessionEnd" else 10}]}
+        if event in ("PreToolUse", "UserPromptSubmit", "Stop"):
+            entry["hooks"][0]["command"] = f'python3 "{TODO_GATE}" {"claude-code" if index == 0 else "codex"}'
+        if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+            entry["matcher"] = ".*"
+        entries.setdefault(event, []).append(entry)
+    return entries
 
 
 def is_ours(group: dict) -> bool:
@@ -103,5 +131,16 @@ for index, target in enumerate(targets):
         backup.write_bytes(path.read_bytes())
         print(f"backup: {backup}")
     path.write_text(rendered, encoding="utf-8")
-    print(f"{mode}ed Jev hooks in {path}")
+    print(f"{mode}ed Jev and Workflow hooks in {path}")
 PY
+
+if [ "$DRY_RUN" = "1" ]; then
+  printf -- '--- %s (%s, dry run)\n%s\n' "$ROOT_FILE" "$MODE" "$HARNESS_ROOT"
+elif [ "$MODE" = "install" ]; then
+  mkdir -p "$(dirname "$ROOT_FILE")"
+  printf '%s\n' "$HARNESS_ROOT" > "$ROOT_FILE"
+  printf 'installed harness root %s in %s\n' "$HARNESS_ROOT" "$ROOT_FILE"
+elif [ -f "$ROOT_FILE" ] && [ "$(head -n 1 "$ROOT_FILE")" = "$HARNESS_ROOT" ]; then
+  rm -f "$ROOT_FILE"
+  printf 'removed harness root record %s\n' "$ROOT_FILE"
+fi

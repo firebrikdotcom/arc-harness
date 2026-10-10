@@ -20,52 +20,48 @@ scripts/init.sh --project /path/to/project
 
 With the hooks installed (`scripts/install-hooks.sh`), this happens automatically: every Claude Code or Codex session registers the project it starts in as a harness target and bootstraps it once per lockfile fingerprint. See `docs/setup.md`.
 
-Then read:
-
-- `AGENTS.md`
-- `CLAUDE.md`
-- `docs/architecture.md`
-- `docs/conventions.md`
-- `docs/setup.md`
-- `progress.md`
-
-These files explain how agents and humans should work in this repo.
+Then read `AGENTS.md`: it is the map, with each rule next to the gate that enforces it. `CLAUDE.md` imports it. Open `docs/setup.md` (every command and variable), `docs/architecture.md`, or `docs/conventions.md` only when a task needs them.
 
 ## Daily Workflow
 
 ```sh
 scripts/harness plan start
-# plan the work
+# plan the work and write its contract (tasks/task.example.json)
+scripts/harness contract set task.json
 scripts/harness plan done
 
 scripts/harness build start
-# do the work; run scripts/verify.sh before you call it done
+# do the work, then produce the evidence
+scripts/verify.sh
 scripts/harness build done
 
 scripts/harness review start
-# review; run scripts/review.sh
+scripts/review.sh                          # writes the packet for an independent reviewer
+scripts/harness review submit findings.json
 scripts/harness review done
 ```
 
-You cannot build before plan is done. You cannot review before build is done.
+You cannot build before plan is done. You cannot review before build is done. Edits are allowed only in build.
 
-`build done` needs a passing `scripts/verify.sh` run after `build start`, and `review done` needs a `scripts/review.sh` run after `review start`.
+`plan done` needs a task contract (or a recorded waiver). `build done` needs a passing `scripts/verify.sh` on the current files, where at least one check ran, and every acceptance command in the contract. `review done` needs an independent reviewer's approving findings for the current files and no change in a non-goal path. The same command failing the same way twice pauses the run. See "Gates that decide done" in `docs/setup.md`.
 
 If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
+
+Native sessions keep separate run pointers and check records within each target database. Resuming the same session preserves its budgets; a new session starts independently of older paused runs. Manual commands without session identity keep the legacy directory-wide pointer. See `docs/setup.md` for identity selection and hook installation.
 
 The phase guard is a Claude Code hook only. It checks the denylist and knowledge-trust state before requiring an active phase, then counts an allowed tool call as a harness step. Other agents must follow the written workflow themselves.
 
 ## Important Rules
 
 - Do not declare success without running `scripts/verify.sh`.
-- Before a side-effecting change, write action JSON and run `scripts/action.sh validate PATH`. The same denylist is applied by the guard hook to every real Write, Edit, and Bash call.
+- The guard applies the denylist to every real Write, Edit, and Bash call, judged on the files a command would write. `scripts/action.sh validate PATH` checks a proposed action against the same rules before you run it.
 - `scripts/init.sh` previews project-owned setup commands and runs them only after you confirm, or with `--yes`.
 - Bootstrap uses the lockfile-aware install command: `npm ci`, `yarn install --frozen-lockfile`, `composer install --no-interaction --prefer-dist`, or `cargo fetch --locked` when the matching lockfile exists.
 - A `knowledge/` folder is followed only after a human runs `scripts/knowledge-trust.sh approve`.
 - Keep planning, building, and reviewing as separate phases.
 - Do not assume secrets exist locally or in CI.
 - Do not delete existing files unless the task explicitly requires it.
-- Record commands run and results in `progress.md` and handoff notes.
+- Record steps with `scripts/harness step --note`; `scripts/harness brief` reads them back at the next session start.
 
 ## Project Structure
 
@@ -79,7 +75,7 @@ SECURITY.md               Security and repository hygiene guidance
 docs/architecture.md      Architecture notes and module boundaries
 docs/conventions.md       Coding, testing, logging, and security conventions
 docs/setup.md             Local setup and command documentation
-progress.md               Current goal, decisions, steps, blockers, verification history
+progress.md               Pointer: run progress lives in each run's log (harness brief)
 schemas/action.schema.json  Proposed-action contract
 scripts/action.sh           Action validator
 scripts/harness             Harness CLI: harness root, session budgets, plan/build/review phases
@@ -96,7 +92,9 @@ scripts/harness-target.sh   Machine-local target registry: project root, registe
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, then runs the session route
 scripts/hooks/session-route.sh  SessionStart hook: one shadow task-entry route per interactive session in a harness target
-scripts/hooks/jev-observe.sh    PreToolUse hook: progress checkpoint on the third identical shell command; never blocks
+scripts/observe_commands.py    Session-scoped PreToolUse command-repeat observer; never blocks
+scripts/session_hook.py        Native SessionStart identity binding before bootstrap/routing
+scripts/run_paths.py           Shared session-owned current-pointer and check-record selector
 scripts/retrieval-reminder.sh   PreToolUse hook (Grep/Glob, Claude Code): one jg.sh reminder on a session's first search without a retrieval; never blocks
 .claude/settings.json       Registers the phase guard hook
 scripts/init.sh             Bootstrap: registers the target, previews project-owned commands, runs them after confirmation (or automatically with --auto)
@@ -143,9 +141,9 @@ The script detects common project tooling:
 - `Cargo.toml` for Rust projects.
 - Bash/shell files, including `scripts/*.sh`.
 
-It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to `.harness-db/records/verify.state`.
+It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. On the harness itself it also runs `tests/*.sh`, and every run writes a record to its session-owned records directory (legacy manual runs use `.harness-db/records/verify.state`).
 
-Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
+Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. When every file changed since the upstream base (`@{upstream}`, else `origin/HEAD`) is documentation, verification runs only format and lint, skips typecheck, test and build (mandatory ones included), and records `SCOPE=docs-only`. Without a base, with no changes, or with any non-doc path, the full run applies. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
 
 ## Agent Entry Points
 
@@ -179,7 +177,7 @@ When source code, runtime commands, dependencies, or architecture are added:
 - Update `docs/setup.md` with exact setup and run commands.
 - Update `docs/architecture.md` with module boundaries and dependency rules.
 - Update `docs/conventions.md` if new language/framework conventions are introduced.
-- Keep `progress.md` current as work proceeds.
+- Keep `AGENTS.md` short: it is loaded at every session start, so put detail in `docs/`.
 
 ## Local-Only Files
 
@@ -194,3 +192,5 @@ Consider Jev at meaningful decision points using the [checkpoint workflow](docs/
 ## Semantic retrieval
 
 `scripts/jg.sh [--project PATH] [--root SUBDIR] "question"` asks [jevgrep](https://github.com/dzhng/jevgrep) for the files and excerpts relevant to a question about a target, which is the recommended first discovery step in an unfamiliar project. Because `jg` uploads eligible source to its configured provider, the wrapper refuses `--include-sensitive`, `--no-ignore`, and any target carrying a `.harness-no-upload` marker, and records only a question hash, timing, and exit status under the target database. `scripts/jg.sh --report` summarises past retrievals. Setup and limits are in `docs/setup.md`.
+
+Audited todo plans are enforced by additive native hooks, independently of collection switches. See [todo enforcement](docs/setup.md#audited-todo-enforcement) for registration, revisions, evidence, completion gates, and runtime limitations.

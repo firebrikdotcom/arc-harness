@@ -1,0 +1,85 @@
+{% extends "layouts/admin.html" %}{% import "components/ui.html" as ui %}{% block content %}
+<header class="page-head session-head"><div><p class="eyebrow">Workflow / session details</p><h1>{% if selected %}{{ selected.label }}{% else %}Session workflow{% endif %}</h1>
+{% if selected %}<p class="session-meta">{{ ui::status(label=selected.status, tone="neutral") }}<span><strong>{{ selected.project }}</strong>{% if selected.worktree %} <span class="badge badge--ghost">worktree</span>{% endif %}</span>{% if selected.herdr_tab %}<span class="badge badge--tab" title="Herdr tab">Herdr tab · {{ selected.herdr_tab }}</span>{% endif %}<span>{{ selected.agent }} · {{ selected.model }}</span><span><time data-client-time="{{ selected.first_at }}">—</time> → <time data-client-time="{{ selected.last_at }}">—</time>{% if selected.verdict.duration %} · {{ selected.verdict.duration }}{% endif %}</span><span>{{ selected.prompts | length }} prompt{% if selected.prompts | length != 1 %}s{% endif %}</span></p>{% endif %}</div><a class="button" href="{{ return_to | default(value='/workflow') }}">Back to sessions</a></header>
+{% if selected %}{% set v = selected.verdict %}
+<section class="verdict" aria-label="Session verdict">
+<div class="verdict__cell verdict__cell--{% if v.outcome.status == 'completed' %}ok{% elif v.outcome.status == 'blocked' %}fail{% else %}none{% endif %}"><span class="verdict__key">Outcome</span><strong>{% if v.outcome.status %}{{ v.outcome.status | capitalize }}{% else %}No outcome recorded{% endif %}</strong><small class="verdict__outcome" title="{{ v.outcome.text }}">{% if v.outcome.status %}{{ v.outcome.text }}{% elif selected.status == "running" %}Still running{% else %}The session ended without an explicit outcome{% endif %}</small></div>
+<div class="verdict__cell"><span class="verdict__key">Checks</span><strong class="verdict__badges">{% for key in ["verify", "review"] %}{% set check = v.checks | get(key=key, default="") %}{% if check %}<span class="badge badge--{% if check.last == 'passed' %}success{% elif check.last == 'failed' %}error{% else %}neutral{% endif %}">{{ key }} {{ check.passed }}/{{ check.total }}</span>{% else %}<span class="badge badge--ghost">no {{ key }}</span>{% endif %}{% endfor %}</strong><small>{% if v.verified %}Latest verify and review passed{% elif v.checks %}Badges show passed runs of all runs; colour is the latest result{% else %}No checks recorded{% endif %}</small></div>
+<div class="verdict__cell"><span class="verdict__key">Todos</span><strong>{% if v.todos_total %}{{ v.todos_done }} / {{ v.todos_total }} done{% else %}No todo plan{% endif %}</strong><small>{{ named_tasks }} named task{% if named_tasks != 1 %}s{% endif %}</small></div>
+<div class="verdict__cell"><span class="verdict__key">Activity</span><strong>{{ v.tool_calls }} tool call{% if v.tool_calls != 1 %}s{% endif %}</strong><small>{% if v.tool_failures %}<span class="text-error">{{ v.tool_failures }} failed</span> · {% endif %}{{ v.decisions }} decision{% if v.decisions != 1 %}s{% endif %}</small></div>
+</section>
+{% if v.attention %}<p class="attention-note" role="status"><strong>Needs attention:</strong> {{ v.attention | join(sep=", ") }}</p>{% elif v.unfinished %}<p class="attention-note attention-note--warn" role="status"><strong>Ended unfinished:</strong> open todos and no completed outcome.</p>{% endif %}
+<div class="session-columns">
+<section class="panel" id="timeline"><div class="panel__head"><h2>Timeline{% if task_filter %} · selected task{% endif %}{% if todo_filter %} · selected todo{% endif %}</h2>{% if task_filter or todo_filter %}<a class="button" href="/workflow?session_id={{ selected.session_id | urlencode }}&return_to={{ return_to | urlencode }}#timeline">Whole session</a>{% endif %}</div>
+<nav class="chip-row timeline-chips" aria-label="Timeline views">{% for chip in timeline_chips %}<a class="chip{% if chip.active %} is-active{% endif %}" href="{{ chip.href }}"{% if chip.active %} aria-current="true"{% endif %}>{{ chip.label }}{% if chip.count is number %} <b>{{ chip.count }}</b>{% endif %}</a>{% endfor %}<a class="chip chip--order" href="{{ order_toggle.href }}" title="The timeline is listed {{ order_toggle.current }}">⇅ {{ order_toggle.label }}</a></nav>
+<details class="timeline-filters"{% if event_filters.q or event_filters.category or event_filters.status %} open{% endif %}><summary>Search and filter</summary>
+<form class="timeline-controls" method="get" action="/workflow#timeline" data-timeline-form{% if flow_view %} data-flow="true"{% endif %}><input type="hidden" name="session_id" value="{{ selected.session_id }}">{% if task_filter %}<input type="hidden" name="task_id" value="{{ task_filter }}">{% endif %}{% if todo_filter %}<input type="hidden" name="todo_id" value="{{ todo_filter }}">{% endif %}{% if not signal_view %}<input type="hidden" name="view" value="all">{% elif flow_view %}<input type="hidden" name="view" value="flow">{% endif %}{% if order_toggle.current == "oldest first" %}<input type="hidden" name="order" value="oldest">{% endif %}<input type="hidden" name="return_to" value="{{ return_to }}"><label>Search timeline<input id="timeline-search" name="event_q" type="search" value="{{ event_filters.q }}" placeholder="Tool, task, result, phase…"></label><label>Event type<select id="timeline-category" name="event_category"><option value="">All types</option>{% for category in ['tool','check','phase','decision','prompt','task','session','todo','plan'] %}<option value="{{ category }}"{% if category == event_filters.category %} selected{% endif %}>{{ category | capitalize }}</option>{% endfor %}</select></label><label>Result<select id="timeline-status" name="event_status"><option value="">All results</option>{% for status in ['succeeded','failed','returned','process_running','unobserved','started','passed','completed','blocked','running','ended','recorded','active','done','unknown','pending','in_progress','removed','required','confirmed','question'] %}<option value="{{ status }}"{% if status == event_filters.status %} selected{% endif %}>{{ status | replace(from='_',to=' ') | capitalize }}</option>{% endfor %}</select></label><div class="timeline-actions"><button class="button" type="submit">Apply</button><button class="button" id="timeline-reset" type="button">Reset</button></div></form></details>
+{% if flow_view %}<p class="section-note">Flow, {{ order_toggle.current }}: one lane per prompt, its steps left to right in the order they happened. Click a block to see everything recorded for it.</p>{% include "audit/partials/flow.html" %}{% elif signal_view %}<p class="section-note">Signal view, {{ order_toggle.current }}: tool calls are folded into one row per run, and bookkeeping events are hidden. Failures always show. Open <strong>Raw events</strong> for every event and its evidence.</p><ol class="signal-list" id="timeline-list">{% include "audit/partials/signal-items.html" %}</ol>{% else %}<p class="section-note">Raw events, {{ order_toggle.current }}: every collected event with its evidence. A tool return, a process handle and a completed task are separate events; historical returns may lack exit codes, call IDs or timing.</p><ol class="workflow-timeline" id="timeline-list">{% include "audit/partials/timeline-items.html" %}</ol>{% endif %}{% if not flow_view %}{% set more = timeline_more %}{% include "audit/partials/more.html" %}{% endif %}</section>
+<aside class="session-aside">
+<section class="panel" id="todos"><div class="panel__head"><h2>Todos</h2><span class="mono">{% if v.todos_total %}{{ v.todos_done }}/{{ v.todos_total }}{% else %}none{% endif %}</span></div>{% if todo_rows %}<ol class="aside-todos">{% for todo in todo_rows %}<li class="aside-todo aside-todo--{{ todo.status }}{% if todo_filter == todo.id %} is-selected{% endif %}"><span class="aside-todo__mark" aria-hidden="true">{% if todo.status == "completed" %}☑{% elif todo.status == "blocked" %}✕{% elif todo.status == "in_progress" %}▶{% else %}☐{% endif %}</span><span><a href="/workflow?session_id={{ selected.session_id | urlencode }}&task_id={{ todo.task_id | urlencode }}&todo_id={{ todo.id | urlencode }}&return_to={{ return_to | urlencode }}#timeline">{{ todo.description }}</a>{% if todo.evidence %}<small>{{ todo.evidence }}</small>{% elif todo.status != "completed" %}<small>{{ todo.status | replace(from='_', to=' ') }} · {{ todo.criterion }}</small>{% endif %}</span></li>{% endfor %}</ol><p class="aside-note muted">Select a todo to filter the timeline.</p>{% else %}<p class="aside-note muted">No todo plan recorded.</p>{% endif %}</section>
+<section class="panel session-list" id="tasks"><div class="panel__head"><h2>Tasks</h2><span class="mono">{{ selected.task_list | length }}</span></div>{% if selected.task_list %}<ol class="row-list" id="tasks-list">{% include "audit/partials/task-items.html" %}</ol>{% set more = tasks_more %}{% include "audit/partials/more.html" %}{% else %}<p class="aside-note muted">No tasks recorded.</p>{% endif %}</section>
+<section class="panel"><details class="session-metadata"><summary>Session metadata · {{ selected.agent }} · {{ selected.model }}</summary><dl><div class="metadata-item"><dt>Agent</dt><dd>{{ selected.agent }}</dd></div><div class="metadata-item"><dt>Model</dt><dd>{{ selected.model }}</dd></div>{% if selected.herdr_tab %}<div class="metadata-item"><dt>Herdr tab</dt><dd>{{ selected.herdr_tab }}</dd></div>{% endif %}<div class="metadata-item metadata-item--wide"><dt>Working directory</dt><dd class="session-path">{{ selected.cwd }}</dd></div><div class="metadata-item metadata-item--wide"><dt>Session ID</dt><dd class="mono workflow-id">{{ selected.session_id }}</dd></div></dl></details>{% if not selected.prompts %}<p class="session-notice">No prompt captured. <a href="/">Enable Store user prompts</a> to collect future submissions.</p>{% endif %}<p class="aside-note"><a href="/">Collection settings</a></p></section>
+</aside></div>
+{% else %}<section class="panel">{% if sessions %}{{ ui::empty(title="Session not found", detail="Return to the sessions table and choose a collected session.") }}{% else %}{{ ui::empty(title="No Workflow sessions yet", detail="Enable Workflow collection on the workbench. New hook events and harness phase transitions will appear here.") }}{% endif %}</section>{% endif %}
+<script>
+(() => {
+ const localize = () => window.localizeClientTimes && window.localizeClientTimes();
+ async function load(src) { const response = await fetch(src, {headers: {Accept: 'application/json'}}); if (!response.ok) throw new Error('HTTP ' + response.status); return response.json(); }
+ function replaceMore(list, html) { const box = document.querySelector(`[data-more="${list}"]`); if (box) box.outerHTML = html; }
+ // Show more: append the next rows in place; without JavaScript the link reloads with a larger count.
+ document.addEventListener('click', async event => {
+  const link = event.target.closest('[data-more-src]'); if (!link) return;
+  event.preventDefault();
+  const name = link.closest('[data-more]').dataset.more;
+  link.textContent = 'Loading…'; link.setAttribute('aria-disabled', 'true');
+  try { const data = await load(link.dataset.moreSrc); document.getElementById(name + '-list').insertAdjacentHTML('beforeend', data.html); replaceMore(name, data.more_html); localize(); }
+  catch { location.href = link.href; }
+ });
+ // Task details load the first time a task row is opened.
+ document.addEventListener('toggle', async event => {
+  const row = event.target;
+  if (!(row instanceof HTMLDetailsElement) || !row.open || !row.dataset.detailSrc || row.dataset.loaded) return;
+  row.dataset.loaded = 'true';
+  try { const data = await load(row.dataset.detailSrc); row.querySelector('[data-detail-body]').innerHTML = data.html; localize(); }
+  catch { delete row.dataset.loaded; }
+ }, true);
+ document.querySelectorAll('details[data-detail-src][open]').forEach(row => { row.dataset.loaded = 'true'; });
+ // Flow blocks open their recorded details in a side panel; Previous and Next walk the blocks.
+ const inspector = document.getElementById('flow-inspector');
+ if (inspector) {
+  const nodes = [...document.querySelectorAll('[data-flow-open]')];
+  const body = inspector.querySelector('[data-flow-body]');
+  let current = -1;
+  const show = index => {
+   current = index;
+   body.replaceChildren(document.getElementById(nodes[index].dataset.flowOpen).content.cloneNode(true));
+   nodes.forEach((node, i) => node.classList.toggle('is-current', i === index));
+   inspector.querySelector('[data-flow-step="-1"]').disabled = index === 0;
+   inspector.querySelector('[data-flow-step="1"]').disabled = index === nodes.length - 1;
+   if (!inspector.open) inspector.showModal();
+   body.scrollTop = 0; localize();
+  };
+  document.addEventListener('click', event => {
+   const node = event.target.closest('[data-flow-open]'); if (node) { show(nodes.indexOf(node)); return; }
+   const step = event.target.closest('[data-flow-step]'); if (step) { show(current + Number(step.dataset.flowStep)); nodes[current].scrollIntoView({block: 'nearest'}); return; }
+   if (event.target.closest('[data-flow-close]') || event.target === inspector) inspector.close();
+  });
+  inspector.addEventListener('close', () => { nodes[current]?.focus(); });
+ }
+ // Timeline filters run on the server so paging and counts cover every event, not only the loaded ones.
+ const form = document.querySelector('[data-timeline-form]'); if (!form) return;
+ let timer, request = 0;
+ async function refresh() {
+  // The flow diagram is drawn whole on the server, so its filters reload the page.
+  if (form.dataset.flow) { form.submit(); return; }
+  const params = new URLSearchParams([...new FormData(form)].filter(([, value]) => value !== '')); const mine = ++request;
+  history.replaceState(null, '', '/workflow?' + params + '#timeline');
+  params.set('list', 'timeline');
+  try { const data = await load('/workflow/items?' + params); if (mine !== request) return; document.getElementById('timeline-list').innerHTML = data.html; replaceMore('timeline', data.more_html); localize(); }
+  catch { form.submit(); }
+ }
+ if (!form.dataset.flow) form.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(refresh, 250); });
+ form.addEventListener('submit', event => { event.preventDefault(); clearTimeout(timer); refresh(); });
+ document.getElementById('timeline-reset').addEventListener('click', () => { form.querySelectorAll('input[type=search], select').forEach(control => { control.value = ''; }); refresh(); });
+})();
+</script>{% endblock content %}

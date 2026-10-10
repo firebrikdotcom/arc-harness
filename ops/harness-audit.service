@@ -8,6 +8,7 @@ WorkingDirectory=%h/Code/harness-template/services/harness-audit
 ExecStart=%h/Code/harness-template/scripts/audit-service.sh serve
 Restart=on-failure
 RestartSec=5
+Environment=APP_URL=0.0.0.0
 Environment=HARNESS_AUDIT_ENABLED=1
 Environment=HARNESS_AUDIT_URL=http://127.0.0.1:18080
 

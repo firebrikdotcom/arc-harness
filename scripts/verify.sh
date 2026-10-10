@@ -15,6 +15,9 @@ usage() {
   info "Usage: scripts/verify.sh [--project PATH]"
   info ""
   info "Runs verification sensors in PATH. Defaults to the current directory."
+  info "When every change since the upstream base is documentation (see"
+  info ".harness-docs-paths), only format and lint run; HARNESS_VERIFY_SCOPE=full"
+  info "forces every check."
 }
 
 info() {
@@ -68,6 +71,13 @@ if [ -z "$REQUIRED_CHECKS" ] && [ -f .harness-required-checks ]; then
   REQUIRED_CHECKS=$(sed 's/#.*//' .harness-required-checks | tr '\n' ' ')
   REQUIRED_CHECKS_SOURCE=".harness-required-checks"
 fi
+# scripts/init.sh records the categories it detected for a registered target in
+# the target's own database, so a target needs no tracked file to be held to them.
+if [ -z "$REQUIRED_CHECKS" ] && [ -f "$HARNESS_DB_ROOT/required-checks" ]; then
+  REQUIRED_CHECKS=$(sed 's/#.*//' "$HARNESS_DB_ROOT/required-checks" | tr '\n' ' ')
+  REQUIRED_CHECKS_SOURCE="$HARNESS_DB_ROOT/required-checks"
+fi
+REQUIRED_CHECKS=$(printf '%s' "$REQUIRED_CHECKS" | tr -s ' \t' '  ' | sed 's/^ //; s/ $//')
 
 is_required() {
   wanted="$1"
@@ -82,7 +92,7 @@ is_required() {
 validate_required_checks() {
   for required in $REQUIRED_CHECKS; do
     case "$required" in
-      format|lint|typecheck|test|build) ;;
+      format|lint|typecheck|test|build|allow-empty) ;;
       *)
         info "FAIL: unknown required check category: $required"
         exit 2
@@ -124,6 +134,113 @@ run_category() {
     info "FAIL: required category '$category' ran no checks"
   elif is_required "$category" && [ "$failures" -eq "$failures_before" ]; then
     info "REQUIRED: $category satisfied"
+  fi
+}
+
+# Docs-only scope: when every changed file is documentation, typecheck, test
+# and build cannot be affected, so only format and lint run. Any doubt (no git,
+# no base, empty change set, one non-doc path) falls back to the full run.
+# Patterns come from .harness-docs-paths (one per line, `!` excludes) or the
+# defaults below; HARNESS_VERIFY_SCOPE=full forces the full run.
+SCOPE=full
+SCOPE_REASON=""
+DEFAULT_DOCS_PATHS='*.md
+*.mdx
+*.markdown
+!AGENTS.md
+!*/AGENTS.md
+!CLAUDE.md
+!*/CLAUDE.md
+!SKILL.md
+!*/SKILL.md'
+
+docs_patterns() {
+  if [ -f .harness-docs-paths ]; then
+    sed 's/#.*//' .harness-docs-paths
+  else
+    printf '%s\n' "$DEFAULT_DOCS_PATHS"
+  fi
+}
+
+is_doc_path() {
+  path="$1"
+  matched=1
+  for pattern in $(docs_patterns); do
+    case "$pattern" in
+      !*)
+        # shellcheck disable=SC2254
+        case "$path" in ${pattern#!}) return 1 ;; esac
+        ;;
+      *)
+        # shellcheck disable=SC2254
+        case "$path" in $pattern) matched=0 ;; esac
+        ;;
+    esac
+  done
+  return "$matched"
+}
+
+changed_paths() {
+  # Committed and uncommitted tracked changes since the base, with renames
+  # split into old and new paths, plus untracked files.
+  git diff --name-only --no-renames "$1" -- && git ls-files --others --exclude-standard
+}
+
+detect_scope() {
+  # Patterns are matched with case, never expanded against the project's files.
+  set -f
+  detect_scope_paths
+  set +f
+}
+
+detect_scope_paths() {
+  SCOPE=full
+  if [ "${HARNESS_VERIFY_SCOPE:-}" = "full" ]; then
+    SCOPE_REASON="forced by HARNESS_VERIFY_SCOPE=full"
+    return 0
+  fi
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SCOPE_REASON="not a git work tree"
+    return 0
+  fi
+  base_ref=$(git rev-parse --verify -q '@{upstream}' 2>/dev/null || git rev-parse --verify -q refs/remotes/origin/HEAD 2>/dev/null || :)
+  merge_base=""
+  if [ -n "$base_ref" ]; then
+    merge_base=$(git merge-base HEAD "$base_ref" 2>/dev/null || :)
+  fi
+  if [ -z "$merge_base" ]; then
+    SCOPE_REASON="no upstream or origin/HEAD base"
+    return 0
+  fi
+  if ! paths=$(changed_paths "$merge_base"); then
+    SCOPE_REASON="could not list changed files"
+    return 0
+  fi
+  if [ -z "$paths" ]; then
+    SCOPE_REASON="no changed files since base"
+    return 0
+  fi
+  count=0
+  old_ifs=$IFS
+  IFS='
+'
+  for path in $paths; do
+    count=$((count + 1))
+    if ! is_doc_path "$path"; then
+      IFS=$old_ifs
+      SCOPE_REASON="non-doc change: $path"
+      return 0
+    fi
+  done
+  IFS=$old_ifs
+  SCOPE=docs-only
+  SCOPE_REASON="$count changed file(s), all documentation"
+}
+
+skip_category_for_docs() {
+  mark_skip "$1: docs-only change"
+  if is_required "$1"; then
+    info "REQUIRED: $1 not applicable to a docs-only change"
   fi
 }
 
@@ -189,10 +306,38 @@ check_go_format() {
   test -z "$out"
 }
 
+# Shell scripts that belong to this project, NUL-separated. Inside a git work tree the list
+# comes from git (tracked plus untracked-but-not-ignored files), so ignored virtualenvs and
+# nested repositories are skipped the same way git skips them. Outside git, fall back to a
+# pruned find. Cached database and dependency directories are excluded in both modes.
+list_shell_files() {
+  # shellcheck disable=SC2016  # the quoted script below runs under the inner sh
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files -z --cached --others --exclude-standard -- '*.sh' 'scripts/harness' 2>/dev/null
+  else
+    find . \
+      \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune \
+      -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -print0
+  fi | xargs -0 sh -c '
+    for f; do
+      case "/$f" in
+        */.harness-db/*|*/.venv/*|*/vendor/*|*/node_modules/*|*/target/*|*/.git/*) continue ;;
+      esac
+      [ -f "$f" ] && printf "%s\0" "$f"
+    done
+  ' _
+}
+
 has_shell_files() {
-  find . \
-    \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune \
-    -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -print -quit | grep -q .
+  [ -n "$(list_shell_files | tr '\0' x | head -c 1)" ]
+}
+
+shellcheck_shell_files() {
+  list_shell_files | xargs -0 sh -c '[ "$#" -eq 0 ] || exec shellcheck "$@"' _
+}
+
+syntax_check_shell_files() {
+  list_shell_files | xargs -0 sh -c '[ "$#" -eq 0 ] || exec sh -n "$@"' _
 }
 
 # Run this harness's own regression tests when verifying the harness itself.
@@ -200,8 +345,10 @@ run_harness_tests() {
   status=0
   for test_file in tests/*.sh; do
     info "--> $test_file"
-    # Nested harness runs inside tests must not emit real Jev checkpoints.
-    if ! HARNESS_JEV_CHECKPOINTS=0 sh "$test_file"; then
+    # Nested harness runs inside tests must not emit real Jev checkpoints, and
+    # they model a human at a terminal, not the agent that may be running verify.
+    if ! HARNESS_JEV_CHECKPOINTS=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
+      CLAUDECODE='' CODEX_SANDBOX='' sh "$test_file"; then
       status=1
     fi
   done
@@ -224,28 +371,37 @@ jev_checkpoint() {
 # Write a KEY=VALUE run record that `scripts/harness build done` requires.
 write_run_record() {
   exit_code="$1"
-  records_dir="$HARNESS_DB_ROOT/records"
+  records_dir=$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")
   if ! mkdir -p "$records_dir" 2>/dev/null; then
     info "WARN: could not create $records_dir; no run record written."
     return 0
   fi
   git_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')
   git_dirty=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null | grep -c . || true)
+  tree_hash=$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")
   record="$records_dir/verify.state"
+  current_file=$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")
+  run_id=$(head -n 1 "$current_file" 2>/dev/null || :)
   {
     printf 'RECORD_KIND=verify\n'
+    printf 'RUN_ID=%s\n' "$run_id"
     printf 'RECORD_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'RECORD_EPOCH=%s\n' "$(date +%s)"
     printf 'PROJECT_ROOT=%s\n' "$PROJECT_ROOT"
     printf 'GIT_HEAD=%s\n' "$git_head"
     printf 'GIT_DIRTY_FILES=%s\n' "$git_dirty"
+    printf 'TREE_HASH=%s\n' "$tree_hash"
     printf 'RAN=%s\n' "$ran"
     printf 'SKIPPED=%s\n' "$skipped"
     printf 'FAILURES=%s\n' "$failures"
+    printf 'SCOPE=%s\n' "$SCOPE"
     printf 'EXIT=%s\n' "$exit_code"
   } > "$record.tmp.$$"
   mv "$record.tmp.$$" "$record"
   info "Run record: $record"
+  if has_cmd python3; then
+    python3 "$SCRIPT_DIR/workflow_audit.py" check --kind verify --record "$record" >&2 || :
+  fi
 }
 
 run_make_or_skip() {
@@ -341,7 +497,7 @@ verify_lint() {
 
   if has_shell_files; then
     if has_cmd shellcheck; then
-      run_check "bash:shellcheck" find . \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec shellcheck {} +
+      run_check "bash:shellcheck" shellcheck_shell_files
     else
       mark_skip "shell scripts found, but shellcheck is unavailable"
     fi
@@ -448,7 +604,7 @@ verify_test() {
   fi
 
   if has_shell_files; then
-    run_check "bash:syntax" find . \( -path './.git' -o -path './.harness-db' -o -path './.venv' -o -path './vendor' -o -path './node_modules' -o -path './target' \) -prune -o -type f \( -name '*.sh' -o -path './scripts/harness' \) -exec sh -n {} +
+    run_check "bash:syntax" syntax_check_shell_files
     ran_any=1
   fi
 
@@ -511,11 +667,32 @@ fi
 
 jev_checkpoint verify-start
 
+detect_scope
+info "Scope: $SCOPE ($SCOPE_REASON)"
+
 run_category format verify_format
 run_category lint verify_lint
-run_category typecheck verify_typecheck
-run_category test verify_test
-run_category build verify_build
+if [ "$SCOPE" = "docs-only" ]; then
+  skip_category_for_docs typecheck
+  skip_category_for_docs test
+  skip_category_for_docs build
+else
+  run_category typecheck verify_typecheck
+  run_category test verify_test
+  run_category build verify_build
+fi
+
+if [ "$ran" -eq 0 ]; then
+  if is_required allow-empty; then
+    info ""
+    info "NOTE: no checks ran; accepted because 'allow-empty' is declared ($REQUIRED_CHECKS_SOURCE)."
+  else
+    failures=$((failures + 1))
+    info ""
+    info "FAIL: no checks ran, so there is no evidence the change works."
+    info "Add a check (make test, a package.json script, ...) or declare 'allow-empty' in .harness-required-checks."
+  fi
+fi
 
 info ""
 info "Verification summary: ran=$ran skipped=$skipped failures=$failures"
