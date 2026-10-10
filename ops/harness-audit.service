@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Code/harness-template/services/harness-audit
-ExecStart=%h/Code/harness-template/scripts/audit-service.sh serve
+WorkingDirectory=__SERVICE_ROOT__
+ExecStart="__HARNESS_ROOT__/scripts/audit-service.sh" serve
 Restart=on-failure
 RestartSec=5
 Environment=APP_URL=0.0.0.0

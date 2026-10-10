@@ -186,17 +186,45 @@ for command in "printf '%s\\n' HARNESS_REVIEWER_CMD" 'declare -p HARNESS_REVIEWE
   allow_cmd "$command"
 done
 PY_PERMIT="$HARNESS_ROOT_UNDER_TEST/scripts/permit.py"
+# The hook exports the payload's session; --session-id may name only that one.
+HARNESS_SESSION_ID=abc
+export HARNESS_SESSION_ID
 call_kind() {
   [ "$(python3 "$PY_PERMIT" harness-call --command "$2" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = "$1" ] \
     || fail "harness-call should say $1 for: $2"
 }
 call_kind pass 'scripts/harness status'
 call_kind pass 'scripts/harness review start'
+call_kind pass 'scripts/harness --session-id abc status'
+call_kind pass 'scripts/harness workflow todo show --session-id abc'
 call_kind human "scripts/harness 'review' submit f.json"
 call_kind human 'scripts/harness --session-id abc abort'
 call_kind human 'true && scripts/harness launch --state t.json'
 call_kind no 'scripts/harness budget --thread x --tokens 5'
-call_kind no 'scripts/harness --session-id abc status'
+call_kind no '/tmp/evil/scripts/harness status'
+call_kind no 'scripts/harness workflow todo show --session-id other'
+call_kind no 'scripts/harness --session-id=other status'
+[ "$(env -u HARNESS_SESSION_ID python3 "$PY_PERMIT" harness-call --command 'scripts/harness --session-id abc status' --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = no ] \
+  || fail "harness-call should refuse --session-id when the hook names no session"
+# A bare name runs what PATH finds, never the file in the working directory.
+[ "$(python3 "$PY_PERMIT" harness-call --command 'harness plan done' --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST/scripts")" = no ] \
+  || fail "harness-call should not resolve a bare harness against the working directory"
+# A copy inside the checkout is not a worktree of it.
+mkdir -p "$HARNESS_ROOT_UNDER_TEST/nested/scripts"
+cp "$HARNESS_ROOT_UNDER_TEST/scripts/harness" "$HARNESS_ROOT_UNDER_TEST/scripts/guard-version" "$HARNESS_ROOT_UNDER_TEST/nested/scripts/"
+[ "$(python3 "$PY_PERMIT" harness-call --command 'nested/scripts/harness plan start' --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = no ] \
+  || fail "harness-call should refuse a harness copy in a subdirectory of the checkout"
+
+# A git worktree of this checkout is the same harness CLI as the main tree.
+WT="$TMP_ROOT/harness-wt"
+git -C "$HARNESS_ROOT_UNDER_TEST" worktree add --detach "$WT" >/dev/null
+trap 'git -C "$HARNESS_ROOT_UNDER_TEST" worktree remove --force "$WT" >/dev/null 2>&1 || true; rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+[ "$(python3 "$PY_PERMIT" harness-call --command "scripts/harness status" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$WT")" = pass ] \
+  || fail "harness-call should pass for scripts/harness in a worktree of this checkout"
+[ "$(python3 "$PY_PERMIT" harness-call --command "$WT/scripts/harness plan start" --project "$HARNESS_ROOT_UNDER_TEST" --cwd "$HARNESS_ROOT_UNDER_TEST")" = pass ] \
+  || fail "harness-call should pass for a worktree absolute harness path"
+[ "$(python3 "$PY_PERMIT" harness-call --command "$HARNESS_ROOT_UNDER_TEST/scripts/harness workflow todo plan --session-id abc --reason x --items []" --project "$WT" --cwd "$WT")" = pass ] \
+  || fail "harness-call should pass for the main-tree CLI from a worktree project"
 
 # Without python3 the Node fallback cannot see write targets, so it refuses any
 # command that names a guard path.

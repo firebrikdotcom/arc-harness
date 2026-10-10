@@ -1562,12 +1562,12 @@ mod tests {
             ("arc".into(), true)
         );
         assert_eq!(
-            project("/Users/me/vault.worktrees/docs-site"),
+            project("/Users/me/app.worktrees/docs-site"),
             ("docs-site".into(), true)
         );
         assert_eq!(
-            project("/Users/me/Code/DollarWise-Prototype"),
-            ("DollarWise-Prototype".into(), false)
+            project("/Users/me/projects/Example-App"),
+            ("Example-App".into(), false)
         );
         assert_eq!(project("Unknown"), ("Unknown".into(), false));
         assert_eq!(

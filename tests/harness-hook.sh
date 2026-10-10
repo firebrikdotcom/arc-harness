@@ -89,6 +89,8 @@ hook 2 '{"tool_name":"Bash","tool_input":{"command":"rm -rf build"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness plan start"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"cd '"$H"' && scripts/harness status"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"'"$H"'/scripts/harness build done"}}'
+hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness --session-id abc status"}}'
+hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness workflow todo plan --session-id abc --reason x --items []"}}'
 hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/action.sh validate /tmp/a.json"}}'
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness plan start; rm -rf build"}}'
 # A newline is a command separator, not part of the harness arguments.

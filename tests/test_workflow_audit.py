@@ -244,8 +244,22 @@ class WorkflowTests(unittest.TestCase):
             self.gate("PreToolUse",tool_name="Bash",tool_input={"command":command})
         for command in ("echo x > PRIVATE_PATH", "touch PRIVATE_PATH", "sed -i s/a/b/ PRIVATE_PATH", "find . -delete",
                         "git commit -m x", "git branch -D x", harness+" jev on", harness+" jev off", "ls $(touch PRIVATE_PATH)", "python3 -c 'print(1)'", "sh -c ls",
-                        "cat a | tee PRIVATE_PATH", "sort -o PRIVATE_PATH a"):
+                        "cat a | tee PRIVATE_PATH", "sort -o PRIVATE_PATH a", harness+" continue x", harness+" contract waive x",
+                        harness+" prune", harness+" workflow todo show --session-id other-session",
+                        harness+" --session-id=other-session status"):
             self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":command})
+
+    def test_bookkeeping_accepts_a_worktree_of_this_harness(self):
+        self.gate("UserPromptSubmit", prompt="Work")
+        wt = self.base / "harness-wt"
+        subprocess.run(["git", "worktree", "add", "--detach", str(wt)], cwd=ROOT, check=True, capture_output=True)
+        self.addCleanup(lambda: subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=ROOT, capture_output=True))
+        self.gate("PreToolUse", cwd=str(wt), tool_name="Bash",
+                  tool_input={"command": "scripts/harness plan start"})
+        self.gate("PreToolUse", cwd=str(wt), tool_name="Bash",
+                  tool_input={"command": str(ROOT / "scripts/harness") + " workflow todo plan --session-id policy-session --reason x --items []"})
+        self.gate("PreToolUse", cwd=str(wt), tool_name="Bash",
+                  tool_input={"command": str(wt / "scripts/harness") + " --session-id policy-session status"})
 
     def test_completion_freshness_follows_project_files_not_unrelated_writes(self):
         project = self.base/"project"

@@ -3,15 +3,15 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.lotharthesavior.harness-audit</string>
+  <string>__LABEL__</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>__HOME__/Code/harness-template/scripts/audit-service.sh</string>
+    <string>__HARNESS_ROOT__/scripts/audit-service.sh</string>
     <string>serve</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>__HOME__/Code/harness-template/services/harness-audit</string>
+  <string>__SERVICE_ROOT__</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

@@ -35,7 +35,7 @@ import glob
 import os
 import re
 import shlex
-import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -130,6 +130,46 @@ def is_harness_cli(word: str, cwd: str) -> bool:
     if "/" in word:
         return os.path.realpath(os.path.join(cwd, word)) == os.path.realpath(HARNESS_ROOT / "scripts" / "harness")
     return False
+
+
+def git_common_dir(root: Path) -> str:
+    """Absolute git common dir, or empty when root is not a worktree of a repo."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    common = result.stdout.strip()
+    if not common:
+        return ""
+    if not os.path.isabs(common):
+        common = os.path.join(str(root), common)
+    return os.path.realpath(common)
+
+
+def our_script(word: str, target: str, cwd: str | Path, root: Path | None = None) -> bool:
+    """True when word names this harness's script `target` in this checkout or a git worktree of it."""
+    root = Path(root or HARNESS_ROOT)
+    located = word if os.path.isabs(word) else os.path.join(str(cwd), word)
+    try:
+        resolved = os.path.realpath(located)
+        expected = os.path.realpath(root / target)
+    except OSError:
+        return False
+    if resolved == expected:
+        return True
+    rel = target.replace("\\", "/")
+    if not resolved.replace("\\", "/").endswith("/" + rel):
+        return False
+    cand_root = resolved[: -len(rel)].rstrip("/")
+    if not os.path.isfile(os.path.join(cand_root, "scripts", "guard-version")):
+        return False
+    left, right = git_common_dir(Path(cand_root)), git_common_dir(root)
+    return bool(left and left == right)
 
 
 def harness_subcommand(argv: list[str]) -> tuple[str, str, bool]:
@@ -775,16 +815,15 @@ def harness_call(command: str, project: Path, cwd: str) -> str:
     if re.match(r"^[A-Za-z_]\w*=", argv[0]):
         return "no"
     executable = argv[0]
-    located = os.path.join(where, executable) if "/" in executable else (shutil.which(executable) or "")
-    real = os.path.realpath(located) if located else ""
-    if real == os.path.realpath(project / "scripts" / "harness"):
-        # Only bookkeeping skips the other checks; launch, budget, and anything
-        # aimed at another session are judged like every command.
-        sub, second, session = harness_subcommand(argv)
-        if session or sub not in PASSABLE or (sub == "review" and second not in ("start", "done")):
+    if our_script(executable, "scripts/harness", where, project):
+        # Only bookkeeping skips the other checks; launch and budget are judged
+        # like every command. --session-id is allowed so workflow todo can name
+        # this session before a phase exists.
+        sub, second, _session = harness_subcommand(argv)
+        if sub not in PASSABLE or (sub == "review" and second not in ("start", "done")):
             return "no"
         return "pass"
-    if real == os.path.realpath(project / "scripts" / "action.sh") and len(argv) == 3 and argv[1] == "validate":
+    if our_script(executable, "scripts/action.sh", where, project) and len(argv) == 3 and argv[1] == "validate":
         return "pass"
     return "no"
 

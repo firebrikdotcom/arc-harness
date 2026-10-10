@@ -22,13 +22,33 @@ GIT_READS = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", 
              "rev-list", "merge-base", "cat-file", "ls-tree", "for-each-ref", "show-ref", "whatchanged"}
 
 def matches(word, target, cwd):
-    path = Path(word)
-    return (path if path.is_absolute() else cwd/path).resolve() == audit.ROOT/target
+    return permit.our_script(word, target, cwd, audit.ROOT)
 
-def management_segment(words, cwd):
+# Harness bookkeeping that needs no active todo; continue, contract, prune,
+# advise, and route still need one.
+TODO_FREE = {"workflow", "plan", "build", "status", "root", "step", "brief"}
+
+def named_sessions(words):
+    """Every --session-id value in words, in either spelling."""
+    found = []
+    for index, word in enumerate(words):
+        if word == "--session-id":
+            found.append(words[index + 1] if index + 1 < len(words) else "")
+        elif word.startswith("--session-id="):
+            found.append(word.split("=", 1)[1])
+    return found
+
+def management_segment(words, cwd, sid=None):
     if matches(words[0], "scripts/harness", cwd):
-        return (len(words) >= 2 and words[1] in {"workflow", "plan", "build", "review", "status", "root", "step", "brief"}
-                or len(words) >= 3 and words[1:3] == ["jev", "status"])
+        # A call aimed at another session is judged like any other command.
+        if any(value != sid for value in named_sessions(words)):
+            return False
+        sub, second, _session = permit.harness_subcommand(words)
+        if sub == "review":
+            return second in ("start", "done")
+        if sub == "jev":
+            return second == "status"
+        return sub in TODO_FREE
     if words[0] in {"python3", "/usr/bin/python3"} and len(words) > 2 and matches(words[1], "scripts/workflow_audit.py", cwd):
         return words[2] in {"task", "todo", "decision", "outcome", "gate", "flush"}
     if matches(words[0], "scripts/action.sh", cwd):
@@ -74,7 +94,7 @@ def management_command(payload):
         return False
     for segment in segments:
         words = permit.read_segment(segment, []).argv
-        if words and not (management_segment(words, cwd) or read_only_segment(words)):
+        if words and not (management_segment(words, cwd, payload.get("session_id")) or read_only_segment(words)):
             return False
     return True
 
