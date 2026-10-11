@@ -26,6 +26,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import jev_delegation  # noqa: E402
+
 MAX_BYTES = 32_000
 MAX_OPTIONS = 8
 OPTION_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -38,10 +41,19 @@ OUTCOMES = {"correct", "incorrect", "over_escalated", "under_escalated", "unknow
 CONTEXT_KEYS = {"goal", "facts", "constraints", "risks"}
 PILOT_TARGET = 30
 DEFAULT_POLICY_VERSION = "shadow-1"
+DELEGATED_POLICY_VERSION = "delegated-1"
 
 
 class InputError(ValueError):
     pass
+
+
+def delegating() -> bool:
+    """Whether `harness jev` is on; a corrupt switch file is an input error."""
+    try:
+        return jev_delegation.enabled()
+    except jev_delegation.SwitchError as error:
+        raise InputError(str(error)) from error
 
 
 def load_router(path: Path) -> Any:
@@ -256,12 +268,14 @@ def quick_context(args: argparse.Namespace) -> dict[str, Any]:
         values = getattr(args, name[:-1] if name != "facts" else "fact") or []
         if values:
             context[name] = values
+    # Delegated and shadow checkpoints are separate cohorts in the reports.
+    policy_version = args.policy_version or (DELEGATED_POLICY_VERSION if delegating() else DEFAULT_POLICY_VERSION)
     return {
         "version": 2,
         "checkpoint": {
             "family": args.family,
             "question_version": args.question_version,
-            "policy_version": args.policy_version,
+            "policy_version": policy_version,
             "baseline_action": args.baseline or "",
             "bypass_reason": args.bypass,
             "state_build_ms": None,
@@ -346,19 +360,36 @@ def audit_emit(*arguments: str) -> None:
         print(result.stderr.strip(), file=sys.stderr)
 
 
-def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any]:
+def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool | None = None) -> dict[str, Any]:
+    """Evaluate one checkpoint.
+
+    DELEGATE None follows the `harness jev` switch. When it resolves to True and
+    Jev returns a `recommendation` choice, that choice is the result's `action`
+    and `delegated` is true; otherwise the pre-recorded baseline is the action.
+    Automatic phase-gate checkpoints pass False: the gates they predict are
+    mechanical, so there is nothing for Jev to decide there.
+    """
     request_id = str(uuid.uuid4())
     started = datetime.now(timezone.utc)
     checkpoint = context.get("checkpoint", {})
     batch = questions(context)
-    model = router.pinned_model()
+    # Use the switch's exact pin when the shell has no exact pin.
+    try:
+        model = (jev_delegation.pinned_model() if jev_delegation.state()["model"]
+                 else router.pinned_model())
+    except jev_delegation.SwitchError as error:
+        raise InputError(str(error)) from error
+    if delegate is None:
+        delegate = delegating()
+    delegated = bool(delegate) and context["version"] == 2
     record = {
         "id": request_id, "call_id": request_id, "at": started.isoformat(), "ts": started.isoformat(),
         "kind": "dynamic_advice", "family": checkpoint.get("family", "legacy_advice"),
         "question_version": checkpoint.get("question_version", "legacy-v1"),
         "question_hash": hashlib.sha256(json.dumps(batch, sort_keys=True).encode()).hexdigest(),
         "policy_version": checkpoint.get("policy_version", "legacy-v1"),
-        "shadow": context["version"] == 2, "context": context, "questions": batch,
+        "shadow": context["version"] == 2, "delegation": "active" if delegated else "shadow",
+        "delegated_action": None, "context": context, "questions": batch,
         "baseline_action": checkpoint.get("baseline_action"), "state_build_ms": checkpoint.get("state_build_ms"),
         "model_requested": model, "model_returned": None, "usage": None, "latency_ms": None,
         "status": "pending", "fallback_reason": None, "answers": None,
@@ -369,6 +400,8 @@ def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any
     began = time.monotonic()
     if bypass != "none":
         record.update(status="bypassed", bypass_reason=bypass, exit_code=0)
+    elif delegated and (not model or model.endswith("-latest")):
+        record.update(status="fallback", fallback_reason="model_pin_required", exit_code=1)
     else:
         try:
             response, meta = router.post_json(
@@ -386,19 +419,29 @@ def advise(context: dict[str, Any], router: Any, db_root: Path) -> dict[str, Any
                 record["latency_ms"] = meta.get("latency_ms") if finite(meta.get("latency_ms")) else None
             record["answers"] = validated_answers(batch, response)
             record.update(status="evaluated", exit_code=0)
-            if record["model_returned"] is not None and record["model_returned"] != model:
+            if delegated and record["model_returned"] is None:
+                record.update(status="fallback", fallback_reason="missing_model", exit_code=1)
+            elif record["model_returned"] is not None and record["model_returned"] != model:
                 record.update(status="fallback", fallback_reason="model_drift", exit_code=1)
         except Exception as error:
             # Exception text can echo credentials or provider content. Store only its type.
             record.update(status="fallback", fallback_reason=type(error).__name__, exit_code=1)
         record["evaluation_wall_ms"] = round((time.monotonic() - began) * 1000)
+    chosen = None
+    if delegated and record["status"] == "evaluated":
+        chosen = ((record["answers"] or {}).get("recommendation") or {}).get("choice")
+        record["delegated_action"] = chosen
     record_path = write_record(record, db_root)
     if bypass == "none":
         router.append_jsonl(router.requests_log_path(started), {k: v for k, v in record.items() if k != "context"})
         audit_emit("checkpoint", "--record", str(record_path))
-    result = {k: record[k] for k in ("call_id", "status", "fallback_reason", "latency_ms", "answers", "shadow")}
-    result.update(advisory=True, action=record["baseline_action"] if record["shadow"] else "normal_reasoning",
-                  record_path=str(record_path))
+    result = {k: record[k] for k in ("call_id", "status", "fallback_reason", "latency_ms", "answers", "shadow", "delegation")}
+    baseline = record["baseline_action"] if record["shadow"] else "normal_reasoning"
+    result.update(advisory=chosen is None, delegated=chosen is not None, baseline=baseline,
+                  action=chosen if chosen is not None else baseline, record_path=str(record_path))
+    if delegated and chosen is None:
+        # The switch is on but there is nothing to follow: a bypass, a fallback, or no recommendation question.
+        result["delegation_gate"] = record["status"] if record["status"] != "evaluated" else "no recommendation choice"
     # Keep the successful v1 CLI response compatible.
     if not record["shadow"] and record["status"] == "evaluated":
         result.update(choice=record["answers"]["recommendation"]["choice"],
@@ -641,7 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     quick.add_argument("--risk", action="append", help="one risk; repeatable")
     quick.add_argument("--bypass", choices=sorted(BYPASSES), default="none")
     quick.add_argument("--question-version", default="quick-1")
-    quick.add_argument("--policy-version", default=DEFAULT_POLICY_VERSION)
+    quick.add_argument("--policy-version", default=None,
+                       help=f"cohort name; default {DEFAULT_POLICY_VERSION}, or {DELEGATED_POLICY_VERSION} when 'harness jev' is on")
     label = parser.add_argument_group("flag-form outcome (with --label)")
     label.add_argument("--outcome", choices=sorted(OUTCOMES))
     label.add_argument("--action-taken", help="what actually happened")

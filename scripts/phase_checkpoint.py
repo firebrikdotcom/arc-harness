@@ -819,7 +819,8 @@ def resolve(db_root: Path, router: Any, resolver: str, labeler, *arguments: Any,
 
 def emit(context: dict[str, Any], resolver: str, router: Any, db_root: Path, state: dict[str, str],
          extra: dict[str, Any] | None = None) -> str:
-    result = advice.advise(advice.validate_context(context, router), router, db_root)
+    # Gate checkpoints predict mechanical oracles; they are observations whatever `harness jev` says.
+    result = advice.advise(advice.validate_context(context, router), router, db_root, delegate=False)
     write_pending(db_root, result, context, resolver, state, extra)
     family = context["checkpoint"]["family"]
     version = context["checkpoint"]["question_version"]
@@ -863,12 +864,19 @@ def session_start(project: Path, db_root: Path, router: Path) -> str:
         json.dump(metadata, handle)
         path = Path(handle.name)
     try:
-        route = task_route.route_task(path, project, db_root, router, "shadow")
+        # None: active when `harness jev` is on, shadow otherwise.
+        route = task_route.route_task(path, project, db_root, router, None)
     finally:
         path.unlink(missing_ok=True)
     observed = route.get("observed_recommendation") or route.get("recommendation")
     summary = advice.pilot(db_root)
-    line = f"Jev shadow route for this session: {observed} (source {route['source']}, shadow; existing rules decide). "
+    if route.get("routing_mode") == "active" and route["source"] == "typesafe":
+        line = (f"Jev delegated route for this session: {observed} (source typesafe, active; "
+                "follow it unless a deterministic rule decides). ")
+    else:
+        line = f"Jev shadow route for this session: {observed} (source {route['source']}, shadow; existing rules decide). "
+        if route.get("delegation_gate"):
+            line += f"Delegation is on but held back: {route['delegation_gate']}. "
     if summary["labeled"] >= summary["target"]:
         # Past the target, more shadow labels add nothing; the pilot needs a decision.
         return line + (f"Pilot complete ({summary['labeled']} labeled, {summary['target']} needed): "

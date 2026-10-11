@@ -76,7 +76,7 @@ class FakeRouter:
 
     def post_json(self, url, payload, key, timeout):
         self.calls.append(payload)
-        return {"answers": {"recommendation": {"choice": self.choice, "confidence": 0.92}}}, {"http_status": 200, "latency_ms": 4}
+        return {"model": "fixture", "answers": {"recommendation": {"choice": self.choice, "confidence": 0.92}}}, {"http_status": 200, "latency_ms": 4}
 
     @staticmethod
     def requests_log_path(started):
@@ -91,11 +91,14 @@ class ContextAdviceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="harness-context-advice-")
         self.addCleanup(self.temp.cleanup)
-        # Fixture checkpoints must never reach the machine's Arc audit service.
-        environment = unittest.mock.patch.dict(os.environ, {"HARNESS_AUDIT_ENABLED": "0"})
+        self.root = Path(self.temp.name)
+        # Fixture checkpoints must never reach the machine's Arc audit service,
+        # and the delegation switch they see is this temp dir's, never the machine's.
+        environment = unittest.mock.patch.dict(os.environ, {"HARNESS_AUDIT_ENABLED": "0", "TYPESAFE_MODEL": "fixture",
+                                                            "HARNESS_CONFIG_HOME": str(self.root / "config")})
         environment.start()
         self.addCleanup(environment.stop)
-        self.root = Path(self.temp.name)
+        os.environ.pop("HARNESS_JEV_DELEGATION", None)
         self.path = self.root / "context.json"
 
     def write(self, value) -> None:
@@ -190,6 +193,116 @@ class ContextAdviceTests(unittest.TestCase):
         record = json.loads(Path(result["record_path"]).read_text())
         self.assertEqual(record["model_returned"], "fixture")
         self.assertEqual(record["usage"]["input_tokens"], 10)
+
+    def test_delegated_checkpoint_returns_jev_choice_as_the_action(self):
+        router = self.batch_router()
+        self.write(self.checkpoint())
+        result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
+        self.assertEqual((result["status"], result["delegated"], result["advisory"]), ("evaluated", True, False))
+        self.assertEqual((result["action"], result["baseline"], result["delegation"]), ("trace", "inspect", "active"))
+        record = json.loads(Path(result["record_path"]).read_text())
+        self.assertEqual((record["delegation"], record["delegated_action"], record["baseline_action"]), ("active", "trace", "inspect"))
+        # The baseline is still persisted first and never sent, so the comparison stays honest.
+        self.assertNotIn("baseline_action", json.dumps(router.calls[0]["state"]))
+
+    def test_delegation_follows_the_switch_file_and_its_override(self):
+        self.assertEqual((self.evaluate()["delegated"], self.evaluate()["action"]), (False, "inspect"))
+        config = Path(os.environ["HARNESS_CONFIG_HOME"])
+        config.mkdir()
+        (config / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": "fixture"}))
+        self.assertEqual((self.evaluate()["delegated"], self.evaluate()["action"]), (True, "trace"))
+        with unittest.mock.patch.dict(os.environ, {"HARNESS_JEV_DELEGATION": "off"}):
+            self.assertEqual(self.evaluate()["action"], "inspect")
+        # An explicit False (the automatic gate checkpoints) ignores the switch.
+        self.write(self.checkpoint())
+        router = self.batch_router()
+        kept = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=False)
+        self.assertEqual((kept["delegated"], kept["action"], kept["delegation"]), (False, "inspect", "shadow"))
+        (config / "jev-delegation.json").write_text("{broken")
+        with self.assertRaises(ADVICE.InputError):
+            self.evaluate()
+
+    def test_advice_uses_persisted_model_pin_without_shell_pin(self):
+        config = self.root / "config"
+        config.mkdir()
+        (config / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": "stored-exact"}))
+        self.write(self.checkpoint())
+        router = FakeRouter("trace")
+        with unittest.mock.patch.dict(os.environ, {"TYPESAFE_MODEL": ""}):
+            result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db")
+        self.assertEqual(router.calls[0]["model"], "stored-exact")
+        self.assertEqual(json.loads(Path(result["record_path"]).read_text())["model_requested"], "stored-exact")
+
+    def test_active_advice_requires_exact_returned_model(self):
+        for returned, reason in ((None, "missing_model"), ("other-pin", "model_drift")):
+            router = self.batch_router()
+            post = router.post_json
+            def response(*args, **kwargs):
+                body, meta = post(*args, **kwargs)
+                body["model"] = returned
+                return body, meta
+            router.post_json = response
+            self.write(self.checkpoint())
+            result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
+            self.assertEqual((result["status"], result["action"], result["delegated"], result["fallback_reason"]),
+                             ("fallback", "inspect", False, reason))
+        router = self.batch_router()
+        router.pinned_model = lambda: "jev-latest"
+        self.write(self.checkpoint())
+        result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
+        self.assertEqual((result["delegated"], result["fallback_reason"]), (False, "model_pin_required"))
+        self.assertEqual(router.calls, [])
+
+    def test_shadow_advice_accepts_legacy_response_without_model(self):
+        router = self.batch_router()
+        post = router.post_json
+        def response(*args, **kwargs):
+            body, meta = post(*args, **kwargs)
+            body.pop("model")
+            return body, meta
+        router.post_json = response
+        result = self.evaluate(router=router)
+        self.assertEqual((result["status"], result["action"], result["delegated"]), ("evaluated", "inspect", False))
+
+    def test_delegation_keeps_the_baseline_on_bypass_fallback_and_v1(self):
+        bypassed = self.checkpoint()
+        bypassed["checkpoint"]["bypass_reason"] = "required_check"
+        bypassed["questions"] = {}
+        self.write(bypassed)
+        router = FakeRouter()
+        result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
+        self.assertEqual((result["status"], result["action"], result["delegated"], result["delegation_gate"]),
+                         ("bypassed", "inspect", False, "bypassed"))
+        self.assertEqual(router.calls, [])
+        self.write(self.checkpoint())
+        router = self.batch_router({"model": "different", "answers": {
+            "recommendation": {"choice": "trace", "confidence": .8}, "impact": {"score": .4, "confidence": .2}, "sufficient": {"noul": .05}}})
+        result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
+        self.assertEqual((result["status"], result["action"], result["delegated"], result["delegation_gate"]),
+                         ("fallback", "inspect", False, "fallback"))
+        self.write(CONTEXT)
+        router = FakeRouter()
+        result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
+        self.assertEqual((result["choice"], result["delegated"], result["delegation"], result["action"]),
+                         ("event_sourcing", False, "shadow", "normal_reasoning"))
+
+    def test_flag_form_follows_the_switch_and_names_the_cohort(self):
+        router = ROOT / "tests" / "fake_router.py"
+        config = Path(os.environ["HARNESS_CONFIG_HOME"])
+        config.mkdir()
+        (config / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": "fixture"}))
+        env = {**os.environ, "FAKE_ROUTER_LOG_DIR": str(self.root / "logs"), "FAKE_ROUTER_CHOICE": "retrieval"}
+        cli = [sys.executable, str(ROOT / "scripts/context_advice.py"), "--db-root", str(self.root / "db"), "--router", str(router),
+               "--family", "tool_selection", "--baseline", "grep", "--goal", "Locate the code for one task.",
+               "--choice", "grep=A targeted grep.", "--choice", "retrieval=One semantic retrieval first."]
+        delegated = json.loads(subprocess.run(cli, env=env, capture_output=True, text=True, check=True).stdout)
+        self.assertEqual((delegated["action"], delegated["baseline"], delegated["delegated"]), ("retrieval", "grep", True))
+        self.assertEqual(json.loads(Path(delegated["record_path"]).read_text())["policy_version"], "delegated-1")
+        named = json.loads(subprocess.run(cli + ["--policy-version", "shadow-1"], env=env, capture_output=True, text=True, check=True).stdout)
+        self.assertEqual(json.loads(Path(named["record_path"]).read_text())["policy_version"], "shadow-1")
+        shadow = json.loads(subprocess.run(cli, env={**env, "HARNESS_JEV_DELEGATION": "off"}, capture_output=True, text=True, check=True).stdout)
+        self.assertEqual((shadow["action"], shadow["delegated"]), ("grep", False))
+        self.assertEqual(json.loads(Path(shadow["record_path"]).read_text())["policy_version"], "shadow-1")
 
     def test_all_deterministic_bypasses_avoid_network(self):
         for reason in ADVICE.BYPASSES - {"none"}:

@@ -68,7 +68,9 @@ usage() {
   info "  launch --state PATH --default-command PATH"
   info "                       Select and start an argv command profile."
   info "  advise --context PATH | --family F ... | --record PATH | --label ID ... | --pending | --report"
-  info "                       Shadow advice, flag-form checkpoints, outcomes, and reports."
+  info "                       Jev advice, flag-form checkpoints, outcomes, and reports."
+  info "  jev on|off|status    The persisted delegation switch: off compares Jev with the agent's"
+  info "                       baseline (shadow); on follows Jev where the harness has a lever."
   info "  budget --thread ID --tokens N [--watch]"
   info "                       Measure a Codex thread and interrupt its active turn at the cap."
   info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
@@ -1433,6 +1435,13 @@ case "$COMMAND" in
     ;;
   workflow)
     exec python3 "$SCRIPT_DIR/workflow_audit.py" "$@"
+    ;;
+  jev)
+    if ! has_cmd python3; then
+      info "FAIL: python3 is required for the Jev delegation switch."
+      exit "$EXIT_USAGE"
+    fi
+    exec python3 "$SCRIPT_DIR/jev_delegation.py" "$@"
     ;;
   route|launch|advise|budget)
     if ! has_cmd python3; then

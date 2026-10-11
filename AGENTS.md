@@ -14,7 +14,7 @@ This repository is a harness: the environment that makes an AI agent's work boun
 | `tasks/task.example.json` | A filled-in task contract to copy. |
 | `docs/setup.md` | Every command and environment variable in detail. |
 | `docs/architecture.md`, `docs/conventions.md` | How the pieces fit; coding conventions. |
-| `docs/jev-checkpoints.md` | Optional shadow advice (Jev, TypeSafe). |
+| `docs/jev-checkpoints.md` | Optional Jev (TypeSafe) advice, and the `harness jev` switch that decides whether it is followed. |
 | `tests/` | One script per behaviour; `scripts/verify.sh` runs them all. |
 
 The harness root and the target project may differ. Run the scripts with `--project PATH` for another project; its runs, records, and map live in the ignored `.harness-db/`, never in the project.
@@ -63,7 +63,7 @@ scripts/harness review done                 # needs an approval of the current f
 
 - Session start prints `scripts/harness brief`: this session's run (or the latest), its contract, any pause, recent steps, and the project map. Record steps with `scripts/harness step --note "..."`.
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: `scripts/harness continue "<new approach>"`. Abort is theirs.
-- Optional shadow advice (Jev, TypeSafe) and the task launcher: docs/jev-checkpoints.md, docs/setup.md. Semantic search: `scripts/jg.sh --project PATH "question"`.
+- Jev (TypeSafe) advice and the task launcher: docs/jev-checkpoints.md, docs/setup.md. `scripts/harness jev status` says whether Jev is followed: off, every call is a shadow comparison and your own baseline runs; on, the session-start route is the route to take and `scripts/harness advise` returns Jev's choice as `action` with `delegated: true`, so take that action unless a deterministic rule (permissions, required checks, failures, the user's choice) decides otherwise, then label the call. Semantic search: `scripts/jg.sh --project PATH "question"`.
 <!-- harness-cli:end -->
 
 <!-- shared-rule:lavish-sequential-review:start -->

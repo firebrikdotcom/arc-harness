@@ -239,11 +239,11 @@ class WorkflowTests(unittest.TestCase):
         harness = str(ROOT/"scripts/harness")
         for command in ("ls -la", "git status --short", "git log --oneline -3 | head -n 2", "cat README.md | grep -n x 2>/dev/null",
                         "find . -name '*.md' | wc -l", "sed -n 1,5p README.md", "cd scripts && ls",
-                        harness+" workflow todo show && "+harness+" status", str(ROOT/"scripts/verify.sh")+" --project .",
+                        harness+" workflow todo show && "+harness+" status", harness+" jev status --json", str(ROOT/"scripts/verify.sh")+" --project .",
                         str(ROOT/"scripts/review.sh")+" --project ."):
             self.gate("PreToolUse",tool_name="Bash",tool_input={"command":command})
         for command in ("echo x > PRIVATE_PATH", "touch PRIVATE_PATH", "sed -i s/a/b/ PRIVATE_PATH", "find . -delete",
-                        "git commit -m x", "git branch -D x", "ls $(touch PRIVATE_PATH)", "python3 -c 'print(1)'", "sh -c ls",
+                        "git commit -m x", "git branch -D x", harness+" jev on", harness+" jev off", "ls $(touch PRIVATE_PATH)", "python3 -c 'print(1)'", "sh -c ls",
                         "cat a | tee PRIVATE_PATH", "sort -o PRIVATE_PATH a"):
             self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":command})
 

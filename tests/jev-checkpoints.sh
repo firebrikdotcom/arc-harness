@@ -5,6 +5,9 @@ set -eu
 
 ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$ROOT"
+# The fixtures use the legacy run and record paths and model a human at a terminal: the caller's
+# native session must not move them, and its agent markers must not wake the todo gate.
+unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX || true
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-jev.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 # review submit asks for a typed confirmation on a terminal; tests answer from a file.
@@ -31,7 +34,9 @@ export FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
 export HARNESS_AUDIT_ENABLED=0
 export HARNESS_ROOT="$ROOT"
 export HARNESS_DB_ROOT="$TMP_ROOT/db"
-unset HARNESS_BUDGET_STEPS HARNESS_BUDGET_TIME_MIN HARNESS_BUDGET_LOOPS HARNESS_BUDGET_TOKENS || true
+# The delegation switch these cases see is the temp dir's (off), never the machine's.
+export HARNESS_CONFIG_HOME="$TMP_ROOT/config"
+unset HARNESS_BUDGET_STEPS HARNESS_BUDGET_TIME_MIN HARNESS_BUDGET_LOOPS HARNESS_BUDGET_TOKENS HARNESS_JEV_DELEGATION || true
 
 # A harness target: a git worktree whose guide carries the harness block.
 TARGET="$TMP_ROOT/target"

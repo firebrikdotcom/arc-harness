@@ -84,14 +84,15 @@ scripts/agent_launch.py     Launches an argv command profile selected by the tas
 scripts/codex_budget.py     App Server-owned Codex goal-token meter and active-turn interrupter
 scripts/audit_emit.py       Best-effort route, outcome, and token telemetry bridge
 scripts/audit-service.sh    Runs the versioned Arc audit service
-scripts/jev-enable.sh       Enables shadow JEV checkpoints, the model pin, and Arc telemetry for a shell
-scripts/context_advice.py   Shadow checkpoints (file or flag form), outcome labels, pending list, and cohort/pilot reports
+scripts/jev-enable.sh       Enables JEV checkpoint collection, the model pin, and Arc telemetry for a shell
+scripts/jev_delegation.py   The persisted `harness jev on|off|status` switch: shadow comparison, or follow Jev
+scripts/context_advice.py   Jev checkpoints (file or flag form), outcome labels, pending list, and cohort/pilot reports
 scripts/phase_checkpoint.py Automatic shadow checkpoints and mechanical labels at phase gates, verify, review, and hooks
 scripts/install-hooks.sh    Installs the auto-init and Jev hooks into Claude Code and Codex user settings
 scripts/harness-target.sh   Machine-local target registry: project root, register, lookup, per-target database, bootstrap fingerprint
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, then runs the session route
-scripts/hooks/session-route.sh  SessionStart hook: one shadow task-entry route per interactive session in a harness target
+scripts/hooks/session-route.sh  SessionStart hook: one task-entry route per interactive session in a harness target (shadow, or delegated when the switch is on)
 scripts/observe_commands.py    Session-scoped PreToolUse command-repeat observer; never blocks
 scripts/session_hook.py        Native SessionStart identity binding before bootstrap/routing
 scripts/run_paths.py           Shared session-owned current-pointer and check-record selector
@@ -149,9 +150,9 @@ Projects can make a category mandatory with `.harness-required-checks` (or `HARN
 
 `make install-guides PROJECT=/path/to/project` refreshes the marked Harness Phases block in a target's `AGENTS.md` and `CLAUDE.md`, preserving the rest of each file. For an external target, that block uses this harness's absolute CLI path.
 
-For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Shadow mode always preserves the default command; active mode additionally requires an explicit switch and sufficient recorded shadow outcomes. `HARNESS_TYPESAFE_ROLLOUT_PERCENT=10`, then `25`, `50`, and `100`, provides stable staged delegation after activation.
+For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Whether Jev's route is followed is the persisted switch `scripts/harness jev on|off|status` (stored in `~/.config/harness/jev-delegation.json`, outside every checkout): off, shadow mode preserves the default command and records the comparison; on, `route` and `launch` run in active mode and select the profile Jev recommends, after the deterministic gates. `--mode` on a single call overrides the switch, and `HARNESS_TYPESAFE_ROLLOUT_PERCENT=10`, then `25`, `50`, and `100`, stages the delegation.
 
-`scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option.
+`scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option. With the switch on, a v2 checkpoint's `action` is Jev's choice (`delegated: true`) instead of the agent's baseline; the agent takes it unless a deterministic rule decides otherwise.
 
 Open `tools/auditability-planning-wizard.html` directly in a browser to plan the first Arc/JEV auditability slice. It stores answers in that browser, warns against raw prompts and secrets, and exports a Markdown brief plus structured JSON without network requests or a build step.
 
@@ -187,7 +188,7 @@ Project-related documents are local database records for the harness. Keep proje
 
 ## Jev decision checkpoints
 
-Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices, v2 shadow batches from a file or from flags (`--family ...`), `--record`/`--label` for outcomes, `--pending` for unlabeled checkpoints, and `--report` for versioned cohorts plus the pilot counter, all without executing anything. With `HARNESS_JEV_CHECKPOINTS=1` the phase gates, `verify.sh`, `review.sh`, and the installed hooks emit and label shadow checkpoints automatically; see `docs/setup.md`.
+Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices, v2 batches from a file or from flags (`--family ...`), `--record`/`--label` for outcomes, `--pending` for unlabeled checkpoints, and `--report` for versioned cohorts plus the pilot counter, all without executing anything. `scripts/harness jev on|off|status` is the persisted switch between comparing Jev with the agent's baseline (shadow, the default) and following Jev's choice; shadow and delegated checkpoints report as separate cohorts (`shadow-1`, `delegated-1`). With `HARNESS_JEV_CHECKPOINTS=1` the phase gates, `verify.sh`, `review.sh`, and the installed hooks emit and label checkpoints automatically; those stay shadow observations in both modes because the gates they predict are mechanical. See `docs/setup.md`.
 
 ## Semantic retrieval
 

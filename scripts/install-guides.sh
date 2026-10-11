@@ -93,7 +93,7 @@ $CLI review done                 # needs an approval of the current files; no no
 
 - Session start prints \`$CLI brief\`: this session's run (or the latest), its contract, any pause, recent steps, and the project map. Record steps with \`$CLI step --note "..."\`.
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: \`$CLI continue "<new approach>"\`. Abort is theirs.
-- Optional shadow advice (Jev, TypeSafe) and the task launcher: $DOCS/jev-checkpoints.md, $DOCS/setup.md. Semantic search: \`$JG --project PATH "question"\`.
+- Jev (TypeSafe) advice and the task launcher: $DOCS/jev-checkpoints.md, $DOCS/setup.md. \`$CLI jev status\` says whether Jev is followed: off, every call is a shadow comparison and your own baseline runs; on, the session-start route is the route to take and \`$CLI advise\` returns Jev's choice as \`action\` with \`delegated: true\`, so take that action unless a deterministic rule (permissions, required checks, failures, the user's choice) decides otherwise, then label the call. Semantic search: \`$JG --project PATH "question"\`.
 $END_MARK
 BLOCK
 
