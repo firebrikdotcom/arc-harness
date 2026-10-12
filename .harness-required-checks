@@ -1,0 +1,3 @@
+# Categories that must run at least one check successfully.
+lint
+test

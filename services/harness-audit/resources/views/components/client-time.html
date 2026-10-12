@@ -1,0 +1,55 @@
+<script>
+(() => {
+ const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+ const cookieZone = () => document.cookie.split('; ').find(cookie => cookie.startsWith('audit_timezone='))?.slice('audit_timezone='.length);
+ if (cookieZone() !== zone) {
+  document.cookie = `audit_timezone=${zone}; Path=/; SameSite=Lax`;
+  if (cookieZone() === zone) { location.reload(); return; }
+ }
+ const format = new Intl.DateTimeFormat(undefined, {timeZone:zone, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', timeZoneName:'short'});
+ const clock = new Intl.DateTimeFormat(undefined, {timeZone:zone, hour:'2-digit', minute:'2-digit'});
+ function localizeTimes() {
+  document.querySelectorAll('[data-client-zone]').forEach(node => { node.textContent = zone; });
+  document.querySelectorAll('[data-client-time], [data-client-micros]').forEach(node => {
+   const raw = node.dataset.clientTime;
+   const value = node.dataset.clientMicros;
+   const date = new Date(value !== undefined && value !== '' ? Number(value) / 1000 : raw || NaN);
+   node.textContent = Number.isFinite(date.getTime()) ? format.format(date) : 'Not captured';
+   if (node.tagName === 'TIME' && Number.isFinite(date.getTime())) node.dateTime = date.toISOString();
+  });
+  // Timeline rows show only the local clock; the full instant stays in the tooltip.
+  document.querySelectorAll('[data-client-clock]').forEach(node => {
+   const date = new Date(node.dataset.clientClock || NaN);
+   if (!Number.isFinite(date.getTime())) { node.textContent = '—'; return; }
+   node.textContent = clock.format(date); node.title = format.format(date); node.dateTime = date.toISOString();
+  });
+  // Directory rows say how long ago a session was active.
+  document.querySelectorAll('[data-client-relative]').forEach(node => {
+   const date = new Date(node.dataset.clientRelative || NaN);
+   if (!Number.isFinite(date.getTime())) { node.textContent = 'Not captured'; return; }
+   const minutes = Math.round((Date.now() - date.getTime()) / 60000);
+   node.textContent = minutes < 1 ? 'just now' : minutes < 60 ? `${minutes}m ago` : minutes < 2880 ? `${Math.round(minutes / 60)}h ago` : `${Math.round(minutes / 1440)}d ago`;
+   node.title = format.format(date); node.dateTime = date.toISOString();
+  });
+ }
+ // Rows loaded after the page (show more, task details) reuse the time formatting only.
+ window.localizeClientTimes = localizeTimes;
+ function localize() {
+  localizeTimes();
+  document.querySelectorAll('[data-client-calendar]').forEach(node => {
+   const available = node.dataset.clientCalendar === zone && cookieZone() === zone;
+   node.hidden = !available;
+   if (!available) {
+    const notice = document.createElement('p'); notice.className = 'section-note';
+    notice.textContent = 'Enable cookies to show calendar dates and date filters in your timezone.';
+    node.before(notice);
+   }
+  });
+  document.querySelectorAll('[data-client-date-filter]').forEach(node => { node.disabled = cookieZone() !== zone; });
+  document.documentElement.classList.add('client-time-ready');
+ }
+ document.addEventListener('DOMContentLoaded', localize, {once:true});
+ document.addEventListener('visibilitychange', () => { if (!document.hidden && Intl.DateTimeFormat().resolvedOptions().timeZone !== zone) location.reload(); });
+ window.addEventListener('pageshow', event => { if (event.persisted) location.reload(); });
+})();
+</script><style>html:not(.client-time-ready) [data-client-calendar] { visibility:hidden; }</style>

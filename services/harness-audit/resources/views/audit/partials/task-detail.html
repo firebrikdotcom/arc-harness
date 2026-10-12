@@ -1,0 +1,12 @@
+{% set detail = expanded_task %}{% set session_param = selected.session_id | urlencode %}{% set task_param = detail.task_id | urlencode %}{% set back_param = return_to | urlencode %}{% set task_url = "/workflow?session_id=" ~ session_param ~ "&task_id=" ~ task_param ~ "&return_to=" ~ back_param %}<div class="task-detail">
+{% if detail.description %}<p class="task-description">{{ detail.description }}</p>{% endif %}
+{% if detail.outcome %}<p class="task-outcome"><strong>Outcome:</strong> {{ detail.outcome }}</p>{% endif %}
+<p class="task-links"><a href="{{ task_url }}#timeline">Timeline for this task</a><span class="mono muted">{{ detail.task_id }}</span>{% if detail.parent_task_id %}<span class="muted">Parent <span class="mono">{{ detail.parent_task_id }}</span></span>{% endif %}</p>
+{% if detail.phases %}<div class="phase-list">{% for phase, state in detail.phases %}<span class="phase-pill">{{ phase }}: {{ state }}</span>{% endfor %}</div>{% endif %}
+<div class="todo-plan"><h4>Todo plan · {{ detail.plan_status | replace(from='_', to=' ') }}</h4>
+{% set removed = detail.todo_list | filter(attribute="status", value="removed") %}
+{% if detail.todo_list %}<ol class="todo-items">{% for todo in detail.todo_list %}{% if todo.status != "removed" %}{% include "audit/partials/todo-item.html" %}{% endif %}{% endfor %}</ol>
+{% if removed %}<details class="todo-history"><summary>Removed from plan · {{ removed | length }}</summary><ol class="todo-items">{% for todo in removed %}{% include "audit/partials/todo-item.html" %}{% endfor %}</ol></details>{% endif %}
+{% else %}<p class="muted">No todo plan recorded for this task.</p>{% endif %}
+{% if detail.plan_revisions %}<details class="todo-history"><summary>Plan history · {{ detail.plan_revisions | length }}</summary><ol class="history-list">{% for revision in detail.plan_revisions %}<li><time data-client-time="{{ revision.occurred_at }}">—</time><span>{{ revision.description }}{% if revision.revision %} · revision {{ revision.revision }}{% endif %}</span></li>{% endfor %}</ol></details>{% endif %}
+</div></div>

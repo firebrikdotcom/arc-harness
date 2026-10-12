@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Harness first-slice planner</title>
+  <style>
+    :root { color-scheme: light; --ink: #17211d; --muted: #5d6962; --line: #cbd3cd; --paper: #fff; --accent: #126c52; --wash: #dcefe8; }
+    body { max-width: 800px; margin: 48px auto; padding: 0 24px; background: #f5f7f4; color: var(--ink); font: 16px/1.5 Georgia, serif; }
+    h1, h2, legend, button { font-family: Arial, sans-serif; }
+    fieldset { border: 0; border-top: 1px solid var(--line); padding: 20px 0; }
+    legend { font-size: 19px; font-weight: 700; }
+    .help { color: var(--muted); font-size: 14px; }
+    textarea, select { box-sizing: border-box; width: 100%; padding: 10px; font: inherit; }
+    button { margin: 0 6px 8px 0; padding: 10px 14px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font-weight: 700; cursor: pointer; }
+    button.secondary { background: var(--paper); color: var(--accent); }
+    button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid #f0a43a; outline-offset: 2px; }
+    pre { overflow-wrap: anywhere; white-space: pre-wrap; background: var(--paper); padding: 18px; border: 1px solid var(--line); }
+    .notice { padding: 14px; background: var(--wash); border-left: 4px solid var(--accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <p>Harness improvement study</p>
+    <h1>First-slice planner</h1>
+    <p>Ten decisions only. Established direction: Arc is the event-sourced foundation; prompts are fingerprinted/redacted; routing starts in shadow mode.</p>
+    <p class="notice"><strong>Do not enter raw prompts, source, credentials, or personal data.</strong> Answers remain in this browser until export.</p>
+    <form id="planner"></form>
+    <p>
+      <button id="brief" type="button">Generate brief</button>
+      <button id="clear" class="secondary" type="button">Clear</button>
+    </p>
+    <section id="output" aria-live="polite"></section>
+  </main>
+  <script>
+    const questions = [
+      ['pilot', 'What single workflow is the first pilot?', ['Central harness launches only', 'Central harness + Herdr-managed agents', 'All local agent sessions']],
+      ['store', 'Confirm the audit foundation.', ['Arc + SQLite first, Postgres-ready', 'Arc + Postgres', 'Different approach']],
+      ['events', 'Which facts must the pilot record?', ['Session lifecycle and ownership', 'Routing and deterministic exclusions', 'JEV advice and result', 'Verification and review outcome']],
+      ['prompt', 'Confirm the prompt-data boundary.', ['Fingerprint + redacted classification only', 'Encrypted project-local copy + fingerprint']],
+      ['route', 'Which decision is JEV’s first shadow-mode target?', null],
+      ['success', 'Which measurable outcome proves the pilot helps?', null],
+      ['projection', 'Which projection should reviewers see first?', ['Session timeline', 'JEV opportunity and outcome queue', 'Verification and review dashboard']],
+      ['delivery', 'How should events travel between machines?', ['Local outbox with idempotent delivery', 'Shared Postgres event store', 'Manual export during the pilot']],
+      ['operations', 'What access, retention, and repair rule must operations enforce?', null],
+      ['active', 'What evidence is required before active routing?', null],
+    ];
+
+    if (questions.length !== 10) throw new Error('The planner must contain exactly ten decisions.');
+
+    const storageKey = 'harness-first-slice-planner-v2';
+    const form = document.querySelector('#planner');
+    const output = document.querySelector('#output');
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(storageKey) || '{}'); } catch (_) { saved = {}; }
+
+    const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (character) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[character]));
+
+    form.innerHTML = questions.map(([id, label, options]) => `
+      <fieldset>
+        <legend>${escapeHtml(label)}</legend>
+        <p class="help">Required</p>
+        ${options
+          ? `<select name="${id}" required><option value="">Choose…</option>${options.map((option) => `<option value="${escapeHtml(option)}" ${saved[id] === option ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select>`
+          : `<textarea name="${id}" rows="3" required>${escapeHtml(saved[id])}</textarea>`}
+      </fieldset>`).join('');
+
+    const answers = () => Object.fromEntries(
+      [...new FormData(form)].map(([key, value]) => [key, value.trim()]),
+    );
+
+    const markdownFor = (values, generatedAt) => {
+      const missing = questions.filter(([id]) => !values[id]);
+      const lines = ['# Harness first-slice brief', '', `Generated: ${generatedAt}`, '', '## Decisions'];
+      questions.forEach(([id, label]) => {
+        if (values[id]) lines.push('', `### ${label}`, values[id]);
+      });
+      if (missing.length) lines.push('', '## Still needed', ...missing.map(([, label]) => `- ${label}`));
+      return { missing, text: lines.join('\n') };
+    };
+
+    const jsonFor = (values, generatedAt) => JSON.stringify({
+      version: 1,
+      generated_at: generatedAt,
+      decisions: values,
+      missing: questions.filter(([id]) => !values[id]).map(([id, label]) => ({ id, question: label })),
+    }, null, 2);
+
+    const downloadText = (filename, content, type) => {
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(new Blob([content], { type }));
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    };
+
+    form.addEventListener('input', () => localStorage.setItem(storageKey, JSON.stringify(answers())));
+
+    document.querySelector('#brief').addEventListener('click', () => {
+      const values = answers();
+      const generatedAt = new Date().toISOString();
+      const markdown = markdownFor(values, generatedAt);
+      const json = jsonFor(values, generatedAt);
+      output.innerHTML = `
+        <h2>Implementation brief</h2>
+        <p>${markdown.missing.length ? `${markdown.missing.length} essential decisions remain.` : 'Ready for an implementation plan.'}</p>
+        <button id="download-markdown" type="button">Download Markdown</button>
+        <button id="download-json" class="secondary" type="button">Download JSON</button>
+        <pre>${escapeHtml(markdown.text)}</pre>`;
+      document.querySelector('#download-markdown').addEventListener('click', () => downloadText('harness-first-slice-brief.md', markdown.text, 'text/markdown'));
+      document.querySelector('#download-json').addEventListener('click', () => downloadText('harness-first-slice-answers.json', json, 'application/json'));
+    });
+
+    document.querySelector('#clear').addEventListener('click', () => {
+      localStorage.removeItem(storageKey);
+      form.reset();
+      output.replaceChildren();
+    });
+  </script>
+</body>
+</html>

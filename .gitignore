@@ -1,0 +1,52 @@
+# Local runtime environments
+.venv/
+venv/
+env/
+
+# Environment and secret material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+.cache/
+
+# Local harness database: project registries, run state, task notes, and indexes.
+# These are machine/project specific and must not be tracked by this template repo.
+.harness-db/
+harness-db/
+
+# Dependency/build output
+node_modules/
+dist/
+build/
+coverage/
+__pycache__/
+*.py[cod]
+
+# Local agent runtime installs and machine-specific hook state.
+# Keep portable harness docs/scripts in the repo; regenerate these locally.
+.codex/
+.agents/
+
+# Personal Claude Code settings; the shared hook config lives in .claude/settings.json.
+.claude/settings.local.json

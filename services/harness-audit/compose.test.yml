@@ -1,0 +1,13 @@
+services:
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/app:ro
+      - ${HOME}/.cargo/registry:/usr/local/cargo/registry:ro
+      - target:/target
+    environment:
+      HARNESS_AUDIT_ENABLED: "0"
+volumes:
+  target:

@@ -1,0 +1,5 @@
+FROM rust:1.90-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-dev pkg-config python3 && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+ENV CARGO_TARGET_DIR=/target
+CMD ["cargo", "test", "--locked", "--offline"]
