@@ -28,14 +28,14 @@ case "${HOME:-}" in
     ;;
 esac
 
-# So is this machine's own name. LICENSE is skipped: its copyright holder's
+# So is this machine's own name. The LICENSE files are skipped: their copyright holder's
 # name may also name a machine.
 host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || true)
 case "$host" in
   ''|localhost|localhost.*) ;;
   *)
     if [ "${#host}" -ge 4 ]; then
-      own=$(git grep -nIwiF "$host" -- . ':!tests/personal-paths.sh' ':!LICENSE' || true)
+      own=$(git grep -nIwiF "$host" -- . ':!tests/personal-paths.sh' ':!LICENSE*' || true)
       found=$(printf '%s\n%s\n' "$found" "$own")
     fi
     ;;
