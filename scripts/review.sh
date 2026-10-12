@@ -59,6 +59,10 @@ fi
 
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd -P)
 BASE_DB_ROOT=$HARNESS_DB_ROOT
+if [ -f "$BASE_DB_ROOT/review-off" ]; then
+  info "Review is off ($BASE_DB_ROOT/review-off exists); no packet written and no reviewer started."
+  exit 0
+fi
 
 # A registered target (scripts/harness-target.sh) owns its own database
 # beneath the database root.

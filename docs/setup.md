@@ -108,6 +108,7 @@ Optional harness variables:
 - `HARNESS_RETAIN_RUNS`: runs kept per database before `plan start` archives older finished ones; default `50`.
 - `HARNESS_CONFIRM_TTY`: the terminal `harness review submit` reads its confirmation from; default `/dev/tty`. Tests point it at a file. Never set it in the environment an agent starts from, and agent commands may not assign it.
 - `HARNESS_REVIEW_BASE`: commit the review packet's committed diff starts from; default the run's `CONTRACT_BASE`.
+- Review switch (a file, not a variable): a person turns the review phase off with `touch .harness-db/review-off` in the harness root (agents cannot write the database) and back on by deleting it. While it exists, `harness build done` completes the run and `scripts/review.sh` exits without writing a packet or starting a reviewer.
 - `HARNESS_CRITERION_TIMEOUT`: seconds each contract acceptance command may run at `build done`; default `900`.
 - `HARNESS_HOME`: the installed harness root for the guard-version check; defaults to the path `scripts/install-hooks.sh` records in `~/.config/harness/root`.
 - `HARNESS_REQUIRED_CHECKS`: whitespace-separated verification categories (`format`, `lint`, `typecheck`, `test`, `build`); it overrides `.harness-required-checks` for a temporary or CI-specific requirement.

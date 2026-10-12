@@ -176,6 +176,9 @@ setup_paths() {
     *) TARGET_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P) ;;
   esac
   DB_ROOT=${HARNESS_DB_ROOT:-$ROOT/.harness-db}
+  # A person turns review off by creating this file (agents cannot write the
+  # database); build done then completes the run.
+  REVIEW_OFF_FILE=$DB_ROOT/review-off
   # A registered target (see scripts/harness-target.sh) keeps its own runs,
   # gate records, routes, and checkpoints beneath the database root, so
   # parallel projects never share one current run.
@@ -1243,7 +1246,7 @@ cmd_phase_done() {
   state_set CURRENT_PHASE "$_phase"
   count_step
 
-  if [ "$_phase" = "review" ]; then
+  if [ "$_phase" = "review" ] || { [ "$_phase" = "build" ] && [ -f "$REVIEW_OFF_FILE" ]; }; then
     # Resolve pending shadow oracles while the run is still active.
     jev_checkpoint run-complete
     state_set RUN_STATUS complete
@@ -1258,7 +1261,13 @@ cmd_phase_done() {
       jev_checkpoint plan-done
       info "Next: harness build start"
       ;;
-    build) info "Next: harness review start" ;;
+    build)
+      if [ -f "$REVIEW_OFF_FILE" ]; then
+        info "Review is off ($REVIEW_OFF_FILE): run complete. Next: harness plan start opens a new run."
+      else
+        info "Next: harness review start"
+      fi
+      ;;
     review) info "Run complete. Next: harness plan start opens a new run." ;;
   esac
   check_budgets

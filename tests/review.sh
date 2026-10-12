@@ -256,4 +256,19 @@ check 0 --contract "$CONTRACT"
 expect_output 'WARN: the reviewer did not answer criteria: tests, docs, scope'
 check 0
 
+# With the review-off switch, build done completes the run and review.sh starts no reviewer.
+HARNESS_DB_ROOT="$TMP_ROOT/db-off"
+mkdir -p "$HARNESS_DB_ROOT"
+: > "$HARNESS_DB_ROOT/review-off"
+printf '%s\n' "touch $TMP_ROOT/reviewer-ran" > "$HARNESS_DB_ROOT/reviewer"
+(cd "$PROJECT" && "$CLI" plan start && "$CLI" contract waive "fixture task" && "$CLI" plan "done" && "$CLI" build start) > "$OUT" 2>&1 || fail "phases failed with review off"
+"$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh" --project "$PROJECT" > "$OUT" 2>&1 || fail "verify failed with review off"
+(cd "$PROJECT" && "$CLI" build "done") > "$OUT" 2>&1 || fail "build done failed with review off"
+expect_output 'Review is off'
+(cd "$PROJECT" && "$CLI" status) > "$OUT" 2>&1 || :
+grep -qi 'complete' "$OUT" || fail "run is not complete after build done with review off"
+"$REVIEW" --project "$PROJECT" > "$OUT" 2>&1 || fail "review.sh failed with review off"
+expect_output 'Review is off'
+[ ! -e "$TMP_ROOT/reviewer-ran" ] || fail "review.sh started the reviewer with review off"
+
 printf '%s\n' 'PASS: review writes an independent packet, lists the acceptance criteria, runs a configured reviewer, and gates done on its verdict'
