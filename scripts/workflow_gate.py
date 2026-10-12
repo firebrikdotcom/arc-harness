@@ -8,7 +8,7 @@ import sys
 import uuid
 import permit
 import workflow_audit as audit
-from workflow_todos import assert_plan, assert_complete
+from workflow_todos import assert_plan
 
 READ_TOOLS = {"Read", "Grep", "Glob", "read_file", "list_dir", "update_plan", "request_user_input", "request_user_input_async", "webrun", "web.run", "web__run"}
 GRAPH_READS = {"search_graph", "trace_path", "get_code_snippet", "check_index_coverage", "query_graph", "get_architecture", "list_projects", "index_status"}
@@ -108,6 +108,10 @@ def management_command(payload):
 
 def authorize(payload):
     event = payload.get("hook_event_name")
+    # Ending a conversational turn is not task completion. Do not access policy
+    # state here: even a storage outage must not trap the user in a Stop loop.
+    if event == "Stop":
+        return 0
     sid = audit.session_id(payload.get("session_id"))
     if not sid: raise ValueError("Native session ID is required by the todo gate")
     with audit.context_db() as db:
@@ -127,8 +131,6 @@ def authorize(payload):
             if not readonly and not management_command(payload):
                 assert_plan(context, active=True)
                 context["last_execution_at"] = audit.now()
-        elif event == "Stop":
-            if context.get("task_status") != "blocked": assert_complete(context)
         else:
             raise ValueError("Unsupported policy event")
         audit.save(db, sid, context)

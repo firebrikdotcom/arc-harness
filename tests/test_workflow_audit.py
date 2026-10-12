@@ -190,6 +190,41 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, code, result.stderr)
         return result
 
+    def completion(self, code=0):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_audit.py"),
+            "outcome", "--session-id", "policy-session", "--status", "completed",
+            "--description", "Work complete"], env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, code, result.stderr)
+        return result
+
+    def test_stop_allows_repeated_handoffs_without_completing_or_changing_todos(self):
+        self.gate("Stop")
+        self.gate("UserPromptSubmit", prompt="Work")
+        self.policy("plan", "--items", json.dumps([
+            {"id":"a", "description":"Apply patch", "criterion":"Checks pass"}]),
+            "--reason", "Initial plan")
+        self.policy("update", "--id", "a", "--status", "in_progress", "--reason", "Work")
+        before = self.policy("show").stdout
+        for _ in range(10):
+            result = self.gate("Stop", stop_hook_active=True)
+            self.assertEqual(result.stdout.strip(), "{}")
+            self.assertEqual(result.stderr, "")
+        self.assertEqual(self.policy("show").stdout, before)
+        self.completion(1)
+        self.gate("UserPromptSubmit", prompt="Follow-up")
+        self.gate("Stop")
+        self.gate("PreToolUse", 2, tool_name="Write", tool_input={"file_path":"file"})
+
+    def test_stop_does_not_require_session_or_workflow_storage(self):
+        env = {**self.env, "HARNESS_WORKFLOW_STATE": str(self.base)}
+        for key in ("HARNESS_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+            env.pop(key, None)
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py")],
+            input=json.dumps({"hook_event_name":"Stop"}), env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "{}")
+        self.assertEqual(result.stderr, "")
+
     def test_todo_gate_blocks_execution_until_plan_and_active_item_and_rechecks_each_prompt(self):
         self.gate("UserPromptSubmit", prompt="PRIVATE PROMPT")
         self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"touch PRIVATE_PATH"})
@@ -210,7 +245,7 @@ class WorkflowTests(unittest.TestCase):
         self.policy("confirm","--reason","Steering does not change the work")
         self.gate("PreToolUse",tool_name="Bash",tool_input={"command":"PRIVATE COMMAND"})
         self.assertNotIn("PRIVATE PROMPT",json.dumps(self.queued()))
-        self.gate("Stop",2)
+        self.completion(1)
 
     def test_plan_revisions_remove_items_with_reasons_and_completion_needs_fresh_checks(self):
         self.gate("UserPromptSubmit",prompt="Work")
@@ -223,16 +258,16 @@ class WorkflowTests(unittest.TestCase):
         self.policy("exempt","--reason","Cannot erase unfinished work",code=1)
         self.policy("update","--id","a","--status","completed","--reason","Done",code=1)
         self.policy("update","--id","a","--status","completed","--evidence","Unicode regression passed","--reason","Implementation checked")
-        self.gate("Stop",2)
+        self.completion(1)
         for kind in ("verify","review"):
             path=self.base/(kind+".state")
             path.write_text("EXIT=0\nFAILURES=0\nRECORD_AT="+datetime.now(timezone.utc).isoformat().replace("+00:00","Z")+"\n")
             self.run_cli("check","--kind",kind,"--record",str(path),"--session-id","policy-session")
-        self.gate("Stop")
+        self.completion()
         self.run_cli("outcome","--session-id","policy-session","--status","completed","--description","Checks passed")
         self.policy("plan","--items",json.dumps([{"id":"a","description":"New scope","criterion":"New check"}]),"--reason","New discovery")
         self.policy("update","--id","a","--status","completed","--evidence","Evidence supplied","--reason","Updated")
-        self.gate("Stop",2)
+        self.completion(1)
 
     def test_reads_bookkeeping_and_sensors_need_no_active_todo_but_writes_do(self):
         self.gate("UserPromptSubmit",prompt="Work")
@@ -323,15 +358,14 @@ class WorkflowTests(unittest.TestCase):
             path.write_text("EXIT=0\nFAILURES=0\nRECORD_AT="+datetime.now(timezone.utc).isoformat().replace("+00:00","Z")+
                             "\nTREE_HASH="+tree+"\nPROJECT_ROOT="+str(project)+"\n")
             self.run_cli("check","--kind",kind,"--record",str(path),"--session-id","policy-session")
-        self.gate("Stop")
+        self.completion()
         # An executed call that leaves the project untouched (a memory note, a scratch file) keeps the checks fresh.
         self.policy("update","--id","a","--status","in_progress","--reason","Write a note")
         self.gate("PreToolUse",tool_name="Write",tool_input={"file_path":str(self.base/"note.md")})
         self.policy("update","--id","a","--status","completed","--evidence","Checks passed","--reason","Done")
-        self.gate("Stop")
+        self.completion()
         (project/"a.txt").write_text("two\n")
-        result = self.gate("Stop",2)
-        self.assertIn("Fresh passing verify", result.stderr)
+        self.completion(1)
 
     def test_gate_without_a_session_fails_closed_inside_an_agent(self):
         env = {k: v for k, v in self.env.items() if k not in ("HARNESS_SESSION_ID","CODEX_THREAD_ID","CLAUDE_SESSION_ID","CLAUDE_CODE_SESSION_ID")}
