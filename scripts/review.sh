@@ -22,6 +22,8 @@ usage() {
   info "  sh -c \"\$(cat .harness-db/reviewer)\" reviewer PACKET FINDINGS_OUT"
   info "It runs in an empty scratch directory outside the project and harness, with the"
   info "packet on stdin and without agent-session or HARNESS_* variables."
+  info "Independent reviews can take several minutes; when a reviewer is configured,"
+  info "run review.sh in the background or with a long tool timeout."
   info "The diff includes commits since HARNESS_REVIEW_BASE, else since the run's plan."
   info "Otherwise hand the packet to a reviewer in a fresh context and submit its JSON"
   info "with: harness review submit FILE. 'harness review done' requires an approving"
