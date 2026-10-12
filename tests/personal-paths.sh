@@ -10,10 +10,10 @@ ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 cd "$ROOT"
 
 # Home directories, tailnet and mDNS hostnames, and code checkouts under a home.
-# shellcheck disable=SC2016 # $HOME is matched literally in tracked text
 PATTERN='(^|[^A-Za-z0-9_.}-])(/home|/Users)/[A-Za-z0-9._-]+/'
 PATTERN="$PATTERN"'|[A-Za-z0-9-]+\.ts\.net\b'
 PATTERN="$PATTERN"'|(^|[^A-Za-z0-9._/-])[A-Za-z0-9-]+\.local([^A-Za-z0-9./_-]|$)'
+# shellcheck disable=SC2016 # $HOME is matched literally in tracked text
 PATTERN="$PATTERN"'|(~|\$HOME|\$\{HOME\}|%h|__HOME__)/Code/'
 
 found=$(git grep -nIE "$PATTERN" -- . ':!tests/personal-paths.sh' \
