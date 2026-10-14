@@ -256,7 +256,10 @@ CALLER_TAB_ID=$(printf '%s' "$current_json" | python3 -c 'import json, sys; prin
 # shellcheck disable=SC2034
 CALLER_PANE_ID=$(printf '%s' "$current_json" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("result", {}).get("pane", {}).get("pane_id", ""))' 2>/dev/null || :)
 
-[ -n "$WORKSPACE_ID" ] && [ -n "$CALLER_TAB_ID" ] || { printf 'FAIL: could not resolve calling workspace or tab from herdr pane current\n' >&2; exit 1; }
+if [ -z "$WORKSPACE_ID" ] || [ -z "$CALLER_TAB_ID" ]; then
+  printf 'FAIL: could not resolve calling workspace or tab from herdr pane current\n' >&2
+  exit 1
+fi
 
 tab_json=$(herdr tab get "$CALLER_TAB_ID" 2>/dev/null || :)
 CALLER_TAB_LABEL=$(printf '%s' "$tab_json" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("result", {}).get("tab", {}).get("label", ""))' 2>/dev/null || :)
@@ -281,7 +284,10 @@ new_tab_json=$(herdr tab create --workspace "$WORKSPACE_ID" --cwd "$PROJECT_ROOT
 NEW_TAB_ID=$(printf '%s' "$new_tab_json" | python3 -c 'import json, sys; data = json.load(sys.stdin).get("result", {}); print(data.get("tab", {}).get("tab_id", ""))' 2>/dev/null || :)
 NEW_PANE_ID=$(printf '%s' "$new_tab_json" | python3 -c 'import json, sys; data = json.load(sys.stdin).get("result", {}); print(data.get("root_pane", {}).get("pane_id", ""))' 2>/dev/null || :)
 
-[ -n "$NEW_TAB_ID" ] && [ -n "$NEW_PANE_ID" ] || { printf 'FAIL: herdr tab create failed to return tab or root pane ID\n' >&2; exit 1; }
+if [ -z "$NEW_TAB_ID" ] || [ -z "$NEW_PANE_ID" ]; then
+  printf 'FAIL: herdr tab create failed to return tab or root pane ID\n' >&2
+  exit 1
+fi
 
 # Derive a clean agent name matching [a-z][a-z0-9_-]{0,31}
 clean_label=$(printf '%s' "$cand_label" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_-' '-')

@@ -229,7 +229,9 @@ info "Review packet: $packet"
 # hooks. TMPDIR comes last: it may point inside either root.
 reviewer_scratch() {
   for parent in /tmp /var/tmp "${TMPDIR:-}"; do
-    [ -n "$parent" ] && [ -d "$parent" ] || continue
+    if [ -z "$parent" ] || [ ! -d "$parent" ]; then
+      continue
+    fi
     parent=$(CDPATH='' cd "$parent" 2>/dev/null && pwd -P) || continue
     case "$parent/" in
       "$PROJECT_ROOT"/*|"$HARNESS_ROOT"/*) continue ;;
