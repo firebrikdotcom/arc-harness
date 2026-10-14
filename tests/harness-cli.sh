@@ -140,10 +140,10 @@ run 4 review "done"
 expect_output "no review findings"
 # Approval needs a person typing yes on a terminal; none attached, or anything else, stores nothing.
 printf '{"tree_hash":"%s","reviewer":"x","verdict":"approve","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" > "$TMP_ROOT/self.json"
-HARNESS_CONFIRM_TTY=$TMP_ROOT/no-such-terminal run 4 review submit "$TMP_ROOT/self.json"
+(HARNESS_CONFIRM_TTY=$TMP_ROOT/no-such-terminal run 4 review submit "$TMP_ROOT/self.json")
 expect_output "asks a person to confirm on a terminal"
 printf 'no\n' > "$TMP_ROOT/refuse"
-HARNESS_CONFIRM_TTY=$TMP_ROOT/refuse run 4 review submit "$TMP_ROOT/self.json"
+(HARNESS_CONFIRM_TTY=$TMP_ROOT/refuse run 4 review submit "$TMP_ROOT/self.json")
 expect_output "not confirmed"
 run 4 review "done"
 expect_output "no review findings"

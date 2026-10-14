@@ -76,6 +76,8 @@ def runtime_metadata(sid: str, context: dict, payload: dict | None = None, agent
         facts["agent"] = "Codex"
     elif actor in ("claude-code", "Claude Code"):
         facts["agent"] = "Claude Code"
+    elif actor in ("cursor", "Cursor"):
+        facts["agent"] = "Cursor"
     model = payload.get("model")
     if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model):
         facts["model"] = model

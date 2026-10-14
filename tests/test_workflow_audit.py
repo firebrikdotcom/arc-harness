@@ -197,6 +197,70 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, code, result.stderr)
         return result
 
+    def cursor_gate(self, event, code=0, **fields):
+        payload = {"hook_event_name": event, "conversation_id": "policy-session",
+                   "generation_id": "turn-1", "cursor_version": "test",
+                   "workspace_roots": [str(ROOT)], **fields}
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py"), "claude-code"],
+            input=json.dumps(payload), env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, code, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_cursor_imported_hooks_enforce_plan_and_reconfirmation(self):
+        self.assertEqual(self.cursor_gate("beforeSubmitPrompt", prompt="Work"), {"continue": True})
+        denial = self.cursor_gate("preToolUse", 2, tool_name="Shell", tool_input={"command": "touch file"})
+        self.assertEqual(denial["permission"], "deny")
+        self.assertIn("--session-id policy-session", denial["agent_message"])
+        self.assertNotIn("Unsupported policy event", denial["agent_message"])
+        self.assertEqual(self.cursor_gate("preToolUse", tool_name="Read"), {"permission": "allow"})
+        self.policy("plan", "--items", json.dumps([
+            {"id": "a", "description": "Apply patch", "criterion": "Checks pass"}]), "--reason", "Plan")
+        self.cursor_gate("preToolUse", 2, tool_name="Write")
+        self.policy("update", "--id", "a", "--status", "in_progress", "--reason", "Work")
+        self.assertEqual(self.cursor_gate("preToolUse", tool_name="Shell", tool_input={"command": "touch file"}),
+                         {"permission": "allow"})
+        before = self.policy("show").stdout
+        self.assertEqual(self.cursor_gate("stop"), {})
+        self.assertEqual(self.policy("show").stdout, before)
+        self.cursor_gate("beforeSubmitPrompt", generation_id="turn-2", prompt="Follow up")
+        self.cursor_gate("preToolUse", 2, tool_name="Write")
+        self.policy("confirm", "--reason", "Same scope")
+        self.cursor_gate("preToolUse", tool_name="Write")
+        self.assertTrue(any(e["payload"].get("agent") == "Cursor" for e in Handler.events + self.queued()))
+
+    def test_cursor_reads_use_tool_working_directory_and_explicit_session(self):
+        self.cursor_gate("beforeSubmitPrompt", prompt="Work")
+        self.cursor_gate("preToolUse", cwd=str(self.base), tool_name="Shell", tool_input={
+            "command": "scripts/harness workflow todo show --session-id policy-session", "working_directory": str(ROOT)})
+        self.cursor_gate("preToolUse", 2, tool_name="Shell", tool_input={
+            "command": "scripts/harness workflow todo show", "working_directory": str(self.base)})
+        self.cursor_gate("preToolUse", 2, tool_name="Shell", tool_input={
+            "command": "scripts/harness workflow todo show --session-id other"})
+        self.cursor_gate("preToolUse", 2, tool_name="Shell", tool_input={"command": "cat file > copy"})
+        self.cursor_gate("preToolUse", 2, conversation_id=None, session_id=None, tool_name="Write")
+        self.cursor_gate("preToolUse", 2, conversation_id=["bad"], tool_name="Write")
+        self.cursor_gate("unexpectedEvent", 2, tool_name="Write")
+
+    def test_cursor_policy_works_without_collection_and_stop_without_storage(self):
+        self.config(False, False)
+        self.cursor_gate("beforeSubmitPrompt", prompt="Work")
+        self.cursor_gate("preToolUse", 2, tool_name="Write")
+        self.policy("plan", "--items", json.dumps([
+            {"id": "a", "description": "Apply patch", "criterion": "Checks pass"}]), "--reason", "Plan")
+        self.policy("update", "--id", "a", "--status", "in_progress", "--reason", "Work")
+        self.cursor_gate("preToolUse", tool_name="Write", session_id="different", generation_id="turn-2")
+        self.env["HARNESS_WORKFLOW_STATE"] = str(self.base)
+        self.cursor_gate("preToolUse", 2, tool_name="Write")
+        self.assertEqual(self.cursor_gate("stop", conversation_id=None), {})
+
+    def test_cursor_event_aliases_work_without_version_marker(self):
+        for event, expected in (("beforeSubmitPrompt", {"continue": True}), ("preToolUse", {"permission": "allow"}), ("stop", {})):
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py")],
+                input=json.dumps({"hook_event_name": event, "session_id": "policy-session", "tool_name": "Read"}),
+                env=self.env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), expected)
+
     def test_stop_allows_repeated_handoffs_without_completing_or_changing_todos(self):
         self.gate("Stop")
         self.gate("UserPromptSubmit", prompt="Work")

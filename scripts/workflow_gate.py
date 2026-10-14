@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed todo guard for native local tool hooks."""
 import io
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
 import shlex
@@ -20,6 +21,25 @@ READ_ONLY = {"cat", "head", "tail", "wc", "ls", "tree", "grep", "egrep", "fgrep"
              "false", "cd", "less", "more", "env", "printenv", "nproc"}
 GIT_READS = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep", "describe", "shortlog",
              "rev-list", "merge-base", "cat-file", "ls-tree", "for-each-ref", "show-ref", "whatchanged"}
+
+CURSOR_EVENTS = {"beforeSubmitPrompt": "UserPromptSubmit", "preToolUse": "PreToolUse", "stop": "Stop"}
+
+def cursor_payload(payload):
+    """Adapt imported policy hooks without accepting unrelated lifecycle events."""
+    result = dict(payload)
+    result["hook_event_name"] = CURSOR_EVENTS.get(payload.get("hook_event_name"), payload.get("hook_event_name"))
+    # Conversation identity is stable across generations. Never adopt the
+    # launching shell's session when the runtime omitted its own identity.
+    sid = payload.get("conversation_id") or payload.get("session_id")
+    if result["hook_event_name"] != "Stop":
+        if not isinstance(sid, str) or not sid.strip():
+            raise ValueError("Native conversation ID is required by the todo gate")
+        audit.session_id(sid)
+    result["session_id"] = sid
+    roots = payload.get("workspace_roots")
+    if not result.get("cwd") and isinstance(roots, list) and len(roots) == 1 and isinstance(roots[0], str):
+        result["cwd"] = roots[0]
+    return result
 
 def matches(word, target, cwd):
     return permit.our_script(word, target, cwd, audit.ROOT)
@@ -87,7 +107,7 @@ def management_command(payload):
     if not isinstance(command, str) or not command.strip() or any(value in command for value in ("`", "$(", "<(", ">(")):
         return False
     cwd = Path(payload.get("cwd") or ".")
-    workdir = data.get("workdir") or data.get("cwd")
+    workdir = data.get("workdir") or data.get("cwd") or data.get("working_directory")
     if workdir:
         if not isinstance(workdir, str):
             return False
@@ -141,11 +161,43 @@ def main():
     if len(raw)>1_000_000: raise ValueError("Hook payload exceeds policy limit")
     payload=json.loads(raw)
     if not isinstance(payload,dict): raise ValueError("Invalid hook payload")
+    if payload.get("hook_event_name") in CURSOR_EVENTS or "cursor_version" in payload:
+        return cursor_main(payload)
     authorize(payload)
     if payload.get("hook_event_name") in {"PreToolUse", "UserPromptSubmit"}:
         sys.stdin=io.StringIO(raw)
         return audit.hook(sys.argv[1] if len(sys.argv)>1 else None)
     print("{}")
+    return 0
+
+def cursor_main(payload):
+    event = payload.get("hook_event_name")
+    try:
+        normalized = cursor_payload(payload)
+        # Cursor expects a single JSON response, not native prompt guidance on stdout.
+        with redirect_stdout(io.StringIO()):
+            authorize(normalized)
+            if normalized["hook_event_name"] in {"PreToolUse", "UserPromptSubmit"}:
+                sys.stdin = io.StringIO(json.dumps(normalized))
+                audit.hook("cursor")
+    except Exception as error:
+        reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+        message = "TODO GATE: " + reason
+        sid = payload.get("conversation_id") or payload.get("session_id")
+        if isinstance(sid, str) and sid.strip() and len(sid.encode()) <= 256 and "\n" not in sid and "\r" not in sid:
+            message += f". Use {audit.ROOT}/scripts/harness workflow todo with --session-id {shlex.quote(sid)}."
+        response = {"continue": False, "user_message": message} if event in {"beforeSubmitPrompt", "UserPromptSubmit"} else {
+            "permission": "deny", "user_message": message, "agent_message": message}
+        print(json.dumps(response))
+        print(message, file=sys.stderr)
+        return 2
+    if normalized["hook_event_name"] == "UserPromptSubmit":
+        response = {"continue": True}
+    elif normalized["hook_event_name"] == "PreToolUse":
+        response = {"permission": "allow"}
+    else:
+        response = {}
+    print(json.dumps(response))
     return 0
 
 if __name__ == "__main__":

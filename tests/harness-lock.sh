@@ -201,7 +201,7 @@ sleep 30 &
 HOLDER=$!
 ln -s "pid:$HOLDER" "$LOCK"
 started=$(date +%s)
-HARNESS_LOCK_TIMEOUT=1 run 2 step --note "blocked"
+(HARNESS_LOCK_TIMEOUT=1 run 2 step --note "blocked")
 waited=$(( $(date +%s) - started ))
 [ "$waited" -ge 1 ] || fail "a held lock should make the command wait for the timeout"
 expect_output "timed out after 1s waiting for the run-state lock"
@@ -211,7 +211,7 @@ expect_output "HARNESS_LOCK_TIMEOUT"
 [ "$(readlink "$LOCK")" = "pid:$HOLDER" ] || fail "a waiter must not remove a live holder's lock"
 
 # Status reads without the lock, so the phase guard is never stuck behind it.
-HARNESS_LOCK_TIMEOUT=0 run 0 status
+(HARNESS_LOCK_TIMEOUT=0 run 0 status)
 expect_output "Run:.*(active)"
 
 # The waiter proceeds once the holder is gone.
@@ -243,19 +243,19 @@ expect_unlocked "after a waited step"
 new_case
 run 0 plan start
 ln -s "not-a-harness-owner" "$LOCK"
-HARNESS_LOCK_TIMEOUT=0 run 2 step --note "foreign lock"
+(HARNESS_LOCK_TIMEOUT=0 run 2 step --note "foreign lock")
 expect_output "held by not-a-harness-owner"
 expect_output "a person can remove"
 [ "$(readlink "$LOCK")" = "not-a-harness-owner" ] || fail "a foreign lock must be left in place"
 rm -f "$LOCK"
 for owner in "pid:12x" "pid:"; do
   ln -s "$owner" "$LOCK"
-  HARNESS_LOCK_TIMEOUT=0 run 2 step --note "malformed owner"
+  (HARNESS_LOCK_TIMEOUT=0 run 2 step --note "malformed owner")
   [ "$(readlink "$LOCK")" = "$owner" ] || fail "a lock with the malformed owner $owner must be left in place"
   rm -f "$LOCK"
 done
 mkdir "$LOCK"
-HARNESS_LOCK_TIMEOUT=0 run 2 step --note "directory in the way"
+(HARNESS_LOCK_TIMEOUT=0 run 2 step --note "directory in the way")
 if [ ! -d "$LOCK" ] || [ -n "$(ls -A "$LOCK")" ]; then
   fail "a directory at the lock path must be left untouched and empty"
 fi
@@ -264,7 +264,7 @@ run 0 step --note "lock path clear again"
 
 new_case
 run 0 plan start
-HARNESS_LOCK_TIMEOUT=soon run 2 step --note "bad timeout"
+(HARNESS_LOCK_TIMEOUT=soon run 2 step --note "bad timeout")
 expect_output "HARNESS_LOCK_TIMEOUT must be a non-negative integer"
 [ "$(state_value STEPS_USED)" = "1" ] || fail "a bad timeout must not change the run"
 
@@ -275,17 +275,17 @@ run 0 plan start
 sleep 30 &
 HOLDER=$!
 ln -s "pid:$HOLDER" "$LOCK"
-HARNESS_LOCK_TIMEOUT=0 run 2 contract waive "Lock test: held."
+(HARNESS_LOCK_TIMEOUT=0 run 2 contract waive "Lock test: held.")
 expect_output "waiting for the run-state lock"
 [ ! -f "$HARNESS_DB_ROOT/runs/$(head -n 1 "$HARNESS_DB_ROOT/runs/current")/task.json" ] || fail "contract waive wrote while the lock was held"
-HARNESS_LOCK_TIMEOUT=0 run 2 failure record --command-key abc --signature def
-HARNESS_LOCK_TIMEOUT=0 run 2 abort "Lock test: held."
+(HARNESS_LOCK_TIMEOUT=0 run 2 failure record --command-key abc --signature def)
+(HARNESS_LOCK_TIMEOUT=0 run 2 abort "Lock test: held.")
 [ "$(state_value RUN_STATUS)" = "active" ] || fail "abort changed the run while the lock was held"
 # plan done checks its gate first and fails on the lock only when it would write.
 rm -f "$LOCK"
 run 0 contract waive "Lock test: unheld."
 ln -s "pid:$HOLDER" "$LOCK"
-HARNESS_LOCK_TIMEOUT=0 run 2 plan "done"
+(HARNESS_LOCK_TIMEOUT=0 run 2 plan "done")
 expect_output "waiting for the run-state lock"
 [ "$(state_value PHASE_PLAN)" = "active" ] || fail "plan done changed the run while the lock was held"
 kill "$HOLDER"
@@ -309,8 +309,8 @@ session_state_value() {
 }
 
 new_case
-HARNESS_SESSION_ID=lock-session-a run 0 plan start
-HARNESS_SESSION_ID=lock-session-b run 0 plan start
+(HARNESS_SESSION_ID=lock-session-a run 0 plan start)
+(HARNESS_SESSION_ID=lock-session-b run 0 plan start)
 LOCK_A=$(session_lock lock-session-a)
 LOCK_B=$(session_lock lock-session-b)
 [ "$LOCK_A" != "$LOCK_B" ] || fail "two sessions share one lock path"
@@ -321,9 +321,9 @@ esac
 sleep 30 &
 HOLDER=$!
 ln -s "pid:$HOLDER" "$LOCK_A"
-HARNESS_SESSION_ID=lock-session-b HARNESS_LOCK_TIMEOUT=0 run 0 step --note "other session"
+(HARNESS_SESSION_ID=lock-session-b HARNESS_LOCK_TIMEOUT=0 run 0 step --note "other session")
 [ "$(session_state_value lock-session-b STEPS_USED)" = "2" ] || fail "a step in another session was not recorded"
-HARNESS_SESSION_ID=lock-session-a HARNESS_LOCK_TIMEOUT=0 run 2 step --note "held session"
+(HARNESS_SESSION_ID=lock-session-a HARNESS_LOCK_TIMEOUT=0 run 2 step --note "held session")
 expect_output "held by pid:$HOLDER"
 [ "$(session_state_value lock-session-a STEPS_USED)" = "1" ] || fail "a step changed a session whose lock was held"
 if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
@@ -335,11 +335,11 @@ fi
 kill "$HOLDER"
 wait "$HOLDER" 2>/dev/null || :
 HOLDER=""
-HARNESS_SESSION_ID=lock-session-a run 0 step --note "session holder exited"
+(HARNESS_SESSION_ID=lock-session-a run 0 step --note "session holder exited")
 [ "$(session_state_value lock-session-a STEPS_USED)" = "2" ] || fail "the session step after its holder exited was not recorded"
 
 # A failure hook for a session without a run takes no lock and makes no directory.
-HARNESS_SESSION_ID=lock-session-none run 0 failure record --command-key abc --signature def
+(HARNESS_SESSION_ID=lock-session-none run 0 failure record --command-key abc --signature def)
 [ ! -d "$(dirname "$(session_lock lock-session-none)")" ] || fail "a session without a run got a lock directory"
 
 # --- the lock is released on every exit path --------------------------------

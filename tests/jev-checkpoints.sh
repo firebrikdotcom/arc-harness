@@ -80,7 +80,7 @@ payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh 
 hj() { (cd "$TARGET" && "$ROOT/scripts/harness" "$@"); }
 
 # 5. With a run, the third identical command emits one progress checkpoint; harness commands are ignored.
-HARNESS_JEV_CHECKPOINTS=0 hj plan start >/dev/null
+(HARNESS_JEV_CHECKPOINTS=0 hj plan start >/dev/null)
 for _ in 1 2 3 4; do
   payload PreToolUse "$TARGET" Bash "scripts/harness status" | sh scripts/hooks/jev-observe.sh >/dev/null
 done
