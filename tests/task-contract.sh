@@ -75,6 +75,14 @@ JSON
 h 0 contract set "$TMP_ROOT/task.json"
 h 0 contract show
 expect_output '"goal": "Change src/a.txt to say two."'
+
+# Stdin can be read only once: a heredoc or pipe contract is stored, a bad one leaves no temp file.
+h 0 contract set /dev/stdin < "$TMP_ROOT/task.json"
+cat "$TMP_ROOT/task.json" | h 0 contract set /dev/stdin
+h 0 contract show
+expect_output '"goal": "Change src/a.txt to say two."'
+h 4 contract set /dev/stdin < "$TMP_ROOT/bad.json"
+if find "$HARNESS_DB_ROOT" -name 'task.json.tmp.*' | grep -q .; then fail "a refused contract left a temp file"; fi
 h 0 plan "done"
 h 4 contract set "$TMP_ROOT/task.json"
 expect_output "set while planning"

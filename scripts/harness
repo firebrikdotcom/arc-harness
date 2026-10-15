@@ -980,14 +980,16 @@ cmd_contract() {
   block_when_paused
   case "$_action" in
     set)
-      if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then info "FAIL: contract set needs one JSON file."; exit "$EXIT_USAGE"; fi
+      if [ "$#" -ne 1 ] || [ -d "$1" ] || [ ! -r "$1" ]; then info "FAIL: contract set needs one JSON file."; exit "$EXIT_USAGE"; fi
       if [ "$(phase_status plan)" != "active" ]; then
         info "FAIL: the contract is set while planning (plan is '$(phase_status plan)')."
         exit "$EXIT_PHASE"
       fi
-      contract_tool validate "$1" || exit "$EXIT_PHASE"
-      cp "$1" "$(contract_file).tmp.$$"
-      mv "$(contract_file).tmp.$$" "$(contract_file)"
+      # Read the input once: /dev/stdin and pipes cannot be validated and then copied.
+      _contract_tmp="$(contract_file).tmp.$$"
+      if ! cat "$1" > "$_contract_tmp"; then rm -f "$_contract_tmp"; exit "$EXIT_PHASE"; fi
+      if ! contract_tool validate "$_contract_tmp"; then rm -f "$_contract_tmp"; exit "$EXIT_PHASE"; fi
+      mv "$_contract_tmp" "$(contract_file)"
       log_event "contract set"
       info "Contract stored: $(contract_file)"
       ;;
