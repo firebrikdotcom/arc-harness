@@ -154,7 +154,7 @@ Projects can make a category mandatory with `.harness-required-checks` (or `HARN
 
 `make install-guides PROJECT=/path/to/project` refreshes the marked Harness Phases block in a target's `AGENTS.md` and `CLAUDE.md`, preserving the rest of each file. For an external target, that block uses this harness's absolute CLI path.
 
-For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Whether Jev's route is followed is the persisted switch `scripts/harness jev on|off|status` (stored in `~/.config/harness/jev-delegation.json`, outside every checkout): off, shadow mode preserves the default command and records the comparison; on, `route` and `launch` run in active mode and select the profile Jev recommends, after the deterministic gates. `--mode` on a single call overrides the switch, and `HARNESS_TYPESAFE_ROLLOUT_PERCENT=10`, then `25`, `50`, and `100`, stages the delegation.
+For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Whether Jev's route is followed is the persisted switch `scripts/harness jev on|off|status` (stored in `~/.config/harness/config.json`, outside every checkout): off, shadow mode preserves the default command and records the comparison; on, `route` and `launch` run in active mode and select the profile Jev recommends, after the deterministic gates. `--mode` on a single call overrides the switch, and `HARNESS_TYPESAFE_ROLLOUT_PERCENT=10`, then `25`, `50`, and `100`, stages the delegation.
 
 `scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option. With the switch on, a v2 checkpoint's `action` is Jev's choice (`delegated: true`) instead of the agent's baseline; the agent takes it unless a deterministic rule decides otherwise.
 
@@ -207,3 +207,7 @@ Audited todo plans are enforced by additive native hooks, independently of colle
 ## License
 
 This harness is licensed under either of the MIT license ([LICENSE-MIT](LICENSE-MIT)) or the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your option. Unless you state otherwise, any contribution you submit for inclusion is dual licensed as above, without any additional terms or conditions.
+
+Runtime toggles share `~/.config/harness/config.json` with brief `_doc` reminders. Run `scripts/harness config init` to preserve and migrate current choices; see [unified runtime configuration](docs/setup.md#unified-runtime-configuration).
+
+Role-scoped native/external workers, decision receipts and the orchestration dashboard are described in [orchestration](docs/orchestration.md). Use `scripts/harness dispatch --help` and `scripts/harness decision --help`.

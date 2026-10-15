@@ -1,16 +1,15 @@
 //! Browser workbench for the audit database, rendered through the Arc UI host.
 //!
-//! The pages read the same projected rows as the JSON API and reuse the grouped
-//! summaries from `summary.rs`, so what the browser shows and what `curl` shows
-//! can never drift apart. Templates and the stylesheet are embedded at compile
+//! The pages and JSON API read the same checkpointed reports, with indexed
+//! event and selected-session lookups. Templates and the stylesheet are embedded at compile
 //! time, so the service needs no working directory or asset build to serve them.
 
-use crate::domain::audit_event::projector::AUDIT_EVENTS_VIEW;
+use crate::reports::{EventFilter, ReportStore};
+use crate::routes::read_report;
 use crate::summary as grouped;
 use actix_session::Session;
 use actix_web::http::StatusCode;
 use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
-use arc_core::read_model_store::ReadModelStore;
 use arc_web::ui::{
     Breadcrumb, TemplateBundle, TemplateDef, TemplateName, UiContribution, UiHost, UiPage,
 };
@@ -25,6 +24,10 @@ use tera::Context;
 const STYLESHEET: &str = include_str!("../public/styles.css");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
+    TemplateDef {
+        name: TemplateName("audit/orchestration.html"),
+        source: include_str!("../resources/views/audit/orchestration.html"),
+    },
     TemplateDef {
         name: TemplateName("components/client-time.html"),
         source: include_str!("../resources/views/components/client-time.html"),
@@ -135,6 +138,10 @@ struct NavItem {
 }
 
 const NAVIGATION: &[NavItem] = &[
+    NavItem {
+        label: "Orchestration",
+        href: "/orchestration",
+    },
     NavItem {
         label: "Workbench",
         href: "/",
@@ -305,12 +312,6 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
-fn sorted_newest_first(mut rows: Vec<Value>) -> Vec<Value> {
-    rows.sort_by_key(|row| row.get("recorded_at_us").and_then(Value::as_i64));
-    rows.reverse();
-    rows
-}
-
 /// Headline numbers for the metric grid, derived from the grouped summary so
 /// they agree with the table beneath them.
 pub fn totals(event_count: usize, checkpoints: &Value) -> Value {
@@ -424,27 +425,34 @@ async fn workbench(
     request: HttpRequest,
     session: Session,
     query: web::Query<WorkbenchQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
-    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => rows,
-        Err(error) => return unavailable(error),
-    };
-    let checkpoints = grouped::checkpoint_groups(&rows, query.include_fixtures);
-    let routes = grouped::route_groups(&rows, query.include_fixtures);
-    let recent: Vec<Value> = sorted_newest_first(rows.clone())
-        .iter()
-        .take(RECENT_EVENTS)
-        .map(event_row)
-        .collect();
+    let include_fixtures = query.include_fixtures;
+    let (checkpoints, routes, recent, rows, event_count, session_count) =
+        match read_report(store, move |store| {
+            Ok((
+                store.checkpoint_groups(include_fixtures)?,
+                store.route_groups(include_fixtures)?,
+                store.events(&EventFilter::default(), RECENT_EVENTS)?,
+                store.checkpoint_rows()?,
+                store.event_counts()?.values().sum::<usize>(),
+                store.sessions()?.len(),
+            ))
+        })
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => return unavailable(error),
+        };
+    let recent: Vec<Value> = recent.iter().map(event_row).collect();
     let chart = accuracy_chart(&local_accuracy_days(
         &rows,
         query.include_fixtures,
         client_timezone(&request),
     ));
     let mut context = Context::new();
-    context.insert("totals", &totals(rows.len(), &checkpoints));
+    context.insert("totals", &totals(event_count, &checkpoints));
     context.insert("accuracy_chart", &chart);
     context.insert("checkpoints", &checkpoints);
     context.insert("routes", &routes);
@@ -455,7 +463,7 @@ async fn workbench(
         Err(error) => return unavailable(error),
     };
     context.insert("collection_settings", &settings);
-    context.insert("workflow_sessions", &crate::workflow::sessions(&rows).len());
+    context.insert("workflow_sessions", &session_count);
     render(
         &registry,
         &request,
@@ -467,43 +475,70 @@ async fn workbench(
     )
 }
 
+#[get("/orchestration")]
+async fn orchestration_page(
+    request: HttpRequest,
+    session: Session,
+    store: web::Data<ReportStore>,
+    registry: web::Data<UiRegistry>,
+) -> impl Responder {
+    let mut summary = match read_report(store, |store| store.orchestration()).await {
+        Ok(report) => report,
+        Err(error) => return unavailable(error),
+    };
+    // Bound rendered details while preserving full summary denominators.
+    for key in ["workers", "runs", "decisions", "worker_groups"] {
+        if let Some(items) = summary[key].as_array_mut() {
+            items.truncate(100);
+        }
+    }
+    let mut context = Context::new();
+    context.insert("orchestration", &summary);
+    render(
+        &registry,
+        &request,
+        &session,
+        "audit/orchestration.html",
+        "Orchestration",
+        context,
+        vec![Breadcrumb::current("Orchestration")],
+    )
+}
+
 #[get("/events")]
 async fn event_log(
     request: HttpRequest,
     session: Session,
     query: web::Query<EventsQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
-    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => sorted_newest_first(rows),
-        Err(error) => return unavailable(error),
-    };
-    let event_types: BTreeSet<String> = rows
-        .iter()
-        .filter_map(|row| row.get("event_type").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect();
     let type_filter = query
         .event_type
         .as_deref()
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let limit = query.limit.unwrap_or(200).clamp(1, MAX_EVENTS);
-    let matching: Vec<&Value> = rows
-        .iter()
-        .filter(|row| match &type_filter {
-            Some(wanted) => row.get("event_type").and_then(Value::as_str) == Some(wanted),
-            None => true,
-        })
-        .collect();
-    let shown: Vec<Value> = matching
-        .iter()
-        .take(limit)
-        .map(|row| event_row(row))
-        .collect();
+    let filter = EventFilter {
+        event_type: type_filter.clone(),
+        ..EventFilter::default()
+    };
+    let (rows, counts) = match read_report(store, move |store| {
+        Ok((store.events(&filter, limit)?, store.event_counts()?))
+    })
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return unavailable(error),
+    };
+    let event_types: BTreeSet<String> = counts.keys().cloned().collect();
+    let total: usize = match &type_filter {
+        Some(wanted) => counts.get(wanted).copied().unwrap_or(0),
+        None => counts.values().sum(),
+    };
+    let shown: Vec<Value> = rows.iter().map(event_row).collect();
     let mut context = Context::new();
-    context.insert("total", &matching.len());
+    context.insert("total", &total);
     context.insert("shown", &shown.len());
     context.insert("events", &shown);
     context.insert("event_types", &event_types);
@@ -707,6 +742,13 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
         .iter()
         .flat_map(|s| s["tasks"].as_object().into_iter().flat_map(|t| t.values()))
         .filter_map(|t| t["phase"].as_str().filter(|s| !s.is_empty()))
+        .chain(
+            sessions
+                .iter()
+                .flat_map(|s| s["phases"].as_array().into_iter().flatten())
+                .filter_map(Value::as_str)
+                .filter(|phase| !phase.is_empty()),
+        )
         .collect();
     facets.insert("phase".into(), json!(phases));
     let mut matching: Vec<Value> = sessions
@@ -735,6 +777,11 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
                 return false;
             }
             if !clean(&query.phase).is_empty()
+                && !s["phases"].as_array().is_some_and(|phases| {
+                    phases
+                        .iter()
+                        .any(|phase| phase.as_str() == Some(clean(&query.phase).as_str()))
+                })
                 && !s["tasks"].as_object().is_some_and(|tasks| {
                     tasks
                         .values()
@@ -752,7 +799,10 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
                 "verified" if verdict["verified"] != true => return false,
                 _ => {}
             }
-            let prompt_count = s["prompts"].as_array().map_or(0, Vec::len);
+            let prompt_count = s["prompt_count"]
+                .as_u64()
+                .map(|n| n as usize)
+                .unwrap_or_else(|| s["prompts"].as_array().map_or(0, Vec::len));
             if (clean(&query.prompts) == "recorded" && prompt_count == 0)
                 || (clean(&query.prompts) == "none" && prompt_count > 0)
             {
@@ -815,7 +865,10 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
                     }
                 }
             }
-            let searchable = words.join(" ").to_lowercase();
+            let searchable = s["search_text"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| words.join(" ").to_lowercase());
             terms.iter().all(|term| searchable.contains(term))
         })
         .cloned()
@@ -830,35 +883,37 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
         before - matching.len()
     };
     for s in &mut matching {
-        let tasks = s["tasks"].as_object().cloned().unwrap_or_default();
-        s["task_count"] = json!(tasks.len());
-        s["completed_tasks"] = json!(tasks
-            .values()
-            .filter(|t| t["status"] == "completed")
-            .count());
-        s["prompt_count"] = json!(s["prompts"].as_array().map_or(0, Vec::len));
-        let description = s["events"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find_map(|e| {
-                if e["payload"]["name"]
-                    .as_str()
-                    .is_some_and(|n| n != "Session work")
-                {
-                    e["payload"]["description"].as_str()
-                } else {
-                    None
-                }
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| s["initial_goal"].as_str().unwrap_or(""));
-        let preview: String = description.chars().take(180).collect();
-        s["preview"] = json!(if description.chars().count() > 180 {
-            format!("{preview}…")
-        } else {
-            preview
-        });
+        if s["task_count"].is_null() {
+            let tasks = s["tasks"].as_object().cloned().unwrap_or_default();
+            s["task_count"] = json!(tasks.len());
+            s["completed_tasks"] = json!(tasks
+                .values()
+                .filter(|t| t["status"] == "completed")
+                .count());
+            s["prompt_count"] = json!(s["prompts"].as_array().map_or(0, Vec::len));
+            let description = s["events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|e| {
+                    if e["payload"]["name"]
+                        .as_str()
+                        .is_some_and(|n| n != "Session work")
+                    {
+                        e["payload"]["description"].as_str()
+                    } else {
+                        None
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| s["initial_goal"].as_str().unwrap_or(""));
+            let preview: String = description.chars().take(180).collect();
+            s["preview"] = json!(if description.chars().count() > 180 {
+                format!("{preview}…")
+            } else {
+                preview
+            });
+        }
         for key in ["first_at", "last_at"] {
             let value = s[key].as_str().unwrap_or("");
             s[format!("{key}_display")] = json!(value.get(..19).unwrap_or(value).replace('T', " "));
@@ -1007,16 +1062,26 @@ async fn workflow_page(
     request: HttpRequest,
     session: Session,
     query: web::Query<WorkflowQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
-    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => rows,
-        Err(error) => return unavailable(error),
-    };
     let mut query = query.into_inner();
     query.timezone = Some(client_timezone(&request).name().to_owned());
-    let sessions = crate::workflow::sessions(&rows);
+    let selected_id = query.session_id.clone();
+    let (sessions, selected) = match read_report(store, move |store| {
+        Ok((
+            store.sessions()?,
+            match selected_id {
+                Some(id) => store.session(&id)?,
+                None => None,
+            },
+        ))
+    })
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return unavailable(error),
+    };
     if query.session_id.is_none() {
         let mut context = Context::new();
         context.insert("directory", &session_directory(&sessions, &query));
@@ -1033,14 +1098,10 @@ async fn workflow_page(
             ],
         );
     }
-    let selected = query
-        .session_id
-        .as_deref()
-        .and_then(|id| sessions.iter().find(|s| s["session_id"] == id));
     let mut context = Context::new();
     context.insert("sessions", &!sessions.is_empty());
     context.insert("selected", &selected);
-    if let Some(session) = selected {
+    if let Some(session) = &selected {
         session_view(session, &query, &mut context);
     }
     render(
@@ -1566,21 +1627,22 @@ fn workflow_fragment(session: &Value, query: &WorkflowQuery) -> Result<Value, St
 #[get("/workflow/items")]
 async fn workflow_items(
     query: web::Query<WorkflowQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
 ) -> impl Responder {
-    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => rows,
+    let selected_id = query.session_id.clone();
+    let selected = match read_report(store, move |store| match selected_id {
+        Some(id) => store.session(&id),
+        None => Ok(None),
+    })
+    .await
+    {
+        Ok(report) => report,
         Err(error) => return unavailable(error),
     };
-    let sessions = crate::workflow::sessions(&rows);
-    let Some(session) = query
-        .session_id
-        .as_deref()
-        .and_then(|id| sessions.iter().find(|s| s["session_id"] == id))
-    else {
+    let Some(session) = selected else {
         return HttpResponse::NotFound().json(json!({"error": "session not found"}));
     };
-    match workflow_fragment(session, &query) {
+    match workflow_fragment(&session, &query) {
         Ok(body) => HttpResponse::Ok().json(body),
         Err(error) => HttpResponse::BadRequest().json(json!({"error": error})),
     }
@@ -1595,6 +1657,7 @@ async fn stylesheet() -> impl Responder {
 }
 
 pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.service(orchestration_page);
     cfg.service(workbench)
         .service(event_log)
         .service(workflow_page)
@@ -1943,6 +2006,66 @@ mod tests {
     }
 
     #[test]
+    fn prepared_directory_preserves_full_session_filters_and_rendering() {
+        use diesel::connection::SimpleConnection;
+        use diesel::prelude::*;
+        use diesel::sql_types::{BigInt, Text};
+        let path =
+            std::env::temp_dir().join(format!("audit-directory-{}.sqlite", uuid::Uuid::new_v4()));
+        let url = path.to_str().unwrap();
+        let mut connection = SqliteConnection::establish(url).unwrap();
+        connection.batch_execute("CREATE TABLE events (id INTEGER PRIMARY KEY, aggregate_type TEXT NOT NULL DEFAULT 'AuditEvent', aggregate_id TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, sequence BIGINT NOT NULL, timestamp_utc_us BIGINT NOT NULL)").unwrap();
+        let mut rows = vec![];
+        for (index, (kind, extra)) in [
+            ("session_started", json!({"agent":"Codex","cwd":"/Code/Working Tree"})),
+            ("prompt_recorded", json!({"prompt_id":"p","text":"Fix Unicode imports","part_index":0,"part_count":1})),
+            ("task_started", json!({"name":"Repair parser","description":"Curated summary"})),
+            ("phase_changed", json!({"phase":"build","phase_status":"active"})),
+            ("tool_completed", json!({"tool_name":"cargo","options":["special-option"],"description":"integration check"})),
+            ("task_completed", json!({"outcome":"Regression passed"})),
+        ].into_iter().enumerate() {
+            let mut payload = json!({"session_id":"session","task_id":"task","occurred_at":"2026-10-02T12:00:00Z"});
+            payload.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let kind = format!("workflow.{kind}");
+            let id = format!("event-{index}");
+            diesel::sql_query("INSERT INTO events (id,aggregate_id,event_type,payload,sequence,timestamp_utc_us) VALUES (?,?,'AuditEventRecorded',?,1,?)")
+                .bind::<BigInt,_>(index as i64 + 1).bind::<Text,_>(&id)
+                .bind::<Text,_>(json!({"event_type":kind,"payload":payload}).to_string())
+                .bind::<BigInt,_>(index as i64 + 1).execute(&mut connection).unwrap();
+            rows.push(json!({"id":id,"event_type":kind,"payload":payload,"version":1,"recorded_at_us":index as i64+1}));
+        }
+        let store = ReportStore::open(url).unwrap();
+        store.refresh().unwrap();
+        let full = crate::workflow::sessions(&rows);
+        let compact = store.sessions().unwrap();
+        assert!(compact[0].get("events").is_none());
+        for query in [
+            WorkflowQuery::default(),
+            WorkflowQuery {
+                phase: Some("build".into()),
+                prompts: Some("recorded".into()),
+                q: Some("unicode regression".into()),
+                ..Default::default()
+            },
+            WorkflowQuery {
+                q: Some("special-option".into()),
+                ..Default::default()
+            },
+            WorkflowQuery {
+                prompts: Some("none".into()),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                render_directory(&full, &query),
+                render_directory(&compact, &query)
+            );
+        }
+        drop(connection);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn directory_pagination_sorting_dates_and_urls_are_bounded() {
         let data = vec![
             directory_fixture("a", "2026-10-02", "Codex", true),
@@ -2006,7 +2129,12 @@ mod tests {
 
     #[test]
     fn directory_triage_counts_quick_filters_day_headings_and_hides_empty_sessions() {
-        let now = Utc::now();
+        // Anchor fixtures at noon so two hours ago always means today.
+        let now = Utc::now()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
         let at = |hours_ago: i64| {
             (now - chrono::Duration::hours(hours_ago))
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -2653,6 +2781,42 @@ mod tests {
         );
         assert!(html.contains("Todo of task 4"));
         assert!(html.contains("Showing 4 of 4 tasks"));
+    }
+
+    #[test]
+    fn orchestration_renders_populated_and_empty_evidence_without_raw_payloads() {
+        let registry = UiRegistry::build(Some(&host()), &[contribution()])
+            .unwrap()
+            .unwrap();
+        for rows in [
+            vec![],
+            vec![
+                json!({"event_type":"orchestration.worker_failed","recorded_at_us":1,"payload":{"run_id":"r", "worker_id":"w", "role":"review <script>","exit_code":2,"secret_context":"must not render"}}),
+                json!({"event_type":"orchestration.decision_evaluated","payload":{"decision_id":"d","family":"review","cache_hit":false}}),
+            ],
+        ] {
+            let mut context = Context::new();
+            decorate(&mut context, "Orchestration");
+            for key in ["app_name", "environment", "csrf_token", "request_path"] {
+                context.insert(key, "x");
+            }
+            context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
+            context.insert("admin_navigation", &Vec::<Value>::new());
+            context.insert("admin_actions", &Vec::<Value>::new());
+            context.insert("orchestration", &crate::orchestration::summarize(&rows));
+            let html = registry_tera(&registry)
+                .render("audit/orchestration.html", &context)
+                .unwrap();
+            assert!(html.contains("Orchestration"));
+            assert!(html.contains("unknown"));
+            assert!(!html.contains("must not render"));
+            if rows.is_empty() {
+                assert!(html.contains("No dispatch evidence"));
+            } else {
+                assert!(html.contains("review &lt;script&gt;"));
+                assert!(html.contains("failed"));
+            }
+        }
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly

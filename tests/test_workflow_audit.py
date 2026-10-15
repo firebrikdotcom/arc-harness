@@ -40,6 +40,7 @@ class WorkflowTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.env = {**os.environ, "HARNESS_AUDIT_ENABLED":"1",
+            "HARNESS_CONFIG":"", "HARNESS_CONFIG_HOME":str(self.base / "config"),
             "HARNESS_AUDIT_URL":f"http://127.0.0.1:{self.server.server_port}",
             "HARNESS_AUDIT_SETTINGS":str(self.base / "settings.json"),
             "HARNESS_AUDIT_OUTBOX":str(self.base / "outbox.sqlite"),

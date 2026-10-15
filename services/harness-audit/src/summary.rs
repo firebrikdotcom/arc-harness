@@ -26,6 +26,8 @@ struct Group {
     latency: Vec<f64>,
     tokens: i64,
     token_samples: usize,
+    token_overflowed: bool,
+    token_overflowed_samples: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -107,13 +109,18 @@ fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
     (denominator > 0).then(|| numerator as f64 / denominator as f64)
 }
 
-fn total_tokens(payload: &Map<String, Value>) -> Option<i64> {
+/// Missing measurements remain distinct from measured, unrepresentable totals.
+fn total_tokens(payload: &Map<String, Value>) -> Result<Option<i64>, ()> {
     if let Some(total) = payload.get("jev_total_tokens").and_then(Value::as_i64) {
-        return Some(total);
+        return Ok(Some(total));
     }
-    let input = payload.get("jev_input_tokens").and_then(Value::as_i64)?;
-    let output = payload.get("jev_output_tokens").and_then(Value::as_i64)?;
-    Some(input + output)
+    let Some(input) = payload.get("jev_input_tokens").and_then(Value::as_i64) else {
+        return Ok(None);
+    };
+    let Some(output) = payload.get("jev_output_tokens").and_then(Value::as_i64) else {
+        return Ok(None);
+    };
+    input.checked_add(output).map(Some).ok_or(())
 }
 
 /// Latest outcome per `call_id`; a later label replaces an earlier one.
@@ -206,9 +213,21 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
         if let Some(latency) = payload.get("jev_latency_ms").and_then(Value::as_f64) {
             group.latency.push(latency);
         }
-        if let Some(tokens) = total_tokens(payload) {
-            group.tokens += tokens;
-            group.token_samples += 1;
+        match total_tokens(payload) {
+            Ok(Some(tokens)) => {
+                group.token_samples += 1;
+                if let Some(total) = group.tokens.checked_add(tokens) {
+                    group.tokens = total;
+                } else {
+                    group.token_overflowed = true;
+                }
+            }
+            Err(()) => {
+                group.token_samples += 1;
+                group.token_overflowed = true;
+                group.token_overflowed_samples += 1;
+            }
+            Ok(None) => {}
         }
         if let Some(outcome) = text(payload, "call_id").and_then(|call| outcomes.get(&call)) {
             *group.outcomes.entry(outcome.clone()).or_default() += 1;
@@ -251,10 +270,13 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
             "median_latency_ms".into(),
             json!(median(&mut group.latency)),
         );
-        entry.insert(
-            "tokens".into(),
-            json!({"total": group.tokens, "samples": group.token_samples}),
-        );
+        let mut tokens = json!({"total": group.tokens, "samples": group.token_samples});
+        if group.token_overflowed {
+            tokens["total"] = Value::Null;
+            tokens["overflowed"] = json!(true);
+            tokens["overflowed_samples"] = json!(group.token_overflowed_samples);
+        }
+        entry.insert("tokens".into(), tokens);
         rendered.push(Value::Object(entry));
     }
     json!({
@@ -541,5 +563,72 @@ mod tests {
             group["correct"].as_u64().unwrap() as usize
         );
         assert_eq!(daily_checkpoint_accuracy(&rows, true).len(), 3);
+    }
+    #[test]
+    fn overflowing_component_and_group_totals_are_unknown_for_both_report_kinds() {
+        for kind in ["jev.checkpoint", "jev.route"] {
+            let report = |rows: &[Value]| {
+                if kind == "jev.checkpoint" {
+                    checkpoint_groups(rows, false)
+                } else {
+                    route_groups(rows, false)
+                }
+            };
+            let component_rows = vec![
+                event(
+                    kind,
+                    1,
+                    json!({"jev_input_tokens": i64::MAX, "jev_output_tokens": 1}),
+                ),
+                event(kind, 2, json!({"jev_total_tokens": 5})),
+                event(kind, 3, json!({"jev_input_tokens": 3})),
+            ];
+            let component = report(&component_rows);
+            assert_eq!(
+                only_group(&component)["tokens"],
+                json!({"total":null,"samples":2,"overflowed":true,"overflowed_samples":1})
+            );
+            assert_eq!(only_group(&component)["count"], 3);
+            let group_rows = vec![
+                event(kind, 1, json!({"jev_total_tokens": i64::MAX})),
+                event(kind, 2, json!({"jev_total_tokens": 1})),
+                // A later sample cannot turn an overflowed total into a known one.
+                event(kind, 3, json!({"jev_total_tokens": -1})),
+            ];
+            assert_eq!(
+                only_group(&report(&group_rows))["tokens"],
+                json!({"total":null,"samples":3,"overflowed":true,"overflowed_samples":0})
+            );
+        }
+    }
+
+    #[test]
+    fn valid_zero_and_missing_token_measurements_keep_sample_semantics() {
+        for kind in ["jev.checkpoint", "jev.route"] {
+            let rows = vec![
+                event(
+                    kind,
+                    1,
+                    json!({"jev_input_tokens": 2, "jev_output_tokens": 3}),
+                ),
+                event(
+                    kind,
+                    2,
+                    json!({"jev_total_tokens": 0, "jev_input_tokens": i64::MAX, "jev_output_tokens": 1}),
+                ),
+                event(kind, 3, json!({"jev_input_tokens": 9})),
+                event(kind, 4, json!({})),
+            ];
+            let report = if kind == "jev.checkpoint" {
+                checkpoint_groups(&rows, false)
+            } else {
+                route_groups(&rows, false)
+            };
+            assert_eq!(
+                only_group(&report)["tokens"],
+                json!({"total":5,"samples":2})
+            );
+            assert_eq!(only_group(&report)["count"], 4);
+        }
     }
 }

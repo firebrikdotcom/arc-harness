@@ -1,13 +1,32 @@
 use crate::domain::audit_event::aggregate::AuditEventAggregate;
 use crate::domain::audit_event::commands::AuditEventCommand;
-use crate::domain::audit_event::projector::AUDIT_EVENTS_VIEW;
-use crate::summary as grouped;
+use crate::reports::{EventFilter, ReportStore};
 use actix_web::{get, post, put, web, HttpRequest, HttpResponse, Responder};
 use arc_core::command_bus::{CommandBus, CommandContext};
-use arc_core::read_model_store::ReadModelStore;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+
+/// Read the last atomically committed projection without waiting for catch-up.
+pub async fn read_report<T, F>(store: web::Data<ReportStore>, read: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&ReportStore) -> anyhow::Result<T> + Send + 'static,
+{
+    web::block(move || read(&store)).await?
+}
+
+/// Ingestion acknowledges only after its committed source events are projected.
+async fn refresh_report<T, F>(store: web::Data<ReportStore>, read: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&ReportStore) -> anyhow::Result<T> + Send + 'static,
+{
+    web::block(move || {
+        store.refresh()?;
+        read(&store)
+    })
+    .await?
+}
 
 #[derive(Debug, Deserialize)]
 struct RecordAuditEvent {
@@ -40,7 +59,7 @@ async fn health() -> impl Responder {
 async fn record_event(
     body: web::Json<RecordAuditEvent>,
     bus: web::Data<CommandBus<AuditEventAggregate>>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
 ) -> impl Responder {
     let config = match crate::settings::load() {
         Ok(config) => config,
@@ -57,7 +76,8 @@ async fn record_event(
         }
     }
     // Stable queued IDs make a retry after an ambiguous response safe.
-    match store.get(AUDIT_EVENTS_VIEW, &body.id).await {
+    let id = body.id.clone();
+    match refresh_report(store.clone(), move |store| store.get_event(&id)).await {
         Ok(Some(row)) => {
             return if row["event_type"] == body.event_type && row["payload"] == body.payload {
                 HttpResponse::Ok().json(json!({"id": body.id, "duplicate": true}))
@@ -77,94 +97,89 @@ async fn record_event(
         payload: body.payload.clone(),
     };
     match bus.dispatch(command, CommandContext::system()).await {
-        Ok(_) => HttpResponse::Created().json(json!({"id": body.id})),
-        Err(error) => HttpResponse::BadRequest().json(json!({"error": error.to_string()})),
+        Ok(_) => match refresh_report(store, |_| Ok(())).await {
+            Ok(()) => HttpResponse::Created().json(json!({"id": body.id})),
+            Err(error) => {
+                HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()}))
+            }
+        },
+        Err(error) => {
+            // Another request may have committed this ID after our initial read,
+            // or dispatch may have persisted before reporting a publish failure.
+            let id = body.id.clone();
+            match refresh_report(store, move |store| store.get_event(&id)).await {
+                Ok(Some(row))
+                    if row["event_type"] == body.event_type && row["payload"] == body.payload =>
+                {
+                    HttpResponse::Ok().json(json!({"id": body.id, "duplicate": true}))
+                }
+                Ok(Some(_)) => HttpResponse::Conflict()
+                    .json(json!({"error": "event ID reused with different data"})),
+                Ok(None) => HttpResponse::BadRequest().json(json!({"error": error.to_string()})),
+                Err(error) => {
+                    HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()}))
+                }
+            }
+        }
     }
 }
 
 #[get("/audit/events")]
 async fn list_events(
     query: web::Query<ListQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
 ) -> impl Responder {
     let limit = query.limit.unwrap_or(1000).clamp(1, 10_000);
-    match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(mut rows) => {
-            rows.sort_by_key(|row| row.get("recorded_at_us").and_then(Value::as_i64));
-            rows.reverse();
-            rows.truncate(limit);
-            HttpResponse::Ok().json(rows)
-        }
+    match read_report(store, move |store| {
+        store.events(&EventFilter::default(), limit)
+    })
+    .await
+    {
+        Ok(rows) => HttpResponse::Ok().json(rows),
         Err(error) => HttpResponse::InternalServerError().json(json!({"error": error.to_string()})),
     }
 }
 
 #[get("/audit/summary")]
-async fn summary(store: web::Data<dyn ReadModelStore>) -> impl Responder {
-    let rows = match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => rows,
-        Err(error) => {
-            return HttpResponse::InternalServerError().json(json!({"error": error.to_string()}));
-        }
-    };
-    let mut event_types = BTreeMap::<String, usize>::new();
-    let mut totals = BTreeMap::<&str, i64>::new();
-    let mut outcomes = BTreeMap::<String, usize>::new();
-    for row in &rows {
-        if let Some(event_type) = row.get("event_type").and_then(Value::as_str) {
-            *event_types.entry(event_type.to_string()).or_default() += 1;
-        }
-        let payload = row.get("payload").and_then(Value::as_object);
-        if let Some(payload) = payload {
-            if let Some(outcome) = payload.get("outcome").and_then(Value::as_str) {
-                *outcomes.entry(outcome.to_string()).or_default() += 1;
-            }
-            for key in [
-                "jev_input_tokens",
-                "jev_output_tokens",
-                "agent_input_tokens",
-                "agent_output_tokens",
-                "agent_total_tokens",
-                "agent_total_tokens_delta",
-                "total_decision_ms",
-                "baseline_ms",
-                "rework_ms",
-            ] {
-                if let Some(value) = payload.get(key).and_then(Value::as_i64) {
-                    *totals.entry(key).or_default() += value;
-                }
-            }
-        }
-    }
-    HttpResponse::Ok().json(json!({
-        "events": rows.len(),
-        "event_types": event_types,
-        "outcomes": outcomes,
-        "totals": totals,
-    }))
+async fn summary(store: web::Data<ReportStore>) -> impl Responder {
+    report_response(read_report(store, |store| store.raw_summary()).await)
 }
 
 #[get("/audit/summary/checkpoints")]
 async fn checkpoint_summary(
     query: web::Query<GroupedQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
 ) -> impl Responder {
-    match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => {
-            HttpResponse::Ok().json(grouped::checkpoint_groups(&rows, query.include_fixtures))
-        }
-        Err(error) => HttpResponse::InternalServerError().json(json!({"error": error.to_string()})),
-    }
+    report_response(
+        read_report(store, move |store| {
+            store.checkpoint_groups(query.include_fixtures)
+        })
+        .await,
+    )
 }
 
 #[get("/audit/summary/routes")]
 async fn route_summary(
     query: web::Query<GroupedQuery>,
-    store: web::Data<dyn ReadModelStore>,
+    store: web::Data<ReportStore>,
 ) -> impl Responder {
-    match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => HttpResponse::Ok().json(grouped::route_groups(&rows, query.include_fixtures)),
-        Err(error) => HttpResponse::InternalServerError().json(json!({"error": error.to_string()})),
+    report_response(
+        read_report(store, move |store| {
+            store.route_groups(query.include_fixtures)
+        })
+        .await,
+    )
+}
+
+#[get("/audit/orchestration")]
+async fn orchestration_summary(store: web::Data<ReportStore>) -> impl Responder {
+    report_response(read_report(store, |store| store.orchestration()).await)
+}
+
+fn report_response(result: anyhow::Result<Value>) -> HttpResponse {
+    match result {
+        Ok(report) => HttpResponse::Ok().json(report),
+        Err(error) => HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()})),
     }
 }
 
@@ -199,9 +214,21 @@ async fn update_settings(
 }
 
 #[get("/audit/workflow")]
-async fn workflow_events(store: web::Data<dyn ReadModelStore>) -> impl Responder {
-    match store.list(AUDIT_EVENTS_VIEW).await {
-        Ok(rows) => HttpResponse::Ok().json(crate::workflow::sessions(&rows)),
+async fn workflow_events(store: web::Data<ReportStore>) -> impl Responder {
+    match read_report(store, |store| {
+        store
+            .sessions()?
+            .iter()
+            .map(|session| {
+                store
+                    .session(session["session_id"].as_str().unwrap_or_default())?
+                    .ok_or_else(|| anyhow::anyhow!("prepared session missing"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+    })
+    .await
+    {
+        Ok(sessions) => HttpResponse::Ok().json(sessions),
         Err(error) => HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()})),
     }
 }
@@ -212,6 +239,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .service(collection_settings)
             .service(update_settings)
             .service(workflow_events)
+            .service(orchestration_summary)
             .service(record_event)
             .service(list_events)
             .service(summary)
@@ -223,6 +251,37 @@ pub fn config(cfg: &mut web::ServiceConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[actix_web::test]
+    async fn page_reads_use_committed_reports_while_pending_updates_are_write_locked() {
+        use diesel::{connection::SimpleConnection, Connection, SqliteConnection};
+        let path = std::env::temp_dir().join(format!(
+            "harness-read-snapshot-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = ReportStore::open(path.to_str().unwrap()).unwrap();
+        let mut conn = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        conn.batch_execute(r#"CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,aggregate_id TEXT NOT NULL,aggregate_type TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT NOT NULL,sequence BIGINT NOT NULL,timestamp_utc_us BIGINT NOT NULL);
+            INSERT INTO events VALUES(1,'first','AuditEvent','AuditEventRecorded','{"event_type":"jev.agent","payload":{}}',1,1);"#).unwrap();
+        store.refresh().unwrap();
+        conn.batch_execute(r#"INSERT INTO events VALUES(2,'pending','AuditEvent','AuditEventRecorded','{"event_type":"jev.agent","payload":{}}',1,2); BEGIN IMMEDIATE;"#).unwrap();
+        let result = actix_web::rt::time::timeout(
+            std::time::Duration::from_secs(1),
+            read_report(web::Data::new(store.clone()), |store| store.raw_summary()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["events"], 1);
+        conn.batch_execute("ROLLBACK;").unwrap();
+        assert_eq!(store.refresh().unwrap(), 1);
+        assert_eq!(store.raw_summary().unwrap()["events"], 2);
+        drop(conn);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
 
     #[test]
     fn list_limit_is_bounded() {

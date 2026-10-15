@@ -330,10 +330,10 @@ class TaskRoutingTests(unittest.TestCase):
     def test_switch_on_routes_active_and_persists(self):
         state = self.switch("on", "--reason", "pilot reviewed")
         self.assertEqual((state["enabled"], state["mode"], state["source"], state["model"]), (True, "active", "file", "fixture"))
-        stored = self.config_home / "jev-delegation.json"
+        stored = self.config_home / "config.json"
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(json.loads(stored.read_text())["reason"], "pilot reviewed")
+        self.assertEqual(json.loads(stored.read_text())["typesafe"]["reason"], "pilot reviewed")
         record = json.loads(self.route().stdout)
         self.assertEqual((record["source"], record["recommendation"], record["routing_mode"]), ("typesafe", "proceed", "active"))
         self.assertEqual((record["mode_source"], record["delegation"], record["rollout_selected"]), ("delegation", True, True))

@@ -10,11 +10,13 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+import harness_config
+
 ROOT = Path(__file__).resolve().parent.parent
 MAX_RECORD_BYTES = 32_000
 
 def settings_path() -> Path:
-    return Path(os.environ.get("HARNESS_AUDIT_SETTINGS", ROOT / ".harness-db/audit-settings.json"))
+    return harness_config.path()
 
 def category(event_type: str) -> str:
     return "workflow" if event_type.startswith("workflow.") else "jev"
@@ -23,17 +25,15 @@ def enabled(event_type: str = "jev.route") -> bool:
     # Explicit process-level opt-out remains a hard stop.
     if os.environ.get("HARNESS_AUDIT_ENABLED") == "0":
         return False
-    path = settings_path()
-    if path.exists():
-        config = json.loads(path.read_text())
-        if any(type(config.get(key)) is not bool for key in ("jev", "workflow")):
-            raise ValueError("invalid audit collection settings")
-        if type(config.get("workflow_prompts", False)) is not bool:
-            raise ValueError("invalid prompt collection setting")
-        if event_type == "workflow.prompt_recorded":
-            return config["workflow"] and config.get("workflow_prompts", False)
-        return config[category(event_type)]
-    return event_type != "workflow.prompt_recorded" and os.environ.get("HARNESS_AUDIT_ENABLED") == "1"
+    config = harness_config.load()["telemetry"]
+    if not config["enabled"]:
+        return False
+    if event_type == "workflow.prompt_recorded":
+        return config["workflow"] and config["workflow_prompts"]
+    # Preserve opt-in semantics until the consolidated file is initialized.
+    if not settings_path().exists():
+        return event_type != "workflow.prompt_recorded" and os.environ.get("HARNESS_AUDIT_ENABLED") == "1"
+    return config[category(event_type)]
 
 def audit_url() -> str:
     return os.environ.get("HARNESS_AUDIT_URL", "http://127.0.0.1:18080").rstrip("/")

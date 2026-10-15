@@ -1,0 +1,10 @@
+{
+  "goal": "Use one documented machine-wide JSON file for TypeSafe, dispatch and telemetry switches.",
+  "deliverables": ["scripts/harness_config.py", "scripts/jev_delegation.py", "scripts/audit_transport.py", "services/harness-audit/src/settings.rs", "tests/unified-config.sh", "docs/setup.md"],
+  "constraints": ["Preserve existing settings and unrelated changes.", "No secret changes.", "Keep JSON valid using _doc fields rather than comments.", "Dispatch toggle is reserved; dispatcher implementation is deferred."],
+  "non_goals": [{"description": "Do not implement role dispatch or new decision enforcement."}],
+  "acceptance": [
+    {"id": "config", "criterion": "Migration, disabled mode and concurrent updates pass", "command": ["sh", "tests/unified-config.sh"]},
+    {"id": "service", "criterion": "Audit service regression suite passes", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked"]}
+  ]
+}

@@ -348,7 +348,7 @@ def request_options() -> dict[str, Any]:
 
 def audit_emit(*arguments: str) -> None:
     """Best-effort Arc telemetry; never affects the checkpoint result."""
-    if os.environ.get("HARNESS_AUDIT_ENABLED") != "1":
+    if os.environ.get("HARNESS_AUDIT_ENABLED") == "0":
         return
     emitter = ROOT / "scripts" / "audit_emit.py"
     try:
@@ -398,7 +398,10 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
     write_record(record, db_root)
     bypass = checkpoint.get("bypass_reason", "none")
     began = time.monotonic()
-    if bypass != "none":
+    if not jev_delegation.calls_enabled():
+        record.update(status="bypassed", bypass_reason="typesafe_disabled", exit_code=0)
+        bypass = "typesafe_disabled"
+    elif bypass != "none":
         record.update(status="bypassed", bypass_reason=bypass, exit_code=0)
     elif delegated and (not model or model.endswith("-latest")):
         record.update(status="fallback", fallback_reason="model_pin_required", exit_code=1)

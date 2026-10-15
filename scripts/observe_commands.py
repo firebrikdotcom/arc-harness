@@ -8,11 +8,12 @@ import subprocess
 import sys
 
 from run_paths import current_file, session_id
+from phase_checkpoint import enabled
 
 
 def main() -> int:
     raw = sys.stdin.read(1_000_001)
-    if os.environ.get("HARNESS_JEV_CHECKPOINTS", "0") != "1" or len(raw) > 1_000_000:
+    if not enabled() or len(raw) > 1_000_000:
         return 0
     payload = json.loads(raw or "{}")
     if payload.get("tool_name") not in ("Bash", "exec_command", "functions.exec_command"):

@@ -76,7 +76,9 @@ class Skip(Exception):
 
 
 def enabled() -> bool:
-    return os.environ.get(ENABLE_ENV) == "1"
+    import harness_config
+    config = harness_config.load()["typesafe"]
+    return config["mode"] != "off" and config["checkpoints"] and os.environ.get(ENABLE_ENV, "0") == "1"
 
 
 def now() -> str:

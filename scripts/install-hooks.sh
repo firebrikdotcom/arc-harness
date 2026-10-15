@@ -80,7 +80,7 @@ def entries_for(index: int) -> dict:
         events.append("PostToolUseFailure")
     for event in events:
         entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {"claude-code" if index == 0 else "codex"}', "timeout": 3 if event == "SessionEnd" else 10}]}
-        if event in ("PreToolUse", "UserPromptSubmit", "Stop"):
+        if event in ("PreToolUse", "UserPromptSubmit", "Stop", "PostToolUse", "PostToolUseFailure"):
             entry["hooks"][0]["command"] = f'python3 "{TODO_GATE}" {"claude-code" if index == 0 else "codex"}'
         if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
             entry["matcher"] = ".*"

@@ -19,7 +19,7 @@ mkdir -p "$HARNESS_ROOT_UNDER_TEST/scripts/hooks" "$HARNESS_ROOT_UNDER_TEST/sche
 cp "$SOURCE_ROOT/AGENTS.md" "$HARNESS_ROOT_UNDER_TEST/AGENTS.md"
 cp "$SOURCE_ROOT/scripts/harness" "$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 cp "$SOURCE_ROOT/scripts/run-paths.sh" "$SOURCE_ROOT/scripts/run_paths.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
-cp "$SOURCE_ROOT/scripts/workflow_audit.py" "$SOURCE_ROOT/scripts/workflow_todos.py" "$SOURCE_ROOT/scripts/audit_transport.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
+cp "$SOURCE_ROOT/scripts/workflow_audit.py" "$SOURCE_ROOT/scripts/workflow_todos.py" "$SOURCE_ROOT/scripts/audit_transport.py" "$SOURCE_ROOT/scripts/harness_config.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/verify.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh"
 cp "$SOURCE_ROOT/scripts/permit.sh" "$SOURCE_ROOT/scripts/permit.py" "$SOURCE_ROOT/scripts/guard-version" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/review_findings.py" "$SOURCE_ROOT/scripts/tree-hash.sh" "$SOURCE_ROOT/scripts/task_contract.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"

@@ -1,4 +1,4 @@
-use std::{env, fs, path::Path};
+use std::{env, fs, path::Path, sync::Arc};
 
 use anyhow::{bail, Context};
 use arc_web::{ArcApp, ArcAppBuilder};
@@ -9,9 +9,10 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::domain::audit_event::aggregate::AuditEventAggregate;
-use crate::domain::audit_event::projector::{AuditEventProjector, AUDIT_EVENTS_VIEW};
 
 mod domain;
+mod orchestration;
+mod reports;
 mod routes;
 mod settings;
 mod summary;
@@ -40,10 +41,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn builder() -> ArcAppBuilder {
+fn builder(reports: reports::ReportStore) -> ArcAppBuilder {
     ArcApp::builder()
         .register_aggregate::<AuditEventAggregate>()
-        .register_projector(AuditEventProjector, AUDIT_EVENTS_VIEW)
+        .register_data(Arc::new(reports))
         .register_ui_host(ui::host())
         .register_ui(ui::contribution())
         .register_routes(routes::config)
@@ -101,6 +102,34 @@ fn start_delivery_worker() {
     });
 }
 
+fn start_report_worker(reports: reports::ReportStore) {
+    std::thread::spawn(move || {
+        let mut failures = 0_u64;
+        loop {
+            match reports.refresh() {
+                Ok(_) => {
+                    if failures > 0 {
+                        tracing::info!(failures, "Dashboard report catch-up recovered");
+                        failures = 0;
+                    }
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    if failures == 1 {
+                        tracing::error!(error=%error, failures, "Dashboard report catch-up failed; checkpoint retained");
+                    } else {
+                        tracing::warn!(
+                            failures,
+                            "Dashboard report catch-up still failing; checkpoint retained"
+                        );
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+}
+
 async fn serve() -> anyhow::Result<()> {
     for key in ["APP_URL", "SECRET_KEY", "DATABASE_URL"] {
         if env::var_os(key).is_none() {
@@ -113,8 +142,13 @@ async fn serve() -> anyhow::Result<()> {
         .parse::<u16>()?;
     info!(url=%format!("http://{host}:{port}"), "Arc audit application starting");
     // Make the shared switches available to collectors before the server accepts events.
-    settings::save(settings::load()?)?;
+    settings::initialize()?;
     start_delivery_worker();
-    builder().serve(host, port).await?;
+    let reports = reports::ReportStore::open(&env::var("DATABASE_URL")?)?;
+    reports.refresh()?;
+    start_report_worker(reports.clone());
+    // Arc still scans its event stream at startup. No projector is registered:
+    // historical views remain intact and incremental reports own all read paths.
+    builder(reports).serve(host, port).await?;
     Ok(())
 }

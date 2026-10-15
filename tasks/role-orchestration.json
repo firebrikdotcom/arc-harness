@@ -1,0 +1,12 @@
+{
+  "goal": "Complete role-scoped native and external orchestration, TypeSafe checkpoints, and dashboard measurements.",
+  "deliverables": ["scripts/role_dispatch.py", "scripts/decision_checkpoint.py", "scripts/workflow_gate.py", "scripts/harness_config.py", "services/harness-audit/", "tests/", "docs/"],
+  "constraints": ["Preserve existing user configuration and prior uncommitted work.", "No secret operations.", "Native tools remain owned by the parent runtime; external execution never raises its permissions.", "Do not claim access to private reasoning; enforce observable seams and require explicit checkpoints for internal judgments.", "Use compact role packets, bounded concurrency, isolated editing worktrees and redacted telemetry."],
+  "non_goals": [{"description": "Do not change target application source, deploy regional applications, or modify credentials."}],
+  "acceptance": [
+    {"id": "dispatch", "criterion": "Dispatcher regression and native/external bridge tests pass", "command": ["sh", "tests/role-dispatch.sh"]},
+    {"id": "decisions", "criterion": "Decision enforcement, configuration and outcome tests pass", "command": ["sh", "tests/decision-checkpoints.sh"]},
+    {"id": "audit", "criterion": "Dashboard aggregation and existing service tests pass", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked"]},
+    {"id": "live", "criterion": "Native and installed external workers produce verified artifacts and telemetry visible in the running dashboard"}
+  ]
+}

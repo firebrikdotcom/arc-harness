@@ -2,8 +2,9 @@
 
 This is the versioned Arc event-sourced audit sink for the harness. It stores
 JEV routing, resolved outcomes, and agent/token measurements as immutable
-`AuditEventRecorded` events, then projects them into an `audit_events_view`
-read model for summaries and review.
+`AuditEventRecorded` events, then updates durable dashboard reports from a
+source-position checkpoint. The existing `audit_events_view` is retained as legacy
+derived history; page requests no longer load that entire table.
 
 The service listens on all IPv4 interfaces (`0.0.0.0:18080`); use localhost or this machine's address to open it:
 
@@ -108,7 +109,7 @@ Save the switches on `/`. They persist across restarts and apply to both local c
 `GET /api/audit/workflow` returns grouped sessions/tasks/events.
 Both categories default to enabled on service startup. Switches apply to collection only.
 
-Configuration lives at `../../.harness-db/audit-settings.json`; use `HARNESS_AUDIT_SETTINGS` to select another path, with the same value in the service and every collector. `HARNESS_AUDIT_ENABLED=0` remains a process-level hard opt-out; `=1` opts in when no settings file exists. Once the service has created its settings file, it controls collection for local clients even if the legacy variable is unset. Defaults and API ingestion fail closed on a malformed settings file.
+Configuration lives in the `telemetry` section of `~/.config/harness/config.json`; use `HARNESS_CONFIG` to select another path (`HARNESS_AUDIT_SETTINGS` is a legacy alias), with the same value in the service and every collector. `HARNESS_AUDIT_ENABLED=0` remains a process-level hard opt-out; `=1` opts in when no settings file exists. Once the service has created its settings file, it controls collection for local clients even if the legacy variable is unset. Defaults and API ingestion fail closed on a malformed settings file.
 
 Telemetry is first saved in a SQLite outbox (`HARNESS_AUDIT_OUTBOX`, default `../../.harness-db/audit-outbox.sqlite`). The running service retries delivery every two seconds; every explicit emission also attempts a bounded drain. Hook collection only queues locally. Repeated HTTP delivery uses the same event ID and is idempotent; conflicting data with the same ID is rejected. On outages, events remain queued. `scripts/harness workflow flush` manually retries delivery. A failed delivery does not fail a phase, hook, or verification gate. The service worker requires `python3` and the companion harness scripts on this machine. Shared switches and this worker are local-machine features; remote collectors must use the same configured settings through their own deployment configuration.
 
@@ -180,3 +181,52 @@ Add `--session-id ACTUAL_SESSION_ID` to Workflow commands outside a native sessi
 The task card displays criteria, status, evidence, and revision history. Select a todo to filter its timeline, including correlated tools and checks. Historical tasks have no fabricated todo list.
 
 The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return exit 2 with guidance. Telemetry outages do not bypass it. This enforces declared plans on covered native tools, not semantic completeness or a security sandbox: specialized tools outside native hook coverage, hook timeouts, and runtime configuration can bypass enforcement. Codex hosted WebSearch has no PreToolUse; a returned process handle is not tool completion. Stop always permits the conversational turn to end without accessing policy storage or changing task/todo state, so waiting for user input cannot cause repeated hook continuations. Existing phase/denylist gates and permissions remain authoritative. Review phase completion may precede deployment todos; explicit completed outcomes enforce the full task criteria. Ending a turn does not mark the task complete.
+
+## Incremental dashboard reports
+
+`src/reports.rs` owns the SQLite `dashboard_events`, `dashboard_reports` and
+`dashboard_checkpoint` tables. First startup backfills them from immutable
+`events.id` positions. Subsequent updates consume only newer committed rows and
+atomically save the affected reports together with their checkpoint. A crash or
+invalid source row leaves the previous checkpoint intact for retry. Unrepresentable
+numeric totals remain explicitly unknown with overflow diagnostics, allowing other
+reports and new events to continue. Late producer
+timestamps remain correct because arrival order uses source IDs.
+
+Workbench summaries, orchestration summaries and individual Workflow sessions
+are persisted reports. Session directories use compact search/filter facts;
+event lists use indexed filters and bounded SQL limits. Accuracy charts retain
+small checkpoint/outcome facts for the viewer's timezone. Report work runs off
+the HTTP worker threads; page reads use the last atomically committed reports without waiting for catch-up.
+Ingestion acknowledges after projection; a background worker also catches up every
+500 ms, recovering source commits left by an interrupted request.
+
+WAL and bounded SQLite busy waiting allow readers during report writes. The
+report schema version invalidates only derived dashboard tables when reducer
+semantics change; original events and the legacy view are preserved. Never reset
+the source event table to rebuild reports.
+
+Arc 0.8.5 still reads its event stream once when constructing the aggregate
+runtime. The harness registers no historical projector there, avoiding its old
+clear-and-rewrite cycle; incremental reports handle the catch-up independently.
+This retains Arc's existing HTTP middleware, UI host and command handling.
+
+Verify with `cargo test --locked` from this directory. Compare warm requests to
+`/`, `/workflow`, `/events` and `/orchestration`, then restart and time `/health`.
+The first backfill and a warmed checkpoint restart are separate measurements.
+
+Measured locally on 2026-10-14 with over 60,000 saved source events. HTTP request
+medians use three samples before and five after, with normal telemetry ingestion:
+
+| Page | Before | After |
+| --- | ---: | ---: |
+| Workbench | 3,555 ms | 382 ms |
+| Workflow directory | 4,715 ms | 103 ms |
+| Events | 1,374 ms | 36 ms |
+| Orchestration | 1,334 ms | 27 ms |
+
+The old startup projection rewrite took about 306 seconds in the service log;
+first report backfill took 60.6 seconds, and the subsequent checkpoint restart
+was ready in 4.67 seconds. Five concurrent page/API reads returned HTTP 200
+in 7–410 ms. A SHA-256 comparison confirmed all 60,944 original event IDs and
+payloads remained unchanged. These are observed samples, not latency guarantees.

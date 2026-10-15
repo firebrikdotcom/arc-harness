@@ -64,6 +64,7 @@ scripts/harness review done                 # needs an approval of the current f
 - Session start prints `scripts/harness brief`: this session's run (or the latest), its contract, any pause, recent steps, and the project map. Record steps with `scripts/harness step --note "..."`.
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: `scripts/harness continue "<new approach>"`. Abort is theirs.
 - Jev (TypeSafe) advice and the task launcher: docs/jev-checkpoints.md, docs/setup.md. `scripts/harness jev status` says whether Jev is followed: off, every call is a shadow comparison and your own baseline runs; on, the session-start route is the route to take and `scripts/harness advise` returns Jev's choice as `action` with `delegated: true`, so take that action unless a deterministic rule (permissions, required checks, failures, the user's choice) decides otherwise, then label the call. Semantic search: `scripts/jg.sh --project PATH "question"`.
+- Role orchestration and judgment checkpoints: docs/orchestration.md. Read it when `dispatch.enabled` or `typesafe.enforce_decisions` is enabled in the shared `config.json`; use the native bridge for supported models and the external launcher otherwise.
 <!-- harness-cli:end -->
 
 <!-- shared-rule:lavish-sequential-review:start -->

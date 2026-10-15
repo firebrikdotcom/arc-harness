@@ -27,7 +27,7 @@ def command_runs_codex(command: list[str]) -> bool:
 
 
 def audit_agent_completion(route: dict, profile: str, exit_code: int, environment: dict[str, str]) -> None:
-    if environment.get("HARNESS_AUDIT_ENABLED") != "1":
+    if environment.get("HARNESS_AUDIT_ENABLED") == "0":
         return
     emitter = ROOT / "scripts" / "audit_emit.py"
     command = [
@@ -60,8 +60,8 @@ def read_command(path: Path | None) -> list[str] | None:
     if path is None:
         return None
     try:
-        if path.stat().st_size > 4096:
-            raise InputError(f"command file exceeds 4096 bytes: {path}")
+        if path.stat().st_size > 32_000:
+            raise InputError(f"command file exceeds 32000 bytes: {path}")
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise InputError(f"cannot read command file {path}: {error}") from error

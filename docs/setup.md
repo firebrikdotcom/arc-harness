@@ -115,7 +115,7 @@ Optional harness variables:
 - `HARNESS_VERIFY_SCOPE=full`: disables the docs-only scope and runs every verification category.
 - `HARNESS_TYPESAFE_ROUTER`: path to the TypeSafe router used by `route`, `launch`, and `advise`; it defaults to the installed TypeSafe skill.
 - `HARNESS_JEV_DELEGATION`: optional, `on` or `off`; overrides the persisted `harness jev` switch for one shell (`scripts/verify.sh` sets `off` for nested tests). Unset, the switch file decides.
-- `HARNESS_CONFIG_HOME`: optional directory holding `jev-delegation.json`; default `$XDG_CONFIG_HOME/harness`, else `~/.config/harness`. Tests point it at a temp dir so they never read the machine's switch.
+- `HARNESS_CONFIG_HOME`: optional directory holding `config.json`; default `$XDG_CONFIG_HOME/harness`, else `~/.config/harness`. Tests point it at a temp dir so they never read the machine's switch.
 - `HARNESS_TYPESAFE_ACTIVE`: set to `1` to allow `--mode active` on a single call through the recorded-outcome gate; `harness jev on` is the persisted alternative.
 - `HARNESS_TYPESAFE_ROLLOUT_PERCENT`: optional integer from `0` to `100`; in active mode, only that percentage of eligible tasks follows JEV's live recommendation. The cohort is stable as the percentage increases; default `100`.
 - `HARNESS_TYPESAFE_OPERATOR_ACTIVATION`: set to `1` only when the operator explicitly accepts unvalidated full activation. It bypasses the 30-outcome evidence gate but never bypasses deterministic safety gates; every route record marks `operator_activation=true`.
@@ -382,7 +382,7 @@ scripts/harness jev off --reason "pause the pilot"
 scripts/harness jev status --json     # enabled, mode, source, model, changed_at, reason, path
 ```
 
-It is stored as `jev-delegation.json` (mode 0600) under `HARNESS_CONFIG_HOME`, default `$XDG_CONFIG_HOME/harness/`, else `~/.config/harness/`: outside every checkout, so each worktree and each new shell sees the same answer. `HARNESS_JEV_DELEGATION=on|off` overrides the file for one shell, `--mode shadow|active` overrides it for one `route` or `launch` call, and `scripts/verify.sh` forces `off` for the nested harness tests. `jev on` also stores the exact model pin (`--model`, else `TYPESAFE_MODEL`, else `jev-1.13.0`); the router is asked for that model whenever the shell has no exact pin of its own, and `-latest` aliases are refused.
+It is stored in the `typesafe` section of `config.json` (mode 0600) under `HARNESS_CONFIG_HOME`, default `$XDG_CONFIG_HOME/harness/`, else `~/.config/harness/`: outside every checkout, so each worktree and each new shell sees the same answer. `HARNESS_JEV_DELEGATION=on|off` overrides the file for one shell, `--mode shadow|active` overrides it for one `route` or `launch` call, and `scripts/verify.sh` forces `off` for the nested harness tests. `jev on` also stores the exact model pin (`--model`, else `TYPESAFE_MODEL`, else `jev-1.13.0`); the router is asked for that model whenever the shell has no exact pin of its own, and `-latest` aliases are refused.
 
 | Seam | Switch off (shadow, the default) | Switch on (delegated) |
 | --- | --- | --- |
@@ -682,7 +682,7 @@ The installer only touches hook groups whose command points at these scripts, an
 
 The audit workbench at `http://127.0.0.1:18080/` provides persisted, independent Jev and Workflow collection switches. Install the additive collector with `scripts/install-hooks.sh`, then start or restart the audit service. `/workflow` groups newly collected events by native session and task. See `services/harness-audit/README.md` for lifecycle coverage, metadata commands, API contracts, and limitations.
 
-- `HARNESS_AUDIT_SETTINGS`: shared local JSON switches (default harness `.harness-db/audit-settings.json`); use the same path for the service and collectors.
+- `HARNESS_AUDIT_SETTINGS`: shared local JSON switches (default `~/.config/harness/config.json`); use the same path for the service and collectors.
 - `HARNESS_AUDIT_OUTBOX`: durable SQLite delivery queue (default harness `.harness-db/audit-outbox.sqlite`); queued records retry while the service runs and are dropped when their collection category is disabled.
 - `HARNESS_WORKFLOW_STATE`: local session/task bindings (default harness `.harness-db/workflow-state.sqlite`).
 - `HARNESS_SESSION_ID`: exact native session binding for harness child commands; `CODEX_THREAD_ID` and `CLAUDE_SESSION_ID` are also recognized. Hooks use the session ID in their payload. Missing IDs are not guessed.
@@ -725,3 +725,58 @@ The task card displays criteria, status, evidence, and revision history. Select 
 Cursor CLI can import the installed todo hooks from `~/.claude/settings.json`. The todo gate accepts Cursor's `beforeSubmitPrompt`, `preToolUse`, and `stop` events and returns Cursor JSON responses. It uses `conversation_id` (falling back to a payload `session_id`), never the per-turn `generation_id` or an inherited shell session. Tool `working_directory` is respected for relative bookkeeping commands. Missing plans still deny writes with a message naming the conversation's `--session-id`; use that ID on `harness workflow todo` commands. Reads remain available, every prompt requires reconfirmation, and Stop never completes a task or requires policy storage. Existing imported hooks point directly at the script, so updating this checkout needs no global settings changes. This compatibility covers the todo gate, not installation of a complete native Cursor hook suite. See the [Cursor hook schemas](https://cursor.com/docs/hooks) and [third-party imports](https://cursor.com/docs/reference/third-party-hooks).
 
 The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return exit 2 with guidance. Telemetry outages do not bypass it. This enforces declared plans on covered native tools, not semantic completeness or a security sandbox: specialized tools outside native hook coverage, hook timeouts, and runtime configuration can bypass enforcement. Codex hosted WebSearch has no PreToolUse; a returned process handle is not tool completion. Stop always permits the conversational turn to end without accessing policy storage or changing task/todo state, so waiting for user input cannot cause repeated hook continuations. Existing phase/denylist gates and permissions remain authoritative. Review phase completion may precede deployment todos; explicit completed outcomes enforce the full task criteria. Ending a turn does not mark the task complete.
+
+
+## Unified runtime configuration
+
+All persisted TypeSafe, role-dispatch and collection toggles live in
+`~/.config/harness/config.json`. `HARNESS_CONFIG` selects another file;
+`HARNESS_CONFIG_HOME` (else `$XDG_CONFIG_HOME/harness`) selects its directory.
+Brief `_doc` fields are valid JSON reminders; do not add JSON comments or credentials.
+See `config.example.json` for the complete documented shape.
+
+```sh
+scripts/harness config init       # migrate legacy values, preserving current choices
+scripts/harness config show
+scripts/harness config update --section typesafe --values '{"mode":"off"}'
+scripts/harness config update --section typesafe --values '{"mode":"active"}'
+scripts/harness config update --section telemetry --values '{"enabled":true}'
+```
+
+- `typesafe.mode`: `off` makes no TypeSafe calls; `shadow` compares with the baseline;
+  `active` follows eligible choices. A persisted `off` wins over old activation flags.
+  `harness jev off` retains its existing meaning of **shadow**, not disabled calls.
+- `typesafe.model`: exact model pin. `typesafe.checkpoints`: allow automatic phase/session
+  checkpoints when the installed hooks also opt in with `HARNESS_JEV_CHECKPOINTS=1`
+  (normally sourced from `scripts/jev-enable.sh`); unset or `0` remains disabled.
+- `dispatch.enabled`: enable the role dispatcher and bounded native/external worker lifecycle;
+  see [orchestration](orchestration.md) for profiles, plans, receipts and measurements.
+- `telemetry.enabled`: master collection switch; `jev`, `workflow` and
+  `workflow_prompts` independently select categories. Prompt storage requires Workflow.
+  The dashboard category controls update this same file, preserving the current master
+  switch even for stale browser tabs, plus other sections. Edit the master in config.json.
+
+Initialization imports `jev-delegation.json` and the checkout's old
+`.harness-db/audit-settings.json` only when the consolidated file is absent.
+Old files remain as migration backups and cease to control settings after migration.
+Updates use an interprocess lock and atomic replacement (0600), preserving docs and
+unrelated sections. Invalid files fail with diagnostics rather than resetting choices.
+The audit service uses the shared Python writer; Python 3 must remain available.
+
+Legacy `HARNESS_AUDIT_SETTINGS` is a deprecated alias for the configuration path;
+use the same path for service and collectors. `HARNESS_AUDIT_ENABLED=0` remains a
+process opt-out, and `HARNESS_JEV_DELEGATION=off` still forces shadow comparison
+unless persisted mode is `off`. Safety gates, permissions and required checks are
+not disableable through this configuration. Runtime paths, timeouts and test-only
+overrides remain environment settings rather than persisted feature toggles.
+
+Role-based worker plans and decision enforcement are documented in [orchestration](orchestration.md). New additive fields in existing v1 configuration are filled from documented defaults without resetting existing choices.
+
+### Audit report checkpoints
+
+The audit service creates versioned, derived `dashboard_*` tables automatically
+on startup, backfills them once, then resumes from its committed event position.
+No credential or environment change is needed. Source events and the legacy
+audit view are preserved. Report schema changes rebuild only derived reports.
+See [incremental dashboard reports](../services/harness-audit/README.md#incremental-dashboard-reports)
+for consistency guarantees, remaining Arc startup reads and performance checks.

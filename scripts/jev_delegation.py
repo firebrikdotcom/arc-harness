@@ -12,7 +12,7 @@ phase-gate checkpoints stay observations because the gates they predict are
 mechanical.
 
 The switch lives outside every checkout, in one JSON file:
-`$HARNESS_CONFIG_HOME/jev-delegation.json`, defaulting to
+`$HARNESS_CONFIG_HOME/config.json`, defaulting to
 `$XDG_CONFIG_HOME/harness/` or `~/.config/harness/`. `HARNESS_JEV_DELEGATION=on|off`
 overrides the file for one shell (tests force `off`).
 """
@@ -23,14 +23,15 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import harness_config
+
 OVERRIDE_ENV = "HARNESS_JEV_DELEGATION"
 HOME_ENV = "HARNESS_CONFIG_HOME"
-FILE_NAME = "jev-delegation.json"
+FILE_NAME = "config.json"
 DEFAULT_MODEL = "jev-1.13.0"
 ON = {"on", "1", "true", "yes", "active"}
 OFF = {"off", "0", "false", "no", "shadow"}
@@ -41,30 +42,21 @@ class SwitchError(ValueError):
 
 
 def config_home() -> Path:
-    explicit = os.environ.get(HOME_ENV, "").strip()
-    if explicit:
-        return Path(explicit)
-    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    return (Path(xdg) if xdg else Path.home() / ".config") / "harness"
+    return harness_config.config_home()
 
 
 def config_path() -> Path:
-    return config_home() / FILE_NAME
+    return harness_config.path()
 
 
 def read_file() -> dict[str, Any]:
-    path = config_path()
     try:
-        if path.stat().st_size > 4096:
-            raise SwitchError(f"delegation switch file exceeds 4096 bytes: {path}")
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+        value = harness_config.load()["typesafe"]
+    except harness_config.ConfigError as error:
+        raise SwitchError(f"invalid delegation switch configuration: {error}") from error
+    if not config_path().exists() and not (config_home() / "jev-delegation.json").exists():
         return {}
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise SwitchError(f"cannot read delegation switch {path}: {type(error).__name__}") from error
-    if not isinstance(data, dict) or type(data.get("enabled")) is not bool:
-        raise SwitchError(f"delegation switch {path} must be an object with a boolean 'enabled'")
-    return data
+    return {**value, "enabled": value["mode"] == "active"}
 
 
 def parse_override(raw: str) -> bool:
@@ -80,7 +72,9 @@ def state() -> dict[str, Any]:
     """The effective switch: the env override when set, else the file, else off."""
     stored = read_file()
     override = os.environ.get(OVERRIDE_ENV)
-    if override is not None and override.strip():
+    if stored.get("mode") == "off":
+        enabled, source = False, "file"
+    elif override is not None and override.strip():
         enabled, source = parse_override(override), "environment"
     elif stored:
         enabled, source = stored["enabled"], "file"
@@ -88,7 +82,7 @@ def state() -> dict[str, Any]:
         enabled, source = False, "default"
     return {
         "enabled": enabled,
-        "mode": "active" if enabled else "shadow",
+        "mode": ("active" if enabled else "shadow") if source == "environment" else stored.get("mode", "shadow"),
         "source": source,
         "path": str(config_path()),
         "model": stored.get("model") if isinstance(stored.get("model"), str) else None,
@@ -115,26 +109,26 @@ def pinned_model() -> str:
 def write(enabled_flag: bool, reason: str | None, model: str | None) -> dict[str, Any]:
     previous = read_file()
     record = {
-        "enabled": enabled_flag,
+        "mode": "active" if enabled_flag else "shadow",
         "model": model or previous.get("model") or os.environ.get("TYPESAFE_MODEL") or DEFAULT_MODEL,
         "changed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "reason": reason or None,
     }
     if record["model"].endswith("-latest"):
         record["model"] = DEFAULT_MODEL
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, temporary = tempfile.mkstemp(prefix=".jev-delegation-", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(record, stream, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        harness_config.update("typesafe", record)
+    except harness_config.ConfigError as error:
+        raise SwitchError(str(error)) from error
     return record
+
+
+def calls_enabled() -> bool:
+    # A persisted hard off wins over old shell/CLI activation flags.
+    try:
+        return harness_config.load()["typesafe"]["mode"] != "off"
+    except harness_config.ConfigError as error:
+        raise SwitchError(str(error)) from error
 
 
 def describe(current: dict[str, Any]) -> str:
@@ -149,6 +143,8 @@ def describe(current: dict[str, Any]) -> str:
     if current["enabled"]:
         lines.append("  effect: route and launch select Jev's profile, the session route is the one to follow,")
         lines.append("          advise returns Jev's choice as the action. Deterministic gates still decide first.")
+    elif current["mode"] == "off":
+        lines.append("  effect: TypeSafe calls are disabled; normal agent reasoning runs.")
     else:
         lines.append("  effect: every Jev call is a shadow comparison; the agent's baseline is what runs.")
     return "\n".join(lines)

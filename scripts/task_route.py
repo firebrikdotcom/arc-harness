@@ -350,7 +350,7 @@ def write_record(record: dict[str, Any], db_root: Path) -> Path:
 
 
 def audit_route_record(record_path: Path) -> None:
-    if os.environ.get("HARNESS_AUDIT_ENABLED") != "1":
+    if os.environ.get("HARNESS_AUDIT_ENABLED") == "0":
         return
     emitter = ROOT / "scripts" / "audit_emit.py"
     try:
@@ -383,6 +383,9 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
     if fixed:
         recommendation, reason = fixed
         source = "deterministic"
+    elif not jev_delegation.calls_enabled():
+        recommendation, reason, source = "default", "TypeSafe disabled in config.json", "disabled"
+        routing_mode = "off"
     else:
         if mode == "active":
             eligible, gate_reason = active_eligible(router)

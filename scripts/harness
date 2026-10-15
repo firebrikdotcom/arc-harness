@@ -72,6 +72,9 @@ usage() {
   info "                       Select and start an argv command profile."
   info "  advise --context PATH | --family F ... | --record PATH | --label ID ... | --pending | --report"
   info "                       Jev advice, flag-form checkpoints, outcomes, and reports."
+  info "  dispatch create|next|run|status|bind|complete|cancel  Role-scoped worker orchestration."
+  info "  decision evaluate|consume|outcome|status  TypeSafe judgment lifecycle."
+  info "  config show|init|update  Shared documented runtime toggles (config.json)."
   info "  jev on|off|status    The persisted delegation switch: off compares Jev with the agent's"
   info "                       baseline (shadow); on follows Jev where the harness has a lever."
   info "  budget --thread ID --tokens N [--watch]"
@@ -1605,6 +1608,15 @@ case "$COMMAND" in
     ;;
   workflow)
     exec python3 "$SCRIPT_DIR/workflow_audit.py" "$@"
+    ;;
+  dispatch)
+    exec python3 "$SCRIPT_DIR/role_dispatch.py" "$@"
+    ;;
+  decision)
+    exec python3 "$SCRIPT_DIR/decision_checkpoint.py" "$@"
+    ;;
+  config)
+    exec python3 "$SCRIPT_DIR/harness_config.py" "$@"
     ;;
   jev)
     if ! has_cmd python3; then

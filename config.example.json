@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "_doc": "Machine-wide runtime switches. No credentials. CLI and dashboard preserve other sections.",
+  "typesafe": {
+    "_doc": "mode: off = no calls; shadow = compare only; active = follow decisions within existing rules.",
+    "mode": "shadow",
+    "model": "jev-1.13.0",
+    "checkpoints": true,
+    "enforce_decisions": false,
+    "_doc_enforce_decisions": "Require decision records at covered native execution seams; internal judgments use harness decision explicitly.",
+    "decision_ttl_seconds": 300,
+    "_doc_decision_ttl_seconds": "Reuse only unchanged decision states within this many seconds; consumed action receipts remain single-use.",
+    "_doc_checkpoints": "Enable automatic phase/session checkpoints; required checks always remain enforced."
+  },
+  "dispatch": {
+    "_doc": "Enable role-scoped dispatch. False keeps execution with the parent and prevents new worker launches.",
+    "enabled": false,
+    "max_workers": 3,
+    "_doc_max_workers": "Maximum simultaneous native and external workers per run.",
+    "max_context_bytes": 12000,
+    "_doc_max_context_bytes": "Maximum UTF-8 bytes in each worker's role packet; do not include full conversation history.",
+    "timeout_seconds": 900,
+    "_doc_timeout_seconds": "Stop timed-out external processes and require native parent cancellation at this deadline.",
+    "profiles": {
+      "native_scan": {
+        "provider": "native",
+        "model": "gpt-6-luna",
+        "effort": "high",
+        "role": "explorer",
+        "agent_type": "explorer"
+      },
+      "native_build": {
+        "provider": "native",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "role": "implementer",
+        "agent_type": "worker"
+      },
+      "native_review": {
+        "provider": "native",
+        "model": "gpt-6.1-sol",
+        "effort": "high",
+        "role": "reviewer",
+        "agent_type": "code-reviewer"
+      },
+      "codex_build": {
+        "provider": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "medium",
+        "role": "implementer"
+      },
+      "claude_review": {
+        "provider": "claude",
+        "model": "sonnet",
+        "effort": "medium",
+        "role": "reviewer"
+      }
+    },
+    "_doc_profiles": "Eligible role/model/backend combinations. Native needs parent tools; command providers use operator-configured argv only."
+  },
+  "telemetry": {
+    "_doc": "Dashboard collection only; does not enable TypeSafe or dispatch. Unavailable service queues events locally.",
+    "enabled": true,
+    "jev": true,
+    "workflow": true,
+    "workflow_prompts": false,
+    "_doc_jev": "Collect decision, routing and agent measurements.",
+    "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
+    "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained."
+  }
+}
