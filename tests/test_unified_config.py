@@ -76,6 +76,20 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(advice["status"], "bypassed")
         router.post_json.assert_not_called()
 
+    def test_sites_section_defaults_for_older_files_and_refuses_secrets(self):
+        config.update()
+        value = json.loads(config.path().read_text())
+        del value["sites"]
+        config.path().write_text(json.dumps(value))
+        self.assertEqual(config.load()["sites"]["url"], "https://sites.firebrik.com")
+        config.update("sites", {"url": "http://localhost:3030"})
+        self.assertEqual(config.load()["sites"]["url"], "http://localhost:3030")
+        for changes in ({"url": "http://sites.example.com"}, {"url": "https://user:pw@sites.example.com"},
+                        {"token_file": "fb_0123456789abcdef"}, {"token": "fb_0123456789abcdef"}, {"enabled": "yes"}):
+            with self.assertRaises(config.ConfigError, msg=changes):
+                config.update("sites", changes)
+        self.assertEqual(config.load()["sites"]["url"], "http://localhost:3030")
+
     def test_collection_master_switch_and_invalid_config(self):
         config.update("telemetry", {"workflow_prompts": True})
         self.assertTrue(audit_transport.enabled("workflow.prompt_recorded"))

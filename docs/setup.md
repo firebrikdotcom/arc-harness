@@ -239,7 +239,7 @@ sh tests/knowledge-trust.sh
 
 ## Harness CLI
 
-`scripts/harness` owns session budgets and plan/build/review phase order. It is a control plane only: it records and gates, and never runs Write, Shell, or git for the model.
+`scripts/harness` owns session budgets and plan/build/review phase order. It is a control plane only: it records and gates, and never runs Write, Shell, or git for the model. The one outward action it carries is `harness sites publish`, which an agent invokes explicitly to publish a page it was asked to publish; see [Publishing to Firebrik Sites](#publishing-to-firebrik-sites).
 
 It finds the harness root by walking up from the current directory for a directory containing `AGENTS.md` and `scripts/verify.sh`. Set `HARNESS_ROOT` to skip discovery.
 
@@ -263,6 +263,7 @@ scripts/harness contract set task.json      # or: contract waive "<reason>", con
 scripts/harness review submit findings.json
 scripts/harness brief
 scripts/harness prune --keep 20 --dry-run
+scripts/harness sites doctor               # or: sites publish FILE ROUTE [NAME], sites list
 ```
 
 ## Gates that decide done
@@ -575,6 +576,25 @@ scripts/install-jg-skill.sh --home /tmp/h --source /path/to/SKILL.md --skip-glob
 
 It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to the installed `jg`, or `--source`) verbatim to `~/.claude/skills/jevgrep/SKILL.md` and `~/.agents/skills/jevgrep/SKILL.md` and appends a marked `harness-jg` block that tells the agent to search through `scripts/jg.sh` instead of a bare `jg` inside any harness target. When `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` carries the `global-harness` block, the same marked paragraph is inserted before that block's end marker, so the instruction reaches every session on the machine without editing project-owned guides. Reruns are idempotent; run it again after `jg skill --global` or a package upgrade, since those overwrite the skill files.
 
+### Publishing to Firebrik Sites
+
+Any agent session on the machine can publish or update a Firebrik Sites page through the harness:
+
+```sh
+scripts/harness sites doctor                      # what publishing needs, and what is missing
+scripts/harness sites publish FILE ROUTE [NAME]   # create or update /{username}/ROUTE from FILE
+scripts/harness sites list                        # id, route and URL of every page the token sees
+scripts/install-sites-skill.sh [--home DIR]       # install the firebrik-sites skill for Claude Code and Codex
+```
+
+`publish` looks the route up with the `list-pages` MCP tool, then calls `create-page` or `update-page` on `URL/mcp/sites` with `expected_bytes` and `expected_sha256`, so the server refuses a cut-off upload before writing. It succeeds (exit 0, `OK: <url>`) only when the receipt's `received_sha256` equals the local file's, the server read the stored file back (`verified`), and the live page answers 200 and contains the stored `tail_excerpt`. Server `warnings`, such as the sanitizer removing scripts, are printed as `WARN:` lines. The file is read from disk, so a model's output limit cannot truncate it.
+
+When publishing cannot work, `doctor` (and `publish` before it sends anything) prints one `MISSING` line per problem with a `fix:` line: publishing turned off, a missing tool (`curl`, `jq`, `sha256sum`, `python3`), no token file, a token file readable by other users, an unreachable or failing endpoint (a 5xx is named as a server fault, which Cloudflare shows as "Scheduled Maintenance"), a rejected token with the server's reason, or a server that does not support `expected_sha256` (Sites before 0.1.2). Exit codes: 0 ok, 1 publish or verification failed, 2 usage, 3 setup missing.
+
+Settings are the `sites` section of `config.json`: `enabled`, `url` (https; http only for localhost) and `token_file` (absolute or `~/` path, default `~/.config/firebrik-sites/token`). The token is never stored there, never printed, and reaches `curl` through a 0600 header file rather than its argument list. `FIREBRIK_SITES_URL`, `FIREBRIK_SITES_TOKEN_FILE` and `FIREBRIK_SITES_TOKEN` override the settings for one shell. Create the token in the Sites dashboard (Settings, API tokens) and save it from your own terminal: `mkdir -p ~/.config/firebrik-sites && read -rs t && printf %s "$t" > ~/.config/firebrik-sites/token && chmod 600 ~/.config/firebrik-sites/token`.
+
+`scripts/install-sites-skill.sh` renders `skills/firebrik-sites/SKILL.md` with this checkout's absolute `scripts/harness` path into `~/.claude/skills/firebrik-sites/` and `~/.agents/skills/firebrik-sites/`; rerun it after moving the checkout. `tests/sites.sh` exercises every path against `tests/fake_sites.py` on localhost.
+
 ## Agent Guide Block
 
 The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing; a `CLAUDE.md` that imports `@AGENTS.md` is left alone. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. The block is the short gated workflow (under 350 words, which `tests/install-guides.sh` enforces) and points at these docs; it is read at every session start, so detail lives here instead. The three optional Jev trigger commands are in [Jev decision checkpoints](jev-checkpoints.md), and the test runs them against the offline fake router. For a project outside the harness root the block uses the absolute CLI path.
@@ -751,6 +771,8 @@ scripts/harness config update --section telemetry --values '{"enabled":true}'
   (normally sourced from `scripts/jev-enable.sh`); unset or `0` remains disabled.
 - `dispatch.enabled`: enable the role dispatcher and bounded native/external worker lifecycle;
   see [orchestration](orchestration.md) for profiles, plans, receipts and measurements.
+- `sites.enabled`, `sites.url`, `sites.token_file`: Firebrik Sites publishing for `harness sites`;
+  see [Publishing to Firebrik Sites](#publishing-to-firebrik-sites). Older files get this section's defaults.
 - `telemetry.enabled`: master collection switch; `jev`, `workflow` and
   `workflow_prompts` independently select categories. Prompt storage requires Workflow.
   The dashboard category controls update this same file, preserving the current master

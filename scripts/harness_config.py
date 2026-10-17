@@ -54,7 +54,16 @@ DEFAULTS = {
         "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
         "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained.",
     },
+    "sites": {
+        "_doc": "Firebrik Sites publishing for every agent (harness sites). The token stays in token_file (0600), never here.",
+        "enabled": True,
+        "url": "https://sites.firebrik.com",
+        "_doc_url": "Sites host; its MCP endpoint is URL/mcp/sites.",
+        "token_file": "~/.config/firebrik-sites/token",
+        "_doc_token_file": "File holding a personal API token from Settings > API tokens; FIREBRIK_SITES_TOKEN overrides it.",
+    },
 }
+SECTIONS = ("typesafe", "dispatch", "telemetry", "sites")
 
 
 class ConfigError(ValueError):
@@ -87,11 +96,12 @@ def read_json(file: Path) -> dict[str, Any]:
 def validate(value: dict[str, Any]) -> dict[str, Any]:
     if type(value.get("version")) is not int or value["version"] != 1:
         raise ConfigError("configuration version must be 1")
-    allowed = {"version", "typesafe", "dispatch", "telemetry"}
+    allowed = {"version", *SECTIONS}
     if any(k not in allowed and not k.startswith("_doc") for k in value):
         raise ConfigError("unknown configuration section")
     fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds"},
-              "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"}}
+              "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"},
+              "sites": {"enabled", "url", "token_file"}}
     for section, keys in fields.items():
         part = value.get(section)
         if not isinstance(part, dict) or any(k not in keys and not k.startswith("_doc") for k in part):
@@ -103,7 +113,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(model, str) or not model.strip() or model.endswith("-latest"):
         raise ConfigError("typesafe.model must be an exact model pin")
     for section, keys in {"typesafe": ["checkpoints", "enforce_decisions"], "dispatch": ["enabled"],
-                          "telemetry": ["enabled", "jev", "workflow", "workflow_prompts"]}.items():
+                          "telemetry": ["enabled", "jev", "workflow", "workflow_prompts"], "sites": ["enabled"]}.items():
         for key in keys:
             if type(value[section].get(key)) is not bool:
                 raise ConfigError(f"{section}.{key} must be boolean")
@@ -113,6 +123,14 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
             number = value[section].get(key)
             if type(number) is not int or not low <= number <= high:
                 raise ConfigError(f"{section}.{key} must be an integer from {low} to {high}")
+    sites = value["sites"]
+    url = sites.get("url")
+    if not isinstance(url, str) or len(url) > 200 or not (url.startswith("https://") or url.startswith(("http://localhost", "http://127.0.0.1"))) \
+            or "@" in url or "?" in url or any(c.isspace() for c in url):
+        raise ConfigError("sites.url must be an https URL (http only for localhost) without credentials or query")
+    token_file = sites.get("token_file")
+    if not isinstance(token_file, str) or not token_file.strip() or len(token_file) > 500 or not token_file.startswith(("/", "~/")):
+        raise ConfigError("sites.token_file must be an absolute or ~/ path to the token file, not the token")
     profiles = value["dispatch"].get("profiles")
     if not isinstance(profiles, dict) or not 1 <= len(profiles) <= 16:
         raise ConfigError("dispatch.profiles must contain 1 to 16 profiles")
@@ -151,7 +169,10 @@ def load(file: Path | None = None) -> dict[str, Any]:
         if "version" not in stored and "jev" in stored:
             value["telemetry"].update(legacy_collection(stored))
             return validate(value)
-        for section in ("typesafe", "dispatch", "telemetry"):
+        # Sections added after a file was written start from their defaults.
+        if "sites" not in stored:
+            stored["sites"] = copy.deepcopy(DEFAULTS["sites"])
+        for section in SECTIONS:
             if isinstance(stored.get(section), dict):
                 if section == "dispatch" and stored[section].get("_doc") == "Reserved for automatic role dispatch; false keeps work with the main agent. Dispatcher not implemented yet.":
                     stored[section]["_doc"] = DEFAULTS[section]["_doc"]
@@ -184,7 +205,7 @@ def update(section: str | None = None, changes: dict[str, Any] | None = None, fi
         fcntl.flock(lock, fcntl.LOCK_EX)
         value = load(file)
         if section:
-            if section not in ("typesafe", "dispatch", "telemetry"):
+            if section not in SECTIONS:
                 raise ConfigError("unknown settings section")
             value[section].update(changes or {})
         validate(value)
@@ -206,7 +227,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("show", "init", "update"))
     parser.add_argument("--file", type=Path)
-    parser.add_argument("--section", choices=("typesafe", "dispatch", "telemetry"))
+    parser.add_argument("--section", choices=SECTIONS)
     parser.add_argument("--values", help="JSON object containing only changed fields")
     args = parser.parse_args()
     try:

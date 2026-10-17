@@ -67,5 +67,13 @@
     "_doc_jev": "Collect decision, routing and agent measurements.",
     "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
     "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained."
+  },
+  "sites": {
+    "_doc": "Firebrik Sites publishing for every agent (harness sites). The token stays in token_file (0600), never here.",
+    "enabled": true,
+    "url": "https://sites.firebrik.com",
+    "_doc_url": "Sites host; its MCP endpoint is URL/mcp/sites.",
+    "token_file": "~/.config/firebrik-sites/token",
+    "_doc_token_file": "File holding a personal API token from Settings > API tokens; FIREBRIK_SITES_TOKEN overrides it."
   }
 }

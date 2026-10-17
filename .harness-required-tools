@@ -7,3 +7,7 @@ sh         -
 make       make
 python3    python3
 shellcheck shellcheck
+curl       curl
+jq         jq
+bash       -
+sha256sum  -
