@@ -99,10 +99,35 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/harness-review.XXXXXX")
 REVIEWER_DIR=""
 trap 'rm -rf "$WORK" ${REVIEWER_DIR:+"$REVIEWER_DIR"}' EXIT HUP INT TERM
 
-# Verification failing is exactly when a reviewer needs the evidence below,
-# so its status is captured and the review continues.
-{ "$SCRIPT_DIR/verify.sh" --project "$PROJECT_ROOT"; printf '%s\n' "$?" > "$WORK/verify.status"; } 2>&1 | tee "$WORK/verify.log"
-verify_status=$(cat "$WORK/verify.status" 2>/dev/null || printf '1')
+# A passing verify run of this run on exactly these files already proved the
+# checks, so it is reused instead of running them twice; HARNESS_REVIEW_REVERIFY=1
+# forces a fresh run.
+reused_verify=""
+verify_record="$(sh "$SCRIPT_DIR/run-paths.sh" records "$HARNESS_DB_ROOT")/verify.state"
+verify_run=$(head -n 1 "$(sh "$SCRIPT_DIR/run-paths.sh" current "$HARNESS_DB_ROOT")" 2>/dev/null || :)
+record_field() { sed -n "s/^$1=//p" "$verify_record" | tail -n 1; }
+if [ "${HARNESS_REVIEW_REVERIFY:-0}" != "1" ] && [ -f "$verify_record" ] && [ -n "$verify_run" ] \
+  && [ "$(record_field EXIT)" = "0" ] && [ "$(record_field FAILURES)" = "0" ] \
+  && [ "$(record_field RUN_ID)" = "$verify_run" ] && [ "$(record_field PROJECT_ROOT)" = "$PROJECT_ROOT" ]; then
+  verify_tree=$(record_field TREE_HASH)
+  if [ -n "$verify_tree" ] && [ "$verify_tree" != "none" ] && [ "$verify_tree" = "$(sh "$SCRIPT_DIR/tree-hash.sh" "$PROJECT_ROOT")" ]; then
+    reused_verify=$(record_field RECORD_AT)
+  fi
+fi
+
+if [ -n "$reused_verify" ]; then
+  {
+    info "Verification reused: the passing run at $reused_verify covers these exact files (HARNESS_REVIEW_REVERIFY=1 reruns it)."
+    info "Checks passed: $(record_field PASSED_CHECKS)"
+    info "Verification summary: ran=$(record_field RAN) skipped=$(record_field SKIPPED) failures=0 scope=$(record_field SCOPE)"
+  } | tee "$WORK/verify.log"
+  verify_status=0
+else
+  # Verification failing is exactly when a reviewer needs the evidence below,
+  # so its status is captured and the review continues.
+  { "$SCRIPT_DIR/verify.sh" --project "$PROJECT_ROOT"; printf '%s\n' "$?" > "$WORK/verify.status"; } 2>&1 | tee "$WORK/verify.log"
+  verify_status=$(cat "$WORK/verify.status" 2>/dev/null || printf '1')
+fi
 if [ "$verify_status" -ne 0 ]; then
   info ""
   info "WARN: verification failed (exit $verify_status); continuing the review so the change can still be inspected."

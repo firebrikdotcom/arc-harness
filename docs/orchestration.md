@@ -12,7 +12,7 @@ small context packet. Never copy the conversation history into worker prompts.
    --session-id SESSION` for each remaining bounded judgment: decomposition,
    priority, role/model/provider selection, evidence, context, escalation and
    handoff. The input supplies `family`, `goal`, redacted `facts`, `choices`,
-   `baseline`, `scope` and `state`; see below. Batch independent judgments in the
+   `scope` and `state` (no prior baseline); see below. Batch independent judgments in the
    existing `harness advise` interface when appropriate.
 3. Submit a role plan with `harness dispatch create --plan PLAN.json --project PATH`.
    For a trivial task use `workers: []` with a rationale and acceptance criteria;
@@ -33,7 +33,7 @@ All persisted switches and eligible worker profiles share
 
 | Setting | Effect |
 | --- | --- |
-| `typesafe.mode` | `off`: no provider calls; `shadow`: compare with baseline; `active`: follow eligible choices. |
+| `typesafe.mode` | `off`: no provider calls; `shadow`: observe advice; `active`: follow confidence-gated choices. |
 | `typesafe.enforce_decisions` | Add decision receipts to covered execution hooks; dispatch independently requires the current prompt role plan. |
 | `typesafe.decision_ttl_seconds` | Cache exact unchanged decisions within this interval; execution receipts are single-use. |
 | `dispatch.enabled` | Permit role dispatch. Disabling it prevents new launches; existing workers remain visible and cancellable. |
@@ -130,7 +130,6 @@ project/user instructions, hooks and permission rules.
   "goal": "Choose the next bounded source of evidence.",
   "facts": ["One candidate symbol is known; its source has not been inspected."],
   "choices": {"inspect": "Inspect the candidate source", "trace": "Trace a related caller"},
-  "baseline": "inspect",
   "scope": {"action_hash": "LOCAL_ACTION_DIGEST"},
   "state": {"evidence_revision": 1}
 }
@@ -142,9 +141,7 @@ Bind scope to the current prompt's `request_id`, `request_seq` and
 record the observed result with `harness decision outcome`. The result is a
 routing decision, never an authorization or a waiver of mandatory checks.
 Automatic hooks do this for covered execution tools; explicit decisions cover
-internal reasoning and handoffs outside those tools. A provider outage keeps
-the baseline and records the fallback; retries on unchanged state reuse that
-outcome during its bounded cache interval. A changed prompt, plan, evidence,
+internal reasoning and handoffs outside those tools. Active recommendations require `typesafe.min_confidence` (default 0.70); below it, or when Jev is unavailable, the main agent decides. For an explicit decision, resolve the fresh escalated receipt with `harness decision resolve --id ID --action OPTION --reason REASON`; unchanged evaluations reuse that resolution. Covered tool hooks record the agent's proposed tool call as its decision, and dispatch uses the first profile the plan lists for that worker. No prior agent baseline or routine accuracy label is required. A changed prompt, plan, evidence,
 options, model or mode requires a fresh decision.
 
 ## Measurement and dashboard

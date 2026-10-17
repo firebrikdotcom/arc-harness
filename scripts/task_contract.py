@@ -3,11 +3,13 @@
 the commands that decide when it is done (schemas/task.schema.json).
 
 `harness contract set FILE` stores a contract in the run; `plan done` requires one
-(or an explicit, recorded waiver), `build done` runs every acceptance command, and
+(or an explicit, recorded waiver), `build done` runs every acceptance command (a
+`make TARGET` that only repeats the checks of the passing verify run on the same
+files is counted from that run instead of running twice), and
 `review done` refuses a change that touched a non-goal path.
 
   task_contract.py validate FILE
-  task_contract.py criteria FILE --project PATH
+  task_contract.py criteria FILE --project PATH [--verified VERIFY_RECORD]
   task_contract.py checklist FILE
   task_contract.py nongoals FILE --project PATH --base REV
   task_contract.py show FILE
@@ -87,16 +89,69 @@ def load(path: Path) -> dict:
     return validate(json.loads(path.read_text(encoding="utf-8")))
 
 
-def run_criteria(data: dict, project: Path) -> int:
+def read_record(path: Path | None) -> dict[str, str]:
+    """KEY=VALUE run record; the last value of a repeated key wins."""
+    if not path or not path.is_file():
+        return {}
+    fields = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key] = value
+    return fields
+
+
+def make_dry_run(project: Path, targets: list[str]) -> set[str] | None:
+    """The recipe lines `make -n` would run, without make's own status lines."""
+    try:
+        result = subprocess.run(["make", "--no-print-directory", "-n", *targets], cwd=project,
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return {line for line in result.stdout.splitlines() if line.strip() and not line.startswith(("make:", "make["))}
+
+
+def proved_by_verify(command: list[str], project: Path, record: dict[str, str]) -> str | None:
+    """A `make TARGET` criterion whose recipe only repeats checks the passing verify
+    run already ran on these exact files needs no second run. Returns when that
+    verify run was recorded, or None when the criterion must run."""
+    if len(command) != 2 or command[0] != "make" or command[1].startswith("-"):
+        return None
+    if record.get("EXIT") != "0" or record.get("FAILURES") != "0":
+        return None
+    if not record.get("PROJECT_ROOT") or Path(record["PROJECT_ROOT"]).resolve() != project:
+        return None
+    tree = record.get("TREE_HASH", "")
+    targets = [name.split(":", 1)[1] for name in record.get("PASSED_CHECKS", "").split() if name.startswith("make:")]
+    if not tree or tree == "none" or not targets:
+        return None
+    wanted, proved = make_dry_run(project, [command[1]]), make_dry_run(project, targets)
+    if not wanted or proved is None or not wanted <= proved:
+        return None
+    current = subprocess.run(["sh", str(Path(__file__).resolve().parent / "tree-hash.sh"), str(project)],
+                             capture_output=True, text=True, timeout=120)
+    if current.returncode != 0 or current.stdout.strip() != tree:
+        return None
+    return record.get("RECORD_AT", "the last verify run")
+
+
+def run_criteria(data: dict, project: Path, verified: Path | None = None) -> int:
     if "waived" in data:
         print(f"Contract waived: {data['waived']}")
         return 0
+    record = read_record(verified)
     failed = 0
     for item in data["acceptance"]:
         if "command" not in item:
             print(f"REVIEW: {item['id']}: {item['criterion']} (no command; the reviewer judges it)")
             continue
         command = shlex.join(item["command"])
+        proved_at = proved_by_verify(item["command"], project, record) if record else None
+        if proved_at:
+            print(f"PASS: {item['id']}: {item['criterion']} (same checks as the passing verify run at {proved_at} on these files; not run again)")
+            continue
         denial = permit.check_command(command, project, str(project))
         if denial:
             print(f"FAIL: {item['id']}: command refused by the denylist: {denial}")
@@ -178,6 +233,7 @@ def main() -> int:
     parser.add_argument("file", type=Path)
     parser.add_argument("--project", type=Path, default=Path(os.getcwd()))
     parser.add_argument("--base", default="")
+    parser.add_argument("--verified", type=Path, help="passing verify record that may stand in for identical make checks")
     args = parser.parse_args()
     try:
         data = load(args.file)
@@ -197,7 +253,7 @@ def main() -> int:
         return checklist(data)
     project = args.project.resolve()
     if args.action == "criteria":
-        return run_criteria(data, project)
+        return run_criteria(data, project, args.verified)
     return check_non_goals(data, project, args.base)
 
 

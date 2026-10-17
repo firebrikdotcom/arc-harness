@@ -4,6 +4,8 @@ set -u
 failures=0
 ran=0
 skipped=0
+# Names of the checks that passed, recorded so later gates can reuse this run.
+passed_checks=""
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}"
@@ -155,6 +157,7 @@ run_check_steps() {
   info "==> $name"
   if "$@"; then
     info "PASS: $name"
+    passed_checks="${passed_checks:+$passed_checks }$name"
   else
     code=$?
     failures=$((failures + 1))
@@ -490,6 +493,7 @@ write_run_record() {
     printf 'SKIPPED=%s\n' "$skipped"
     printf 'FAILURES=%s\n' "$failures"
     printf 'SCOPE=%s\n' "$SCOPE"
+    printf 'PASSED_CHECKS=%s\n' "$passed_checks"
     printf 'EXIT=%s\n' "$exit_code"
   } > "$record.tmp.$$"
   mv "$record.tmp.$$" "$record"

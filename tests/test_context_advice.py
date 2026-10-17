@@ -185,7 +185,7 @@ class ContextAdviceTests(unittest.TestCase):
         router = self.batch_router()
         result = self.evaluate(router=router)
         self.assertEqual(len(router.calls), 1)
-        self.assertEqual(result["action"], "inspect")
+        self.assertEqual(result["action"], "normal_reasoning")
         self.assertEqual(result["answers"]["recommendation"]["choice"], "trace")
         self.assertEqual(result["answers"]["sufficient"]["probability"], .05)
         self.assertEqual(result["answers"]["impact"]["score"], .4)
@@ -199,25 +199,27 @@ class ContextAdviceTests(unittest.TestCase):
         self.write(self.checkpoint())
         result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
         self.assertEqual((result["status"], result["delegated"], result["advisory"]), ("evaluated", True, False))
-        self.assertEqual((result["action"], result["baseline"], result["delegation"]), ("trace", "inspect", "active"))
+        self.assertEqual((result["action"], result["delegation"]), ("trace", "active"))
         record = json.loads(Path(result["record_path"]).read_text())
-        self.assertEqual((record["delegation"], record["delegated_action"], record["baseline_action"]), ("active", "trace", "inspect"))
-        # The baseline is still persisted first and never sent, so the comparison stays honest.
+        self.assertEqual((record["delegation"], record["delegated_action"]), ("active", "trace"))
+        # A legacy baseline is neither persisted nor sent.
+        self.assertNotIn("baseline_action", record)
+        self.assertNotIn("baseline_action", record["context"]["checkpoint"])
         self.assertNotIn("baseline_action", json.dumps(router.calls[0]["state"]))
 
     def test_delegation_follows_the_switch_file_and_its_override(self):
-        self.assertEqual((self.evaluate()["delegated"], self.evaluate()["action"]), (False, "inspect"))
+        self.assertEqual((self.evaluate()["delegated"], self.evaluate()["action"]), (False, "normal_reasoning"))
         config = Path(os.environ["HARNESS_CONFIG_HOME"])
         config.mkdir()
         (config / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": "fixture"}))
         self.assertEqual((self.evaluate()["delegated"], self.evaluate()["action"]), (True, "trace"))
         with unittest.mock.patch.dict(os.environ, {"HARNESS_JEV_DELEGATION": "off"}):
-            self.assertEqual(self.evaluate()["action"], "inspect")
+            self.assertEqual(self.evaluate()["action"], "normal_reasoning")
         # An explicit False (the automatic gate checkpoints) ignores the switch.
         self.write(self.checkpoint())
         router = self.batch_router()
         kept = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=False)
-        self.assertEqual((kept["delegated"], kept["action"], kept["delegation"]), (False, "inspect", "shadow"))
+        self.assertEqual((kept["delegated"], kept["action"], kept["delegation"]), (False, "normal_reasoning", "shadow"))
         (config / "jev-delegation.json").write_text("{broken")
         with self.assertRaises(ADVICE.InputError):
             self.evaluate()
@@ -245,7 +247,7 @@ class ContextAdviceTests(unittest.TestCase):
             self.write(self.checkpoint())
             result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
             self.assertEqual((result["status"], result["action"], result["delegated"], result["fallback_reason"]),
-                             ("fallback", "inspect", False, reason))
+                             ("fallback", "normal_reasoning", False, reason))
         router = self.batch_router()
         router.pinned_model = lambda: "jev-latest"
         self.write(self.checkpoint())
@@ -262,7 +264,7 @@ class ContextAdviceTests(unittest.TestCase):
             return body, meta
         router.post_json = response
         result = self.evaluate(router=router)
-        self.assertEqual((result["status"], result["action"], result["delegated"]), ("evaluated", "inspect", False))
+        self.assertEqual((result["status"], result["action"], result["delegated"]), ("evaluated", "normal_reasoning", False))
 
     def test_delegation_keeps_the_baseline_on_bypass_fallback_and_v1(self):
         bypassed = self.checkpoint()
@@ -272,14 +274,14 @@ class ContextAdviceTests(unittest.TestCase):
         router = FakeRouter()
         result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
         self.assertEqual((result["status"], result["action"], result["delegated"], result["delegation_gate"]),
-                         ("bypassed", "inspect", False, "bypassed"))
+                         ("bypassed", "normal_reasoning", False, "bypassed"))
         self.assertEqual(router.calls, [])
         self.write(self.checkpoint())
         router = self.batch_router({"model": "different", "answers": {
             "recommendation": {"choice": "trace", "confidence": .8}, "impact": {"score": .4, "confidence": .2}, "sufficient": {"noul": .05}}})
         result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
         self.assertEqual((result["status"], result["action"], result["delegated"], result["delegation_gate"]),
-                         ("fallback", "inspect", False, "fallback"))
+                         ("fallback", "normal_reasoning", False, "fallback"))
         self.write(CONTEXT)
         router = FakeRouter()
         result = ADVICE.advise(ADVICE.load_context(self.path, router), router, self.root / "db", delegate=True)
@@ -296,12 +298,12 @@ class ContextAdviceTests(unittest.TestCase):
                "--family", "tool_selection", "--baseline", "grep", "--goal", "Locate the code for one task.",
                "--choice", "grep=A targeted grep.", "--choice", "retrieval=One semantic retrieval first."]
         delegated = json.loads(subprocess.run(cli, env=env, capture_output=True, text=True, check=True).stdout)
-        self.assertEqual((delegated["action"], delegated["baseline"], delegated["delegated"]), ("retrieval", "grep", True))
+        self.assertEqual((delegated["action"], delegated["delegated"]), ("retrieval", True))
         self.assertEqual(json.loads(Path(delegated["record_path"]).read_text())["policy_version"], "delegated-1")
         named = json.loads(subprocess.run(cli + ["--policy-version", "shadow-1"], env=env, capture_output=True, text=True, check=True).stdout)
         self.assertEqual(json.loads(Path(named["record_path"]).read_text())["policy_version"], "shadow-1")
         shadow = json.loads(subprocess.run(cli, env={**env, "HARNESS_JEV_DELEGATION": "off"}, capture_output=True, text=True, check=True).stdout)
-        self.assertEqual((shadow["action"], shadow["delegated"]), ("grep", False))
+        self.assertEqual((shadow["action"], shadow["delegated"]), ("normal_reasoning", False))
         self.assertEqual(json.loads(Path(shadow["record_path"]).read_text())["policy_version"], "shadow-1")
 
     def test_all_deterministic_bypasses_avoid_network(self):
@@ -312,7 +314,7 @@ class ContextAdviceTests(unittest.TestCase):
             router = FakeRouter()
             result = self.evaluate(context, router)
             self.assertEqual(result["status"], "bypassed")
-            self.assertEqual(result["action"], "inspect")
+            self.assertEqual(result["action"], "normal_reasoning")
             self.assertEqual(router.calls, [])
 
     def test_missing_distributions_remain_unknown(self):
@@ -342,7 +344,7 @@ class ContextAdviceTests(unittest.TestCase):
             with self.subTest(response=response):
                 result = self.evaluate(router=self.batch_router(response))
                 self.assertEqual(result["status"], "fallback")
-                self.assertEqual(result["action"], "inspect")
+                self.assertEqual(result["action"], "normal_reasoning")
         router = self.batch_router()
         def fail(*args):
             raise TimeoutError("forbidden-token")
@@ -379,7 +381,7 @@ class ContextAdviceTests(unittest.TestCase):
         self.assertEqual(len(report["cohorts"]), 2)
         group = next(g for g in report["cohorts"] if g["labeled"])
         self.assertEqual(group["accuracy"], 0)
-        self.assertEqual(group["disagreements"], 1)
+        self.assertEqual(group["disagreements"], 0)
         self.assertEqual(group["paired_delta_ms"], 10)
         self.assertEqual(group["tokens"], 13)
         unlabeled = next(g for g in report["cohorts"] if not g["labeled"])
@@ -404,7 +406,7 @@ class ContextAdviceTests(unittest.TestCase):
                                env=env, capture_output=True, text=True, check=False)
         self.assertEqual(quick.returncode, 0, quick.stderr)
         result = json.loads(quick.stdout)
-        self.assertEqual((result["status"], result["shadow"], result["action"]), ("evaluated", True, "inspect"))
+        self.assertEqual((result["status"], result["shadow"], result["action"]), ("evaluated", True, "normal_reasoning"))
         self.assertEqual(set(result["answers"]), {"recommendation", "sufficient", "impact"})
         record = json.loads(Path(result["record_path"]).read_text())
         self.assertEqual((record["family"], record["question_version"], record["policy_version"]), ("tool_selection", "quick-1", "shadow-1"))

@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Automatic Jev shadow checkpoints: script behaviour, hook behaviour, and the
+# Jev at harness seams: the session route, quiet phase gates, hook behaviour, and the
 # hook installer, all against the offline fake router.
 set -eu
 
@@ -61,7 +61,7 @@ out=$(payload PreToolUse "$TARGET" Bash "ls" | HARNESS_JEV_CHECKPOINTS=0 sh scri
 export HARNESS_JEV_CHECKPOINTS=1
 out=$(payload SessionStart "$TARGET" "" "" | sh scripts/hooks/session-route.sh)
 case "$out" in
-  "Jev shadow route for this session: proceed (source typesafe, shadow; existing rules decide). Pilot: 0/30"*) ;;
+  "Jev session route observed in shadow mode, not followed: the main agent decides.") ;;
   *) fail "unexpected session-route output: $out" ;;
 esac
 [ "$(count "$HARNESS_DB_ROOT/routes")" = "1" ] || fail "expected one route record"
@@ -79,50 +79,32 @@ payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh 
 # The run belongs to the target project: its CLI calls run there.
 hj() { (cd "$TARGET" && "$ROOT/scripts/harness" "$@"); }
 
-# 5. With a run, the third identical command emits one progress checkpoint; harness commands are ignored.
+# 5. With a run, repeated commands are counted but never ask Jev: the gate is mechanical.
 (HARNESS_JEV_CHECKPOINTS=0 hj plan start >/dev/null)
 for _ in 1 2 3 4; do
-  payload PreToolUse "$TARGET" Bash "scripts/harness status" | sh scripts/hooks/jev-observe.sh >/dev/null
-done
-for _ in 1 2; do
   payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh >/dev/null
 done
-[ ! -d "$HARNESS_DB_ROOT/advice" ] || fail "checkpoint emitted before the third repeat"
-payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh >/dev/null
-[ "$(count "$HARNESS_DB_ROOT/advice")" = "1" ] || fail "expected one progress checkpoint after three repeats"
-grep -q '"family": "progress_assessment"' "$HARNESS_DB_ROOT"/advice/*.json || fail "checkpoint family is not progress_assessment"
-grep -q 'make test' "$HARNESS_DB_ROOT"/advice/*.json && fail "command text leaked into the checkpoint"
-payload PreToolUse "$TARGET" Bash "make test" | sh scripts/hooks/jev-observe.sh >/dev/null
-[ "$(count "$HARNESS_DB_ROOT/advice")" = "1" ] || fail "a fourth repeat emitted another checkpoint"
-grep -q '"resolver": "tool_repeat"' "$HARNESS_DB_ROOT"/advice-pending/*.json || fail "tool repeat left no pending oracle"
+[ ! -d "$HARNESS_DB_ROOT/advice" ] || fail "a repeated command asked Jev"
 
-# 6. Phase gates, verify, and review emit checkpoints and label them from the real results.
+# 6. Phase gates, verify, and review ask Jev nothing and label nothing; verify keeps its history.
 hj contract waive "fixture task" >/dev/null
 plan_out=$(hj plan "done")
-printf '%s\n' "$plan_out" | grep -c 'Jev: handoff_assessment/phase-plan-2 shadow recommendation' >/dev/null || fail "plan done emitted no checkpoint: $plan_out"
-# The fourth identical command above recurred after the checkpoint: the oracle labels it stuck.
-printf '%s\n' "$plan_out" | grep -c 'Jev: labeled progress_assessment/tool-repeat-2 under_escalated' >/dev/null || fail "plan done did not label the tool repeat: $plan_out"
 build_out=$(hj build start)
-printf '%s\n' "$build_out" | grep -c 'Jev: reasoning_allocation/phase-build-2' >/dev/null || fail "build start emitted no checkpoint: $build_out"
-[ "$(count "$HARNESS_DB_ROOT/advice-pending")" = "2" ] || fail "expected two pending oracles"
 verify_out=$(scripts/verify.sh --project "$TARGET" 2>&1) || fail "verify failed: $verify_out"
-printf '%s\n' "$verify_out" | grep -c 'Jev: evidence_assessment/verify-predict-2 shadow recommendation' >/dev/null || fail "verify emitted no prediction"
-printf '%s\n' "$verify_out" | grep -c 'Jev: labeled evidence_assessment/verify-predict-2 correct' >/dev/null || fail "verify did not label its prediction"
-printf '%s\n' "$verify_out" | grep -c 'Jev: labeled reasoning_allocation/phase-build-2 correct' >/dev/null || fail "verify did not label the allocation"
 hj build "done" >/dev/null
 hj review start >/dev/null
 review_out=$(scripts/review.sh --project "$TARGET" 2>&1) || fail "review failed: $review_out"
-printf '%s\n' "$review_out" | grep -c 'Jev: handoff_assessment/review-handoff-2 shadow recommendation ready_for_handoff' >/dev/null || fail "review emitted no handoff checkpoint"
 printf '{"tree_hash":"%s","reviewer":"fixture","verdict":"approve","findings":[]}\n' "$(sh scripts/tree-hash.sh "$TARGET")" > "$TMP_ROOT/findings.json"
 hj review submit "$TMP_ROOT/findings.json" >/dev/null
 done_out=$(hj review "done")
-printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/phase-plan-2 correct' >/dev/null || fail "review done did not label the plan handoff"
-printf '%s\n' "$done_out" | grep -c 'Jev: labeled handoff_assessment/review-handoff-2 correct' >/dev/null || fail "review done did not label the review handoff"
-printf '%s\n' "$done_out" | grep -c 'Jev: pilot 6/30 labeled shadow decisions' >/dev/null || fail "pilot counter missing: $done_out"
-if printf '%s\n' "$done_out" | grep -q 'unlabeled checkpoints'; then fail "a checkpoint was left unlabeled: $done_out"; fi
-# One history line from verify.sh, one from the verification inside review.sh.
-[ "$(wc -l < "$HARNESS_DB_ROOT/records/verify-history.jsonl" | tr -d ' ')" = "2" ] || fail "expected two verify history lines"
-[ "$(count "$HARNESS_DB_ROOT/advice-pending")" = "0" ] || fail "pending oracles remain after run completion"
+if printf '%s\n' "$plan_out" "$build_out" "$verify_out" "$review_out" "$done_out" | grep -q '^Jev: '; then
+  fail "a phase gate printed a Jev line: $plan_out $build_out $verify_out $review_out $done_out"
+fi
+[ ! -d "$HARNESS_DB_ROOT/advice" ] || fail "a phase gate asked Jev"
+[ ! -d "$HARNESS_DB_ROOT/advice-pending" ] || fail "a phase gate left an oracle to label"
+# One history line from verify.sh; review.sh reused that passing run on the same files.
+printf '%s\n' "$review_out" | grep -q '^Verification reused: ' || fail "review did not reuse the passing verify run: $review_out"
+[ "$(wc -l < "$HARNESS_DB_ROOT/records/verify-history.jsonl" | tr -d ' ')" = "1" ] || fail "expected one verify history line"
 
 # 7. Nested harness tests never emit checkpoints even when the outer shell enables them.
 HARNESS_DB_ROOT="$TMP_ROOT/nested" scripts/verify.sh --project "$TARGET" >/dev/null 2>&1 || fail "nested verify failed"
@@ -155,4 +137,4 @@ assert codex == {"hooks": {}}, codex
 PY
 ls "$TMP_ROOT"/claude-settings.json.bak-jev-* >/dev/null 2>&1 || fail "installer made no backup"
 
-printf '%s\n' 'PASS: automatic Jev checkpoints, hooks, and installer'
+printf '%s\n' 'PASS: Jev session route, quiet phase gates, hooks, and installer'

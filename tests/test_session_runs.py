@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -141,20 +140,6 @@ class SessionRunsTests(unittest.TestCase):
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), str(current_file(self.db, "native")))
-
-    def test_checkpoint_resolution_leaves_other_session_oracles_pending(self):
-        import phase_checkpoint
-        self.call("a", "plan", "start")
-        self.call("b", "plan", "start")
-        pending = self.db / "advice-pending"
-        pending.mkdir()
-        for resolver in ("tool_repeat", "verify_result", "first_verify", "run_complete"):
-            (pending / (resolver + ".json")).write_text(json.dumps({"run_id": self.run_id("b"), "resolver": resolver}))
-        current = {"RUN_ID": self.run_id("a"), "SESSION_KEY": session_key("a")}
-        with patch.object(phase_checkpoint, "label_item", side_effect=AssertionError("other session consumed")):
-            self.assertEqual(phase_checkpoint.resolve_tool_repeats(self.db, None, current), [])
-            self.assertEqual(phase_checkpoint.resolve_stale(self.db, None, current), [])
-        self.assertEqual(len(list(pending.glob("*.json"))), 4)
 
     def test_native_start_binding_works_with_collection_disabled(self):
         env_file = self.base / "environment"

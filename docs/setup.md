@@ -65,7 +65,7 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 
 1. The project root (the git toplevel when inside a repository, otherwise the directory itself) is registered as a harness target with `scripts/harness-target.sh register`. Registration lives under `HARNESS_DB_ROOT/targets/<name>-<hash>/` and never writes inside the project, so tracked files stay clean. The home directory, `/`, and the harness root are never registered.
 2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, the Node lockfiles listed below, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
-3. The same payload is handed to `scripts/hooks/session-route.sh`, so a task-entry route is recorded for the registered target: a shadow comparison, or the route to follow when `harness jev` is on.
+3. The same payload is handed to `scripts/hooks/session-route.sh`, so a task-entry route is recorded for the registered target: observed in shadow mode, or, when `harness jev` is on, the route to follow when Jev's confidence meets the threshold (otherwise the main agent decides).
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
 
@@ -274,7 +274,7 @@ The model creates, the sensors produce evidence, and the harness decides. Each r
 
 A run is bounded by a contract (`schemas/task.schema.json`, example `tasks/task.example.json`): the goal, the exact deliverables, constraints, non-goals (with optional path globs), and acceptance criteria. At least one criterion carries a `command` (an argv list), so a machine decides when the task is done. During planning, `harness contract set FILE` validates and stores it in the run (`runs/<id>/task.json`); `plan done` refuses without it. A run with nothing to accept records why with `harness contract waive "<reason>"`, and the waiver travels to the reviewer.
 
-- `build done` runs every acceptance command in the target root, after the denylist approves it, and refuses if one fails. Criteria without a command are listed for the reviewer, who is their only check.
+- `build done` runs every acceptance command in the target root, after the denylist approves it, and refuses if one fails. A `make TARGET` criterion whose dry run (`make -n`) only repeats commands of checks the passing verify run already ran on the same files is counted from that run instead of running twice (`PASS: ... not run again`); anything else in its recipe, or any change to the files, makes it run. Criteria without a command are listed for the reviewer, who is their only check.
 - `review done` lists every file changed since `plan done` (committed, uncommitted, untracked) and refuses if one falls under a non-goal path.
 
 ### Evidence
@@ -285,7 +285,7 @@ Verify and review records carry `PROJECT_ROOT` and `TREE_HASH`, a git tree of th
 
 ### Independent review
 
-`scripts/review.sh` runs verify, prints the diff, and writes `review-packet.md` into the records: a brief for a reviewer who did not write the change, the tree hash, a findings template, the acceptance criteria, the task contract, the full verification output, and the diff. The packet holds no conversation, so the reviewer judges the change rather than the narrative.
+`scripts/review.sh` runs verify, unless the last verify record is a passing run of the same harness run on exactly the current files (same tree hash): then it reuses that run, names its passed checks, and says so in the packet (`HARNESS_REVIEW_REVERIFY=1` always runs verify again). It prints the diff and writes `review-packet.md` into the records: a brief for a reviewer who did not write the change, the tree hash, a findings template, the acceptance criteria, the task contract, the full verification output, and the diff. The packet holds no conversation, so the reviewer judges the change rather than the narrative.
 
 The acceptance criteria are printed in the terminal and in the packet as `- ID: CRITERION [...]`, each marked either as a command that passed at `build done` (the reviewer checks that it really tests the criterion) or as having no command, so only the reviewer checks it; a waived contract prints its reason instead (`scripts/task_contract.py checklist`). Control characters in the contract are replaced with spaces. The reviewer answers each criterion as `met`, `not_met`, or `not_applicable` with evidence, and the findings template lists one answer per criterion.
 
@@ -370,7 +370,7 @@ Individual failed verification attempts are not counted: `scripts/verify.sh` kee
 
 Why facts rather than making the session-start route opt-in: over 76 session-start routes the answer was `reasoning_model` every time, because every field the hook could fill (`task_kind`, `area`, `diff_size`, `reversibility`, `uncertainty_reason`, `known_failures`) is constant or nearly constant for an interactive session with no prompt. The harness already keeps per-target run outcomes, so reading them costs a directory scan and no new state, and a target with a record of clean verified builds is distinguishable from one that loops or leaves builds unverified. The facts are added inside the task adapter, so `harness launch` and the SessionStart hook both get them without new metadata fields; when `--project` names a registered target, its own database is read even if the command runs elsewhere. If `harness advise --report` still shows a constant answer once targets have history, making the SessionStart route opt-in is the next step.
 
-Deterministic conditions bypass TypeSafe: required checks, known failures, explicit user choices, authorization, irreversible actions, and tasks with no route ambiguity. Ambiguous reversible tasks use the TypeSafe routing skill at `~/.agents/skills/typesafe-routing/scripts/route.py` (override with `HARNESS_TYPESAFE_ROUTER`). The call uses `--strict`, so any detected secret cancels the API request. Missing credentials or service errors fall back to the default command and are recorded.
+Deterministic conditions bypass TypeSafe: required checks, known failures, explicit user choices, authorization, irreversible actions, and tasks with no route ambiguity. Ambiguous reversible tasks ask Jev one bounded route choice through the TypeSafe routing skill's client at `~/.agents/skills/typesafe-routing/scripts/route.py` (override with `HARNESS_TYPESAFE_ROUTER`); detected secrets cancel the request. In active mode the route is followed only when Jev's confidence is at least `typesafe.min_confidence` (default 0.70). Below it, and on missing credentials, service errors or model drift, the main agent decides: the default command runs and the record says why (`needs_reasoning: true`, `escalation_reason`).
 
 #### The delegation switch
 
@@ -378,8 +378,8 @@ Whether Jev's answers are followed is one persisted switch:
 
 ```sh
 scripts/harness jev status            # off (shadow) or on (delegated), and where that comes from
-scripts/harness jev on --reason "pilot reviewed: 473 labeled, accuracy acceptable"
-scripts/harness jev off --reason "pause the pilot"
+scripts/harness jev on --reason "follow Jev above the confidence threshold"
+scripts/harness jev off --reason "observe only"
 scripts/harness jev status --json     # enabled, mode, source, model, changed_at, reason, path
 ```
 
@@ -387,28 +387,29 @@ It is stored in the `typesafe` section of `config.json` (mode 0600) under `HARNE
 
 | Seam | Switch off (shadow, the default) | Switch on (delegated) |
 | --- | --- | --- |
-| `harness route`, `harness launch` | TypeSafe answers, the record keeps `recommendation: default`, the default command runs | active mode: the profile for Jev's recommendation runs (`routine`, `targeted`, `deep`; `ask_user` stops the launch with exit 3); the record carries `mode_source: delegation` and `delegation: true` |
-| session-start route (hook) | `Jev shadow route for this session: X ... existing rules decide` | `Jev delegated route for this session: X ... follow it unless a deterministic rule decides` |
-| `harness advise` v2, file or flags | `action` is the agent's baseline, `advisory: true`, cohort `shadow-1` | `action` is Jev's `recommendation` choice, `delegated: true`, `advisory: false`, `baseline` kept beside it, cohort `delegated-1` unless `--policy-version` names another |
-| automatic gate checkpoints (`plan done`, `build start`, verify, review, tool repeat) | shadow observation | still a shadow observation (`delegation: shadow`): the gates they predict are mechanical, so there is nothing to delegate |
+| `harness route`, `harness launch` | TypeSafe answers, the record keeps `recommendation: default`, the default command runs | at or above the threshold the profile for Jev's recommendation runs (`routine`, `targeted`, `deep`; `ask_user` stops the launch with exit 3); below it the default command runs; the record carries `mode_source: delegation`, `delegation: true` and `confidence` |
+| session-start route (hook) | `Jev session route observed in shadow mode, not followed: the main agent decides.` | `Jev session route: X (confidence C, minimum M); follow it unless a deterministic rule decides.`, or `Jev session route not followed (low_confidence; ...): the main agent decides.` |
+| `harness advise` v2, file or flags | `action` is `normal_reasoning`, `needs_reasoning: true`, cohort `shadow-1` | `action` is Jev's `recommendation` choice with `delegated: true` when its confidence meets the threshold, else `normal_reasoning` with `needs_reasoning: true`; cohort `delegated-1` unless `--policy-version` names another |
+| execution hooks (`typesafe.enforce_decisions`) | the agent's proposed tool call runs and is recorded as its decision | Jev's `execute` or `gather_context` is followed at or above the threshold; below it the agent's proposed call runs |
+| phase gates (`plan done`, `build start`, verify, review, tool repeat) | no Jev call, no label | no Jev call, no label: the gates are mechanical |
 | deterministic gates (authorization, required checks, known failures, explicit user choice, irreversible work) | decide first, no call | decide first, no call |
 
-Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`); the TypeSafe skill records its own calls under `~/.typesafe-routing/logs/`. In shadow mode, record each real outcome with the skill's `route.py record --call-id ...` and read `route.py report` for accuracy, token usage, and latency; the harness cannot measure avoided reasoning tokens itself.
+Route records are private files under `.harness-db/routes/` (or `HARNESS_DB_ROOT/routes/`) and keep Jev's confidence, the threshold, and whether the main agent decided; no agent proposal is sent to Jev or stored with the route. The harness cannot measure avoided reasoning tokens itself.
 
-When the switch is on but active routing cannot proceed because no exact model pin is available, `route` and the session hook fall back to a shadow route and record `delegation_gate` with the reason, and the session line says `Delegation is on but held back: ...`; an explicit `--mode active` fails instead. Delegated advice requires an exact requested model pin and a matching model identity in the response; missing or mismatched identities keep the baseline. A delegated `advise` that is bypassed, falls back, or has no `recommendation` question returns the baseline with `delegation_gate` set. A corrupt switch file is an error for `jev status`, `route`, and `advise`, including with an environment override; repair the file before retrying.
+When the switch is on but active routing cannot proceed because no exact model pin is available, `route` and the session hook fall back to a shadow route and record `delegation_gate` with the reason, and the session line says `Delegation is on but held back: ...`; an explicit `--mode active` fails instead. Delegated advice requires an exact requested model pin and a matching model identity in the response; missing or mismatched identities leave the decision to the main agent. A delegated `advise` that is bypassed, falls back, or has no `recommendation` question returns `normal_reasoning` with `delegation_gate` set. A corrupt switch file is an error for `jev status`, `route`, and `advise`, including with an environment override; repair the file before retrying.
 
-The switch is the operator's acknowledgement in persisted form: a decision taken after reading `scripts/harness advise --report`, not accuracy evidence. Without it, `--mode active` on a single call keeps the earlier evidence gate: `HARNESS_TYPESAFE_ACTIVE=1`, an exact `TYPESAFE_MODEL` pin, matching requested and returned model and the fingerprint of the router plus task adapter, at least 30 distinct correct shadow task-entry outcomes (including five correct `proceed` routes) joined to their calls by call ID, zero `under_escalated` outcomes, or `HARNESS_TYPESAFE_OPERATOR_ACTIVATION=1` as the same acknowledgement for one shell. In either form, `HARNESS_TYPESAFE_ROLLOUT_PERCENT` stages the delegation: a stable metadata hash keeps tasks in the same holdback or delegated cohort as the percentage rises, holdback tasks still call JEV in shadow mode and keep the normal command, and each route record exposes `routing_mode`, `rollout_percent`, `rollout_bucket`, and `rollout_selected` for comparison. Required verification and permission gates are unchanged in every mode.
+The switch is the operator's acknowledgement in persisted form. Without it, `--mode active` on a single call needs `HARNESS_TYPESAFE_ACTIVE=1`, an exact `TYPESAFE_MODEL` pin and `HARNESS_TYPESAFE_OPERATOR_ACTIVATION=1` as the same acknowledgement for one shell; recorded accuracy outcomes no longer activate routing. In every form each answer is still held to the confidence threshold. In either form, `HARNESS_TYPESAFE_ROLLOUT_PERCENT` stages the delegation: a stable metadata hash keeps tasks in the same holdback or delegated cohort as the percentage rises, holdback tasks still call JEV in shadow mode and keep the normal command, and each route record exposes `routing_mode`, `rollout_percent`, `rollout_bucket`, and `rollout_selected` for comparison. Required verification and permission gates are unchanged in every mode.
 
 Recommended staged activation:
 
 ```sh
-scripts/harness jev on --reason "pilot reviewed"
+scripts/harness jev on --reason "staged rollout"
 export HARNESS_TYPESAFE_ROLLOUT_PERCENT=10
 scripts/harness launch --state TASK.json --agent codex \
   --routine-command routine.json --targeted-command targeted.json --deep-command deep.json
 ```
 
-Increase the percentage only after the route report shows no under-escalation and paired measurements show that JEV plus the selected agent costs less than the normal path. Set the percentage to `0` for an immediate holdback that keeps collecting, or `scripts/harness jev off` to return to shadow mode entirely.
+Increase the percentage when the confidence and cost measurements show that JEV plus the selected agent costs less than the normal path. Set the percentage to `0` for an immediate holdback that keeps collecting, or `scripts/harness jev off` to return to shadow mode entirely.
 
 ### Arc audit and full operator activation
 
@@ -427,14 +428,13 @@ open http://127.0.0.1:18080/                                # browser workbench 
 
 Each machine keeps its own SQLite database; to pool telemetry, point another host's `HARNESS_AUDIT_URL` at one service over the tailnet. See `services/harness-audit/README.md`.
 
-`scripts/jev-enable.sh` is sourced from the login shell and enables **collection** only: the model pin, `HARNESS_JEV_CHECKPOINTS=1`, and Arc telemetry. It deliberately unsets `HARNESS_TYPESAFE_ACTIVE` and `HARNESS_TYPESAFE_OPERATOR_ACTIVATION` left over from earlier sessions (`JEV_KEEP_ACTIVATION=1` preserves them for a deliberate per-shell active run). Whether Jev is followed is not an environment variable but the persisted switch above, `scripts/harness jev on|off|status`, which every shell and worktree reads; turn it on only after `scripts/harness advise --report` shows the labeled pilot batch.
+`scripts/jev-enable.sh` is sourced from the login shell and enables **collection** only: the model pin, `HARNESS_JEV_CHECKPOINTS=1`, and Arc telemetry. It deliberately unsets `HARNESS_TYPESAFE_ACTIVE` and `HARNESS_TYPESAFE_OPERATOR_ACTIVATION` left over from earlier sessions (`JEV_KEEP_ACTIVATION=1` preserves them for a deliberate per-shell active run). Whether Jev is followed is not an environment variable but the persisted switch above, `scripts/harness jev on|off|status`, which every shell and worktree reads; no labeled pilot batch is required.
 
 ```sh
 . scripts/jev-enable.sh
-scripts/harness advise --report | python3 -m json.tool | sed -n '/"pilot"/,/}/p'
 ```
 
-The pilot summary is machine-wide by default (every registered target's checkpoints, with a per-target `by_target` breakdown); pass `--scope target` to see only the current worktree's database. `harness review done` prints the same machine-wide counter.
+The audit workbench charts Jev's daily mean confidence. `scripts/harness advise --report` still reads the historical labeled cohorts (machine-wide by default, `--scope target` for one worktree) for compatibility.
 
 The explicit operator flag is an activation acknowledgement, not accuracy evidence. The launcher automatically records an `unknown` outcome after completion; review can later replace that unresolved label with `correct`, `over_escalated`, or `under_escalated` using the TypeSafe recorder. Agent token counts are emitted when supplied by `HARNESS_AGENT_*_TOKENS` or by the App Server `harness budget --watch` meter; missing measurements remain explicitly marked `missing`.
 
@@ -681,13 +681,13 @@ Replace these placeholders with exact project commands when tooling is added.
 
 ### Broad Jev checkpoints
 
-See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, baseline capture, deterministic bypasses, outcome recording, and cohort reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `scripts/harness advise --report` without credentials; use `--record OUTCOME.json` or `--label CALL_ID ...` to attach independent labels, `--pending` to list what still needs one (`--scope machine` covers every target; `--report` defaults to machine scope), and `--family ...` for the flag form. Every family follows the `harness jev` switch: shadow comparison when it is off, Jev's choice as the `action` when it is on.
+See [Jev decision checkpoints](jev-checkpoints.md) for version 2 batched Choice/Score/Boolean evaluation, the confidence threshold, deterministic bypasses, receipt resolution, and the legacy outcome reports. Version 1 successful single-choice output remains compatible. Invalid or unavailable evaluations now return a structured fallback without executing a recommendation. Use `--family ...` for the flag form. Every family follows the `harness jev` switch: off, the result is `normal_reasoning` and the agent decides; on, Jev's choice is the `action` when its confidence meets `typesafe.min_confidence`, otherwise `normal_reasoning`. Labels are not routine work; `--report`, `--record`, `--label` and `--pending` remain for reading and amending historical cohorts.
 
-With `HARNESS_JEV_CHECKPOINTS=1`, `harness plan done`, `harness build start`, `scripts/verify.sh`, and `scripts/review.sh` emit their own shadow checkpoints and label them from the verification exit code and the run's loop count; `harness review done` prints the pilot counter. The checkpoints add one bounded API call per seam and never change a gate result. Their facts include the target's verification history, which `verify.sh` appends to the private `records/verify-history.jsonl` while checkpoints are enabled (last 100 results with a local tree fingerprint), how previous runs ended, the changed-line bucket, and whether tests changed together with source. Each oracle is labeled only from the run that created it; oracles a run left behind are labeled from that run's own state (or `unknown`) at the next checkpoint event. The current cohorts are the `-2` question versions; see [Jev decision checkpoints](jev-checkpoints.md) for the facts, the reason the `progress.md` questions were dropped, and every labeling rule.
+`harness plan done`, `harness build start`, `scripts/verify.sh`, and `scripts/review.sh` still notify `scripts/phase_checkpoint.py`, but these gates are mechanical, so it neither asks Jev nor labels outcomes and prints nothing. With `HARNESS_JEV_CHECKPOINTS=1`, `verify.sh` keeps appending the private `records/verify-history.jsonl` (last 100 results with a local tree fingerprint); an unwritable history is reported and never fails verification.
 
 ### Jev hooks for interactive sessions
 
-Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line: a shadow comparison, or, when `harness jev` is on, the delegated route to follow. `scripts/observe_commands.py` (installed PreToolUse observer for Bash) keeps a checksum count of commands in the active run and emits one `progress_assessment` checkpoint on the third identical command; it stores no command text and always exits 0. That checkpoint is labeled mechanically at a later checkpoint event: stuck when the same command recurs or the run loops afterwards, not stuck when its phase and run end without either. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
+Interactive Claude Code and Codex sessions bypass `harness launch`, so additive hooks cover them. `scripts/hooks/session-route.sh` (SessionStart) records one task-entry route when the working directory is a harness target, using only enum metadata derived from git and harness state, and prints one context line: the route observed in shadow mode, the route to follow when `harness jev` is on and Jev is confident enough, or that the main agent decides. `scripts/observe_commands.py` (installed PreToolUse observer for Bash) keeps a checksum count of commands in the active run and notifies `phase_checkpoint.py tool-repeat` on the third identical command, which no longer asks Jev or labels anything; it stores no command text and always exits 0. `scripts/retrieval-reminder.sh` (PreToolUse for Grep and Glob, Claude Code only) acts on the first Grep or Glob of a session inside a registered target: when the active run has no `scripts/jg.sh` retrieval record it adds one line of context naming the exact wrapper command, and every later Grep or Glob in that session is silent. It is silent without `HARNESS_JEV_CHECKPOINTS=1`, for targets carrying `.harness-no-upload`, and outside registered targets; it stores only a checksum of the session id under `retrieval-reminders/` in the target database, never blocks, and always exits 0. It lives outside `scripts/hooks/` because the default denylist reserves that directory for human edits. Install or remove all entries with:
 
 ```sh
 scripts/install-hooks.sh            # ~/.claude/settings.json and ~/.codex/hooks.json, with backups
@@ -720,7 +720,7 @@ Session metadata also displays the full working-directory path (`cwd`). The nati
 
 ## Audited todo enforcement
 
-Install or update native hooks with `scripts/install-hooks.sh` on each machine, then restart existing native sessions to load them. The additive `scripts/workflow_gate.py` hook requires a structured plan, reconfirmation or revision for every prompt, and one active todo before covered local execution. Reads need no todo: Read, Grep, and Glob, plus shell commands that only read (`ls`, `cat`, `grep`, `git status`/`log`/`diff`, `find` without `-delete`/`-exec`, `sed -n`, ...), alone or joined with `&&`, `;`, or pipes, as long as nothing is redirected to a file and nothing is substituted with `$(...)`. Harness bookkeeping (`workflow`, `plan`, `build`, `review start|done`, `status`, `root`, `step`, `brief`, `jev status`; this checkout or a git worktree of it; `--session-id` only for this session) and the `scripts/verify.sh` and `scripts/review.sh` sensors also need none, so the checks completion depends on can always run. Inside an agent (`CLAUDECODE=1` or `CODEX_SANDBOX`), `harness workflow gate` without a session ID fails closed; a human at a terminal has no plan to check. `scripts/workflow_todos.py` keeps policy state in the local Workflow database even when audit collection is disabled. Collection settings control visibility and storage of emitted events, not this policy. `todo plan`, `update`, `confirm`, and `exempt` print one summary line; `todo show` prints the full list.
+Install or update native hooks with `scripts/install-hooks.sh` on each machine, then restart existing native sessions to load them. The additive `scripts/workflow_gate.py` hook requires a structured plan, reconfirmation or revision for every prompt, and one active todo before covered local execution. Reads need no todo: Read, Grep, and Glob, plus shell commands that only read (`ls`, `cat`, `grep`, `git status`/`log`/`diff`, `find` without `-delete`/`-exec`, `sed -n`, ...), alone or joined with `&&`, `;`, or pipes, as long as nothing is redirected to a file and nothing is substituted with `$(...)`. Harness bookkeeping (`workflow`, `plan`, `build`, `review start|done`, `status`, `root`, `step`, `brief`, `jev status`; this checkout or a git worktree of it; `--session-id` only for this session) and the `scripts/verify.sh` and `scripts/review.sh` sensors also need none, so the checks completion depends on can always run. Inside an agent (`CLAUDECODE=1` or `CODEX_SANDBOX`), `harness workflow gate` without a session ID fails closed; a human at a terminal has no plan to check. `scripts/workflow_todos.py` keeps policy state in the local Workflow database even when audit collection is disabled. Collection settings control visibility and storage of emitted events, not this policy. `todo plan`, `update`, `confirm`, and `exempt` print one summary line; `todo show` prints the full list. A prompt made only of runtime notices (a background task's `<task-notification>`, with or without system reminders) carries no new words from the person, so it keeps the current prompt, its confirmed plan and its role plan; anything else opens a new prompt. Denials name the next runnable command: `todo confirm` to keep the current plan, a `todo plan --items` example, `todo exempt` for read-only answers, the open todo ids to activate, and the one-step main-only `dispatch create --plan /dev/stdin` form.
 
 ```sh
 scripts/harness workflow task --name "Repair session navigation" --description "Fix navigation and verify the served dashboard"
@@ -763,11 +763,14 @@ scripts/harness config update --section typesafe --values '{"mode":"active"}'
 scripts/harness config update --section telemetry --values '{"enabled":true}'
 ```
 
-- `typesafe.mode`: `off` makes no TypeSafe calls; `shadow` compares with the baseline;
-  `active` follows eligible choices. A persisted `off` wins over old activation flags.
+- `typesafe.mode`: `off` makes no TypeSafe calls; `shadow` observes advice while the agent
+  decides; `active` follows choices whose confidence meets `typesafe.min_confidence`
+  (default 0.70) and leaves the rest to the main agent. A persisted `off` wins over old activation flags.
   `harness jev off` retains its existing meaning of **shadow**, not disabled calls.
-- `typesafe.model`: exact model pin. `typesafe.checkpoints`: allow automatic phase/session
-  checkpoints when the installed hooks also opt in with `HARNESS_JEV_CHECKPOINTS=1`
+- `typesafe.min_confidence`: the confidence (0 to 1, default 0.70) a Jev choice needs before
+  it is followed; below it the main agent decides.
+- `typesafe.model`: exact model pin. `typesafe.checkpoints`: allow the session-start route and
+  the verify history when the installed hooks also opt in with `HARNESS_JEV_CHECKPOINTS=1`
   (normally sourced from `scripts/jev-enable.sh`); unset or `0` remains disabled.
 - `dispatch.enabled`: enable the role dispatcher and bounded native/external worker lifecycle;
   see [orchestration](orchestration.md) for profiles, plans, receipts and measurements.
@@ -787,7 +790,7 @@ The audit service uses the shared Python writer; Python 3 must remain available.
 
 Legacy `HARNESS_AUDIT_SETTINGS` is a deprecated alias for the configuration path;
 use the same path for service and collectors. `HARNESS_AUDIT_ENABLED=0` remains a
-process opt-out, and `HARNESS_JEV_DELEGATION=off` still forces shadow comparison
+process opt-out, and `HARNESS_JEV_DELEGATION=off` still forces shadow mode
 unless persisted mode is `off`. Safety gates, permissions and required checks are
 not disableable through this configuration. Runtime paths, timeouts and test-only
 overrides remain environment settings rather than persisted feature toggles.

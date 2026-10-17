@@ -72,7 +72,8 @@ class ConfigTests(unittest.TestCase):
         context = {"version": 2, "checkpoint": {"baseline_action": "keep", "bypass_reason": "none"},
                    "context": {}, "questions": {"recommendation": {"type": "choice", "criteria": {"keep": "keep", "change": "change"}}}}
         advice = context_advice.advise(context, router, self.home / "db", delegate=True)
-        self.assertEqual(advice["action"], "keep")
+        # Disabled Jev leaves the decision to the main agent; a legacy baseline is not followed.
+        self.assertEqual((advice["action"], advice["needs_reasoning"]), ("normal_reasoning", True))
         self.assertEqual(advice["status"], "bypassed")
         router.post_json.assert_not_called()
 

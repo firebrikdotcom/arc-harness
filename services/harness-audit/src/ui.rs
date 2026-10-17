@@ -219,11 +219,11 @@ fn local_activity_date(value: &str, timezone: Tz) -> String {
         .unwrap_or_default()
 }
 
-fn local_accuracy_days(
+fn local_confidence_days(
     rows: &[Value],
     include_fixtures: bool,
     timezone: Tz,
-) -> Vec<grouped::DailyAccuracy> {
+) -> Vec<grouped::DailyConfidence> {
     let mut calendar_rows = rows.to_vec();
     // Shift checkpoint calendar coordinates only. Outcome ordering retains its original instants.
     for row in &mut calendar_rows {
@@ -241,7 +241,7 @@ fn local_accuracy_days(
                 .timestamp_micros());
         }
     }
-    grouped::daily_checkpoint_accuracy(&calendar_rows, include_fixtures)
+    grouped::daily_checkpoint_confidence(&calendar_rows, include_fixtures)
 }
 
 fn unavailable(error: impl std::fmt::Display) -> HttpResponse {
@@ -278,7 +278,7 @@ pub fn event_row(row: &Value) -> Value {
         "baseline_action": text(&payload, "baseline_action"),
         "recommendation": recommendation,
         "outcome": text(&payload, "outcome"),
-        "confidence": payload.get("recommendation_confidence").and_then(Value::as_f64),
+        "confidence": grouped::recommendation_confidence(&payload),
         "latency_ms": payload.get("jev_latency_ms").and_then(Value::as_i64),
     })
 }
@@ -338,7 +338,7 @@ pub fn totals(event_count: usize, checkpoints: &Value) -> Value {
     })
 }
 
-// Accuracy chart geometry, in SVG user units; the SVG scales to its panel.
+// Confidence chart geometry, in SVG user units; the SVG scales to its panel.
 const CHART_WIDTH: f64 = 720.0;
 const CHART_HEIGHT: f64 = 220.0;
 const CHART_LEFT: f64 = 48.0;
@@ -351,11 +351,11 @@ fn day_label(day: i64) -> String {
     format_timestamp(day * 86_400_000_000)[..10].to_owned()
 }
 
-/// Template-ready geometry for the daily accuracy line: one point per day with
-/// labeled decisions, a path that breaks across days without labels, y
+/// Template-ready geometry for daily mean Jev confidence: one point per sampled
+/// day, a path that breaks across days without confidence samples, y
 /// gridlines at 0/50/100%, and up to ten evenly spaced day ticks. Coordinates
 /// are pre-formatted so the template does no arithmetic.
-pub fn accuracy_chart(days: &[grouped::DailyAccuracy]) -> Value {
+pub fn confidence_chart(days: &[grouped::DailyConfidence]) -> Value {
     let (Some(first), Some(last)) = (days.first(), days.last()) else {
         return json!({"points": [], "days": []});
     };
@@ -375,7 +375,7 @@ pub fn accuracy_chart(days: &[grouped::DailyAccuracy]) -> Value {
     let points: Vec<Value> = days
         .iter()
         .map(|point| {
-            let (px, py) = (x(point.day), y(point.correct as f64 / point.labeled as f64));
+            let (px, py) = (x(point.day), y(point.mean));
             let command = if previous_day == Some(point.day - 1) {
                 'L'
             } else {
@@ -387,9 +387,8 @@ pub fn accuracy_chart(days: &[grouped::DailyAccuracy]) -> Value {
                 "x": format!("{px:.1}"),
                 "y": format!("{py:.1}"),
                 "date": day_label(point.day),
-                "labeled": point.labeled,
-                "correct": point.correct,
-                "percent": (point.correct * 100 + point.labeled / 2) / point.labeled,
+                "samples": point.samples,
+                "percent": format!("{:.1}", point.mean * 100.0),
             })
         })
         .collect();
@@ -446,14 +445,14 @@ async fn workbench(
             Err(error) => return unavailable(error),
         };
     let recent: Vec<Value> = recent.iter().map(event_row).collect();
-    let chart = accuracy_chart(&local_accuracy_days(
+    let chart = confidence_chart(&local_confidence_days(
         &rows,
         query.include_fixtures,
         client_timezone(&request),
     ));
     let mut context = Context::new();
     context.insert("totals", &totals(event_count, &checkpoints));
-    context.insert("accuracy_chart", &chart);
+    context.insert("confidence_chart", &chart);
     context.insert("checkpoints", &checkpoints);
     context.insert("routes", &routes);
     context.insert("recent", &recent);
@@ -1737,7 +1736,7 @@ mod tests {
             outcome("b", "correct", micros("2026-03-08T08:01:00Z")),
         ];
         let original = rows.clone();
-        let chart = accuracy_chart(&local_accuracy_days(&rows, false, timezone));
+        let chart = confidence_chart(&local_confidence_days(&rows, false, timezone));
         assert_eq!(chart["points"][0]["date"], "2026-03-07");
         assert_eq!(chart["points"][1]["date"], "2026-03-08");
         assert_eq!(rows, original);
@@ -1869,7 +1868,7 @@ mod tests {
         let html = render_workbench(&rows);
         assert!(html.contains("Audit workbench"));
         assert!(html.contains("evidence_assessment"));
-        assert!(html.contains("run_full_verification-&gt;run_full_verification"));
+        assert!(!html.contains("run_full_verification-&gt;run_full_verification"));
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
@@ -1880,34 +1879,78 @@ mod tests {
         );
         assert!(!html.contains("0.3299999"));
         let chart = html
-            .find("Accuracy over time")
+            .find("Jev confidence over time")
             .expect("chart panel renders");
         assert!(
             chart < html.find("metric-grid").unwrap(),
             "chart sits above the metric grid"
         );
-        assert!(html.contains("<path class=\"chart__line\" d=\"M356.0,16.0\"/>"));
-        assert!(html.contains("1970-01-01: 100% (1 correct of 1 labeled)"));
+        assert!(html.contains("<path class=\"chart__line\" d=\"M356.0,131.2\"/>"));
+        assert!(html.contains("1970-01-01: 33.0% mean confidence (1 samples)"));
     }
 
     #[test]
-    fn workbench_shows_an_empty_chart_state_without_labels() {
-        let html = render_workbench(&[checkpoint("a", "evidence_assessment", "run", "run", 1)]);
-        assert!(html.contains("No labeled decisions yet"));
+    fn workbench_confidence_is_visible_without_labels_and_has_no_comparison_columns() {
+        let mut row = checkpoint("a", "test", "baseline_only", "jev_choice", 1);
+        row["payload"]["recommendation_confidence"] = json!(0);
+        let html = render_workbench(&[row.clone()]);
+        assert!(html.contains("1970-01-01: 0.0% mean confidence (1 samples)"));
+        assert!(html.contains("self-reported"));
+        assert!(html.contains("not measured accuracy"));
+        for removed in [
+            ">Agree<",
+            ">Labeled<",
+            ">Accuracy<",
+            ">Outcomes<",
+            ">Outcome<",
+            "Baseline",
+            "baseline_only",
+            "Labeled decisions",
+            "Jev accuracy",
+        ] {
+            assert!(
+                !html.contains(removed),
+                "unexpected Workbench comparison: {removed}"
+            );
+        }
+        let graph = |html: &str| {
+            html.split("<svg class=\"chart\"")
+                .nth(1)
+                .unwrap()
+                .split("</svg>")
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            graph(&html),
+            graph(&render_workbench(&[row, outcome("a", "incorrect", 2)]))
+        );
+    }
+
+    #[test]
+    fn workbench_shows_an_empty_chart_state_without_confidence() {
+        let mut row = checkpoint("a", "evidence_assessment", "run", "run", 1);
+        row["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recommendation_confidence");
+        let html = render_workbench(&[row]);
+        assert!(html.contains("No confidence samples yet"));
         assert!(!html.contains("<svg class=\"chart\""));
     }
 
     #[test]
-    fn accuracy_chart_breaks_the_line_on_days_without_labels() {
-        let day = |day, labeled, correct| grouped::DailyAccuracy {
+    fn confidence_chart_breaks_the_line_on_days_without_samples() {
+        let day = |day, samples, value| grouped::DailyConfidence {
             day,
-            labeled,
-            correct,
+            samples,
+            mean: value,
         };
-        let chart = accuracy_chart(&[day(100, 4, 2), day(101, 2, 2), day(110, 3, 0)]);
+        let chart = confidence_chart(&[day(100, 4, 0.5), day(101, 2, 1.0), day(110, 3, 0.0)]);
         // 0% sits on the plot floor (y=188), 50% midway, 100% on the top line.
         assert_eq!(chart["path"], "M48.0,102.0L109.6,16.0M664.0,188.0");
-        assert_eq!(chart["points"][0]["percent"], 50);
+        assert_eq!(chart["points"][0]["percent"], "50.0");
         assert_eq!(chart["latest"]["date"], "1970-04-21");
         assert_eq!(
             chart["days"][0]["date"], "1970-04-21",
@@ -1923,16 +1966,16 @@ mod tests {
             ticks,
             ["04-11", "04-13", "04-15", "04-17", "04-19", "04-21"]
         );
-        let nine_days = accuracy_chart(&[day(0, 1, 1), day(8, 1, 1)]);
+        let nine_days = confidence_chart(&[day(0, 1, 1.0), day(8, 1, 1.0)]);
         assert_eq!(
             nine_days["ticks"].as_array().unwrap().len(),
             9,
             "short spans tick every day"
         );
-        let single = accuracy_chart(&[day(5, 3, 1)]);
+        let single = confidence_chart(&[day(5, 3, 1.0 / 3.0)]);
         assert_eq!(single["path"], "M356.0,130.7");
         assert_eq!(single["ticks"].as_array().unwrap().len(), 1);
-        assert_eq!(accuracy_chart(&[])["points"], json!([]));
+        assert_eq!(confidence_chart(&[])["points"], json!([]));
     }
 
     fn render_workbench(rows: &[Value]) -> String {
@@ -1943,8 +1986,8 @@ mod tests {
         let mut context = Context::new();
         context.insert("totals", &totals(rows.len(), &checkpoints));
         context.insert(
-            "accuracy_chart",
-            &accuracy_chart(&grouped::daily_checkpoint_accuracy(rows, false)),
+            "confidence_chart",
+            &confidence_chart(&grouped::daily_checkpoint_confidence(rows, false)),
         );
         context.insert("checkpoints", &checkpoints);
         context.insert("routes", &grouped::route_groups(rows, false));

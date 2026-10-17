@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import subprocess
 import sys
@@ -25,17 +24,23 @@ METADATA = {
     "changed_file_count": 2,
 }
 
+# Importable like the real router: the harness asks one bounded choice through post_json.
 FAKE_ROUTER = '''
-import json, os, sys
+import json, os
+from collections import Counter
 from pathlib import Path
-state = json.load(sys.stdin)
-Path(os.environ['FAKE_STATE_PATH']).write_text(json.dumps({'state': state, 'args': sys.argv[1:]}))
-observed = os.environ.get('FAKE_RECOMMENDATION', 'proceed')
-recommendation = 'reasoning_model' if '--shadow' in sys.argv else observed
-print(json.dumps({'call_id': 'fixture-call', 'policy': {'recommendation': recommendation,
-      'observed_recommendation': observed, 'reason': 'fixture'},
-      'model': {'requested': 'fixture', 'returned': os.environ.get('FAKE_MODEL', 'fixture'), 'drift': False},
-      'usage': {'input_tokens': 12, 'output_tokens': 2}, 'latency_ms': 5}))
+DEFAULT_TIMEOUT = 1.0
+def pinned_model(): return os.environ.get('TYPESAFE_MODEL', 'fixture')
+def api_url(): return 'https://fixture.invalid'
+def resolve_api_key(): return 'fixture', 'fixture'
+def redact(value, counts=None): return value
+def post_json(url, payload, key, timeout, **options):
+    Path(os.environ['FAKE_STATE_PATH']).write_text(json.dumps(payload))
+    choice = os.environ.get('FAKE_RECOMMENDATION', 'proceed')
+    confidence = float(os.environ.get('FAKE_CONFIDENCE', '0.9'))
+    return ({'answers': {'recommendation': {'type': 'choice', 'choice': choice, 'confidence': confidence}},
+             'model': os.environ.get('FAKE_MODEL', payload['model']), 'usage': {'input_tokens': 12, 'output_tokens': 2}},
+            {'latency_ms': 5})
 '''
 
 
@@ -81,19 +86,7 @@ class TaskRoutingTests(unittest.TestCase):
         )
 
     def eligible_env(self) -> dict[str, str]:
-        logs = self.root / "typesafe-logs"
-        logs.mkdir()
-        (logs / "2026-09-19.jsonl").write_text(
-            "".join(json.dumps({"call_id": f"call-{i}", "shadow": True, "exit_code": 0,
-                                "kind": "task_entry", "model_requested": "fixture", "model_returned": "fixture",
-                                "policy_version": hashlib.sha256(self.router.read_bytes() + (ROOT / "scripts/task_route.py").read_bytes()).hexdigest(),
-                                "policy": {"observed_recommendation": "proceed"}}) + "\n"
-                    for i in range(30))
-        )
-        (logs / "outcomes.jsonl").write_text(
-            "".join(json.dumps({"call_id": f"call-{i}", "outcome": "correct"}) + "\n" for i in range(30))
-        )
-        return {**self.env, "HARNESS_TYPESAFE_ACTIVE": "1", "TYPESAFE_LOG_DIR": str(logs)}
+        return {**self.env, "HARNESS_TYPESAFE_ACTIVE": "1", "HARNESS_TYPESAFE_OPERATOR_ACTIVATION": "1"}
 
     def command_file(self, name: str, marker: str) -> Path:
         path = self.root / name
@@ -123,12 +116,13 @@ class TaskRoutingTests(unittest.TestCase):
     def test_shadow_calls_router_without_sending_prompt_and_uses_default(self) -> None:
         record = json.loads(self.route().stdout)
         self.assertEqual((record["source"], record["recommendation"]), ("typesafe", "default"))
-        self.assertEqual(record["observed_recommendation"], "proceed")
+        self.assertEqual((record["routing_mode"], record["needs_reasoning"]), ("shadow", True))
         sent = json.loads(self.state_capture.read_text())
-        self.assertIn("--strict", sent["args"])
-        self.assertIn("--shadow", sent["args"])
         self.assertEqual(sent["state"]["task"], {"kind": "change", "area": "mobile"})
         self.assertNotIn("prompt", json.dumps(sent["state"]).lower())
+        # Jev is asked first: no agent proposal or baseline travels with the request.
+        self.assertNotIn("proposed_action", json.dumps(sent))
+        self.assertNotIn("proposed_action", record["metadata"])
         stored = Path(record["record_path"])
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
@@ -202,16 +196,38 @@ class TaskRoutingTests(unittest.TestCase):
         record = json.loads(result.stdout)
         self.assertEqual((record["source"], record["recommendation"]), ("fallback", "default"))
 
-    def test_active_requires_opt_in_and_real_outcomes(self) -> None:
+    def test_active_requires_explicit_opt_in_not_accuracy_outcomes(self) -> None:
         self.assertIn("active routing is gated", self.route(mode="active", expected=2).stderr)
-        environment = self.eligible_env()
-        record = json.loads(self.route(mode="active", env=environment).stdout)
+        opted_in = {**self.env, "HARNESS_TYPESAFE_ACTIVE": "1"}
+        self.assertIn("operator activation", self.route(mode="active", env=opted_in, expected=2).stderr)
+        record = json.loads(self.route(mode="active", env=self.eligible_env()).stdout)
         self.assertEqual((record["source"], record["recommendation"]), ("typesafe", "proceed"))
         self.assertEqual((record["routing_mode"], record["rollout_percent"], record["rollout_selected"]), ("active", 100, True))
-        self.assertNotIn("--shadow", json.loads(self.state_capture.read_text())["args"])
-        with (Path(environment["TYPESAFE_LOG_DIR"]) / "outcomes.jsonl").open("a") as stream:
-            stream.write(json.dumps({"outcome": "under_escalated"}) + "\n")
-        self.assertIn("active routing is gated", self.route(mode="active", env=environment, expected=2).stderr)
+        self.assertEqual((record["confidence"], record["needs_reasoning"], record["action"]), (0.9, False, "proceed"))
+
+    def test_low_confidence_leaves_the_decision_to_the_main_agent(self) -> None:
+        for confidence, reason in (("0.69", "low_confidence"), ("0.0", "low_confidence")):
+            environment = {**self.eligible_env(), "FAKE_CONFIDENCE": confidence}
+            record = json.loads(self.route(mode="active", env=environment).stdout)
+            self.assertEqual((record["source"], record["recommendation"], record["action"]),
+                             ("fallback", "default", "normal_reasoning"))
+            self.assertEqual((record["needs_reasoning"], record["escalation_reason"]), (True, reason))
+        # The threshold itself is accepted.
+        record = json.loads(self.route(mode="active", env={**self.eligible_env(), "FAKE_CONFIDENCE": "0.7"}).stdout)
+        self.assertEqual((record["source"], record["recommendation"], record["needs_reasoning"]), ("typesafe", "proceed", False))
+
+    def test_launcher_keeps_the_main_agent_launch_below_the_threshold(self) -> None:
+        default = self.command_file("default.json", "DEFAULT")
+        routine = self.command_file("routine.json", "ROUTINE")
+        deep = self.command_file("deep.json", "DEEP")
+        common = (
+            "launch", "--state", str(self.metadata), "--project", str(self.root),
+            "--router", str(self.router), "--default-command", str(default),
+            "--routine-command", str(routine), "--deep-command", str(deep), "--mode", "active",
+        )
+        low = {**self.eligible_env(), "FAKE_CONFIDENCE": "0.5"}
+        self.assertEqual(self.run_cli(*common, env=low).stdout.strip(), "DEFAULT")
+        self.assertEqual(self.run_cli(*common, env=self.eligible_env()).stdout.strip(), "ROUTINE")
 
     def test_operator_activation_allows_full_rollout_with_explicit_acknowledgement(self) -> None:
         environment = {**self.env, "HARNESS_TYPESAFE_ACTIVE": "1", "HARNESS_TYPESAFE_OPERATOR_ACTIVATION": "1"}
@@ -225,7 +241,6 @@ class TaskRoutingTests(unittest.TestCase):
         record = json.loads(self.route(mode="active", env=environment).stdout)
         self.assertEqual((record["source"], record["recommendation"]), ("typesafe", "default"))
         self.assertEqual((record["routing_mode"], record["rollout_percent"], record["rollout_selected"]), ("shadow", 0, False))
-        self.assertIn("--shadow", json.loads(self.state_capture.read_text())["args"])
 
     def test_invalid_rollout_percentage_is_rejected(self) -> None:
         environment = {**self.env, "HARNESS_TYPESAFE_ROLLOUT_PERCENT": "101"}
@@ -293,29 +308,12 @@ class TaskRoutingTests(unittest.TestCase):
         self.assertIn("cannot be interrupted through a separate App Server", result.stderr)
 
 
-    def test_wrong_cohort_and_unversioned_evidence_cannot_activate(self):
-        environment = self.eligible_env()
-        calls = Path(environment["TYPESAFE_LOG_DIR"]) / "2026-09-19.jsonl"
-        original = calls.read_text()
-        for field, value in [("kind", "dynamic_advice"), ("model_returned", "old-model"),
-                             ("model_requested", "old-model"), ("policy_version", "old-policy")]:
-            rows = [json.loads(line) for line in original.splitlines()]
-            for row in rows:
-                row[field] = value
-            calls.write_text("".join(json.dumps(row) + "\n" for row in rows))
-            self.assertIn("active routing is gated", self.route(mode="active", env=environment, expected=2).stderr)
-        calls.write_text(original)
-        environment["FAKE_MODEL"] = "unexpected-model"
-        record = json.loads(self.route(mode="active", env=environment).stdout)
-        self.assertEqual(record["source"], "fallback")
-        self.assertEqual(record["recommendation"], "default")
-
-    def test_malformed_outcome_log_refuses_activation(self):
-        environment = self.eligible_env()
-        calls = Path(environment["TYPESAFE_LOG_DIR"]) / "2026-09-19.jsonl"
-        calls.write_text("[]\n")
-        result = self.route(mode="active", env=environment, expected=2)
-        self.assertIn("cannot inspect outcome log", result.stderr)
+    def test_model_drift_or_provider_failure_leaves_the_main_agent_path(self):
+        record = json.loads(self.route(mode="active", env={**self.eligible_env(), "FAKE_MODEL": "unexpected-model"}).stdout)
+        self.assertEqual((record["source"], record["recommendation"], record["needs_reasoning"]), ("fallback", "default", True))
+        self.router.write_text(FAKE_ROUTER.replace("    Path(os.environ", "    raise ConnectionError('down')\n    Path(os.environ"))
+        record = json.loads(self.route(mode="active", env=self.eligible_env()).stdout)
+        self.assertEqual((record["source"], record["recommendation"], record["reason"]), ("fallback", "default", "provider_error:ConnectionError"))
 
     def test_explicit_choice_bypasses_jev(self):
         self.metadata.write_text(json.dumps({**METADATA, "user_choice_explicit": True}))
@@ -337,7 +335,6 @@ class TaskRoutingTests(unittest.TestCase):
         record = json.loads(self.route().stdout)
         self.assertEqual((record["source"], record["recommendation"], record["routing_mode"]), ("typesafe", "proceed", "active"))
         self.assertEqual((record["mode_source"], record["delegation"], record["rollout_selected"]), ("delegation", True, True))
-        self.assertNotIn("--shadow", json.loads(self.state_capture.read_text())["args"])
         # A fresh shell sees the same switch: it lives in the file, not the environment.
         self.assertTrue(self.switch("status")["enabled"])
         self.assertFalse(self.switch("off")["enabled"])
@@ -346,10 +343,9 @@ class TaskRoutingTests(unittest.TestCase):
     def test_switch_pins_the_model_the_router_requests(self):
         self.switch("on", "--model", "jev-9.9.9")
         env = {k: v for k, v in self.env.items() if k != "TYPESAFE_MODEL"}
-        self.router.write_text(FAKE_ROUTER.replace("'returned': os.environ.get('FAKE_MODEL', 'fixture')",
-                                                   "'returned': os.environ.get('TYPESAFE_MODEL', 'unset')"))
         record = json.loads(self.route(env=env).stdout)
         self.assertEqual((record["routing_mode"], record["model"]["returned"]), ("active", "jev-9.9.9"))
+        self.assertEqual(json.loads(self.state_capture.read_text())["model"], "jev-9.9.9")
         latest = self.run_cli("jev", "on", "--model", "jev-latest", expected=2)
         self.assertIn("exact", latest.stderr)
 
@@ -360,7 +356,6 @@ class TaskRoutingTests(unittest.TestCase):
         record = json.loads(self.route(env=env).stdout)
         self.assertEqual((record["mode"], record["routing_mode"], record["recommendation"]), ("active", "shadow", "default"))
         self.assertIn("exact model pin", record["delegation_gate"])
-        self.assertIn("--shadow", json.loads(self.state_capture.read_text())["args"])
         # Asked for explicitly, the same gap is an error rather than a quiet holdback.
         self.assertIn("active routing is gated", self.route(mode="active", env=env, expected=2).stderr)
 

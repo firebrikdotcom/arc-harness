@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 from run_paths import records_dir  # noqa: E402
 import jev_delegation  # noqa: E402
+import harness_config
+import context_advice as advice
 KINDS = {"change", "bug", "review", "research", "question", "ops"}
 AREAS = {"mobile", "frontend", "backend", "infrastructure", "docs", "other"}
 ACTIONS = {"start_routine_agent", "run_targeted_check", "start_deep_agent", "ask_for_missing_input"}
@@ -181,7 +183,6 @@ def api_state(data: dict[str, Any], history: dict[str, str] | None = None) -> di
     state = {
         "decision": {
             "question": "Does this reversible task need a targeted check or deeper reasoning before a routine agent starts?",
-            "proposed_action": data["proposed_action"],
             "reversibility": data["reversibility"],
         },
         "task": {"kind": data["task_kind"], "area": data["area"]},
@@ -244,91 +245,39 @@ def resolve_mode(requested: str | None) -> tuple[str, str]:
 def active_eligible(router: Path) -> tuple[bool, str]:
     delegated = switch_state()["enabled"]
     if os.environ.get("HARNESS_TYPESAFE_ACTIVE") != "1" and not delegated:
-        return False, "run 'harness jev on' or set HARNESS_TYPESAFE_ACTIVE=1 after reviewing the outcome report"
+        return False, "run 'harness jev on' or set HARNESS_TYPESAFE_ACTIVE=1 with operator activation"
     model = pinned_model()
     if model.endswith("-latest"):
         return False, "active routing requires an exact model pin (TYPESAFE_MODEL or harness jev on --model)"
     if delegated or os.environ.get(ACTIVATION_ENV) == "1":
-        # The switch and the operator flag are explicit acknowledgements; the
-        # recorded-outcome evidence is reported by `harness jev status`, not required.
+        # The switch and the operator flag are explicit acknowledgements; each
+        # answer is then held to the configured confidence threshold.
         return True, ""
-    return evidence_gate(router, model)
-
-
-def evidence_gate(router: Path, model: str) -> tuple[bool, str]:
-    """The recorded-outcome gate: 30 correct shadow task-entry outcomes in this exact cohort."""
-    try:
-        version = policy_version(router)
-    except OSError as error:
-        return False, f"cannot fingerprint router: {error}"
-    log_root = Path(os.environ.get("TYPESAFE_LOG_DIR") or (Path(os.environ.get("TYPESAFE_HOME", str(Path.home() / ".typesafe-routing"))) / "logs"))
-    outcomes = log_root / "outcomes.jsonl"
-    valid_calls: dict[str, str] = {}
-    outcomes_by_call: dict[str, str] = {}
-    under = 0
-    try:
-        for path in log_root.glob("*.jsonl"):
-            if path.name == "outcomes.jsonl":
-                continue
-            for line in path.read_text(encoding="utf-8").splitlines():
-                row = json.loads(line)
-                call_id = row.get("call_id")
-                policy = row.get("policy") or {}
-                observed = policy.get("observed_recommendation")
-                if (row.get("shadow") is True and row.get("exit_code") == 0 and call_id and observed in RECOMMENDATIONS
-                        and row.get("kind") == "task_entry" and row.get("policy_version") == version
-                        and row.get("model_requested") == model and row.get("model_returned") == model):
-                    if call_id in valid_calls:
-                        return False, f"duplicate call {call_id}"
-                    valid_calls[call_id] = observed
-        for line in outcomes.read_text(encoding="utf-8").splitlines():
-            row = json.loads(line)
-            call_id = row.get("call_id")
-            if call_id in outcomes_by_call:
-                return False, f"duplicate outcome for call {call_id}"
-            if call_id:
-                outcomes_by_call[call_id] = row.get("outcome", "")
-            under += row.get("outcome") == "under_escalated"
-    except (OSError, ValueError, TypeError, AttributeError) as error:
-        return False, f"cannot inspect outcome log: {error}"
-    correct = sum(outcomes_by_call.get(call_id) == "correct" for call_id in valid_calls)
-    routine_correct = sum(
-        observed == "proceed" and outcomes_by_call.get(call_id) == "correct"
-        for call_id, observed in valid_calls.items()
-    )
-    if correct < 30 or routine_correct < 5 or under:
-        return False, (
-            "need 30 correct shadow outcomes, including 5 correct routine routes, "
-            f"and zero under-escalations (correct={correct}, routine={routine_correct}, under={under})"
-        )
-    return True, ""
+    return False, "active routing requires explicit operator activation (HARNESS_TYPESAFE_OPERATOR_ACTIVATION=1)"
 
 
 def invoke_router(state: dict[str, Any], router: Path, mode: str) -> tuple[dict[str, Any] | None, str | None]:
-    if not router.is_file():
-        return None, f"router missing: {router}"
-    command = [sys.executable, str(router), "route", "--strict", "--decision-family", "task_entry", "--policy-version", policy_version(router)]
-    if mode == "shadow":
-        command.append("--shadow")
-    # The router requests the model the harness pins, whether the pin comes from the shell or the switch.
-    environment = {**os.environ, "TYPESAFE_MODEL": pinned_model()}
+    # Ask a bounded choice directly, avoiding the legacy router's fixed threshold
+    # and shadow-comparison policy. This adapter owns the configured confidence gate.
     try:
-        result = subprocess.run(command, input=json.dumps(state), text=True, capture_output=True, timeout=35,
-                                check=False, env=environment)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return None, f"router unavailable: {error}"
-    if result.returncode:
-        return None, f"router exit {result.returncode}: {result.stderr.strip()[:250]}"
-    try:
-        answer = json.loads(result.stdout)
-        policy = answer["policy"]
-        if policy["recommendation"] not in RECOMMENDATIONS:
-            raise ValueError("unknown recommendation")
-        if mode == "shadow" and policy["recommendation"] != "reasoning_model":
-            raise ValueError("shadow router did not preserve normal reasoning")
-    except (ValueError, KeyError, TypeError) as error:
-        return None, f"malformed router output: {error}"
-    return answer, None
+        provider = advice.load_router(router)
+        payload = {"model": pinned_model(), "state": state, "questions": {"recommendation": {
+            "type": "choice", "instructions": "Choose the best next task route using the supplied facts.",
+            "criteria": {"proceed": "Start the routine agent", "targeted_check": "Run a targeted check first",
+                         "reasoning_model": "Use normal agent reasoning", "ask_user": "Missing essential user input",
+                         "deterministic_rule": "Follow an explicit deterministic rule"}}}}
+        advice.safe_input(state, provider)
+        response, meta = provider.post_json(provider.api_url(), payload, provider.resolve_api_key()[0],
+                                            advice.request_timeout(provider), **advice.request_options())
+        answers = advice.validated_answers(payload['questions'], response)
+        choice = answers['recommendation']
+        return {"call_id": str(uuid.uuid4()), "policy": {"recommendation": choice['choice'],
+                    "confidence": choice['confidence'], "reason": "bounded_task_route"},
+                "model": {"requested": pinned_model(), "returned": response.get('model'),
+                          "drift": response.get('model') != pinned_model()},
+                "usage": response.get('usage'), "latency_ms": meta.get('latency_ms') if isinstance(meta, dict) else None}, None
+    except Exception as error:
+        return None, "provider_error:" + type(error).__name__
 
 
 def write_record(record: dict[str, Any], db_root: Path) -> Path:
@@ -402,6 +351,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         history = history_facts(history_db(project, db_root))
         answer, error = invoke_router(api_state(data, history), router, routing_mode)
         if answer is None:
+            # Without a usable Jev answer the main agent's existing launch path decides.
             recommendation, reason, source = "default", error or "router unavailable", "fallback"
         else:
             policy = answer["policy"]
@@ -413,6 +363,12 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
                 model = {}
             if routing_mode == "active" and (model.get("returned") != pinned_model() or model.get("drift")):
                 recommendation, reason, source = "default", "model drift or missing returned model", "fallback"
+    minimum = harness_config.load()['typesafe'].get('min_confidence', 0.70)
+    confidence = answer['policy'].get('confidence') if answer else None
+    if answer and routing_mode == 'active' and source == 'typesafe':
+        if not advice.finite(confidence, 0, 1) or confidence < minimum:
+            recommendation, reason, source = 'default', ('missing_confidence' if confidence is None else 'low_confidence'), 'fallback'
+    needs_reasoning = source == 'fallback' or (source == 'typesafe' and routing_mode != 'active')
     record: dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "at": datetime.now(timezone.utc).isoformat(),
@@ -424,7 +380,10 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         "source": source,
         "recommendation": recommendation,
         "reason": reason,
-        "metadata": data,
+        "confidence": confidence, "min_confidence": minimum, "needs_reasoning": needs_reasoning,
+        "action": "normal_reasoning" if needs_reasoning else recommendation,
+        "escalation_reason": reason if needs_reasoning else None,
+        "metadata": {k: v for k, v in data.items() if k != "proposed_action"},
         "rollout_percent": percentage,
         "operator_activation": operator_activation,
     }
@@ -436,7 +395,6 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         record["rollout_bucket"] = bucket
         record["rollout_selected"] = routing_mode == "active"
     if answer:
-        record["observed_recommendation"] = answer["policy"].get("observed_recommendation")
         record["call_id"] = answer.get("call_id")
         record["kind"] = "task_entry"
         record["policy_version"] = policy_version(router)

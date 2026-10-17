@@ -221,8 +221,14 @@ impl ReportStore {
         for row in &mut rows {
             if let Some(p) = row["payload"].as_object_mut() {
                 p.retain(|k, _| {
-                    ["call_id", "outcome", "model_requested", "model_returned"]
-                        .contains(&k.as_str())
+                    [
+                        "call_id",
+                        "outcome",
+                        "model_requested",
+                        "model_returned",
+                        "recommendation_confidence",
+                    ]
+                    .contains(&k.as_str())
                 });
             }
         }
@@ -436,6 +442,28 @@ mod tests {
             let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
         }
     }
+    #[test]
+    fn checkpoint_chart_rows_retain_confidence_and_fixture_identity_without_prompts() {
+        let f = Fixture::new();
+        f.append(
+            "confidence",
+            "jev.checkpoint",
+            json!({"recommendation_confidence":0,
+            "model_requested":"fixture", "prompt":"private prompt"}),
+            1,
+        );
+        f.store.refresh().unwrap();
+        let rows = f.store.checkpoint_rows().unwrap();
+        assert_eq!(rows[0]["payload"]["recommendation_confidence"], 0);
+        assert_eq!(rows[0]["payload"]["model_requested"], "fixture");
+        assert!(rows[0]["payload"].get("prompt").is_none());
+        assert!(crate::summary::daily_checkpoint_confidence(&rows, false).is_empty());
+        assert_eq!(
+            crate::summary::daily_checkpoint_confidence(&rows, true)[0].mean,
+            0.0
+        );
+    }
+
     #[test]
     fn reducer_equivalence_resume_and_late_source_time() {
         let f = Fixture::new();

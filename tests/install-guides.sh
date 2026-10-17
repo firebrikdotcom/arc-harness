@@ -45,11 +45,15 @@ for family in tool_selection evidence_assessment handoff_assessment; do
   grep -q "^- Before .*advise --family $family " "$JEV_DOC" || fail "trigger for $family missing from the Jev docs"
 done
 # shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
-grep -q 'set `--baseline` to the choice you would make without asking' "$JEV_DOC" \
-  || fail "trigger commands must tell the agent to substitute its own baseline and facts"
+grep -q 'replace each with the real redacted fact' "$JEV_DOC" \
+  || fail "trigger commands must tell the agent to substitute its own facts"
 # shellcheck disable=SC2016 # the backticks are literal Markdown delimiters
 grep '^- Before' "$JEV_DOC" | sed 's/^[^`]*`//; s/`$//' > "$TMP_ROOT/triggers"
 [ "$(wc -l < "$TMP_ROOT/triggers")" -eq 3 ] || fail "expected exactly three trigger commands"
+# Jev is asked first: no trigger picks the agent's own answer beforehand.
+if grep -q -- '--baseline' "$TMP_ROOT/triggers"; then
+  fail "trigger commands must not carry a baseline"
+fi
 (
   cd "$HARNESS_ROOT_UNDER_TEST"
   export HARNESS_TYPESAFE_ROUTER="$HARNESS_ROOT_UNDER_TEST/tests/fake_router.py"
@@ -58,10 +62,8 @@ grep '^- Before' "$JEV_DOC" | sed 's/^[^`]*`//; s/`$//' > "$TMP_ROOT/triggers"
   while IFS= read -r trigger; do
     eval "$trigger" > "$TMP_ROOT/trigger.out" 2>&1 || fail "trigger command failed: $(cat "$TMP_ROOT/trigger.out")"
     grep -q '"advisory": true' "$TMP_ROOT/trigger.out" || fail "trigger command was not evaluated as advice"
+    grep -q '"action": "normal_reasoning"' "$TMP_ROOT/trigger.out" || fail "shadow trigger must leave the decision to the agent"
   done < "$TMP_ROOT/triggers"
-  call_id=$(sed -n 's/.*"call_id": "\([^"]*\)".*/\1/p' "$TMP_ROOT/trigger.out")
-  "$HARNESS_ROOT_UNDER_TEST/scripts/harness" advise --label "$call_id" --outcome correct \
-    --action-taken "handed off" --evidence "fixture" >/dev/null 2>&1 || fail "documented label command failed"
 ) || exit 1
 
 # Outside the harness root the commands use a clean absolute CLI path. The CLI

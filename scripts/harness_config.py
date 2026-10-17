@@ -6,6 +6,7 @@ import argparse
 import copy
 import fcntl
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -16,9 +17,11 @@ DEFAULTS = {
     "version": 1,
     "_doc": "Machine-wide runtime switches. No credentials. CLI and dashboard preserve other sections.",
     "typesafe": {
-        "_doc": "mode: off = no calls; shadow = compare only; active = follow decisions within existing rules.",
+        "_doc": "mode: off = no calls; shadow = observe advice, the agent decides; active = follow choices at or above min_confidence within existing rules.",
         "mode": "shadow",
         "model": "jev-1.13.0",
+        "min_confidence": 0.70,
+        "_doc_min_confidence": "Accept Jev choices only at or above this confidence; otherwise ask the agent to reason.",
         "checkpoints": True,
         "enforce_decisions": False,
         "_doc_enforce_decisions": "Require decision records at covered native execution seams; internal judgments use harness decision explicitly.",
@@ -99,7 +102,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     allowed = {"version", *SECTIONS}
     if any(k not in allowed and not k.startswith("_doc") for k in value):
         raise ConfigError("unknown configuration section")
-    fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds"},
+    fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence"},
               "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"},
               "sites": {"enabled", "url", "token_file"}}
     for section, keys in fields.items():
@@ -109,6 +112,9 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     typesafe = value["typesafe"]
     if typesafe.get("mode") not in ("off", "shadow", "active"):
         raise ConfigError("typesafe.mode must be off, shadow or active")
+    confidence = typesafe.get("min_confidence")
+    if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        raise ConfigError("typesafe.min_confidence must be a finite number from 0 to 1")
     model = typesafe.get("model")
     if not isinstance(model, str) or not model.strip() or model.endswith("-latest"):
         raise ConfigError("typesafe.model must be an exact model pin")

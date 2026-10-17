@@ -207,6 +207,7 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
         if let Some(confidence) = payload
             .get("recommendation_confidence")
             .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
         {
             group.confidence.push(confidence);
         }
@@ -296,6 +297,52 @@ pub fn route_groups(rows: &[Value], include_fixtures: bool) -> Value {
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 
+/// Jev's own confidence samples on one calendar day. Labels and baselines are ignored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DailyConfidence {
+    pub day: i64,
+    pub samples: usize,
+    pub mean: f64,
+}
+
+/// Only numeric, finite probabilities are confidence; zero is a valid sample.
+pub fn recommendation_confidence(payload: &Value) -> Option<f64> {
+    payload
+        .get("recommendation_confidence")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+}
+
+/// Daily mean of genuine recorded confidence, oldest first, without outcome joins.
+/// Missing timestamps or confidence contribute no sample, leaving calendar gaps.
+pub fn daily_checkpoint_confidence(rows: &[Value], include_fixtures: bool) -> Vec<DailyConfidence> {
+    let mut days = BTreeMap::<i64, (usize, f64)>::new();
+    for row in rows {
+        if row["event_type"] != "jev.checkpoint" {
+            continue;
+        }
+        let Some(payload) = payload(row) else {
+            continue;
+        };
+        if !include_fixtures && is_fixture(payload) {
+            continue;
+        }
+        let Some(confidence) = recommendation_confidence(&row["payload"]) else {
+            continue;
+        };
+        let Some(at) = row["recorded_at_us"].as_i64() else {
+            continue;
+        };
+        let entry = days.entry(at.div_euclid(MICROS_PER_DAY)).or_default();
+        entry.0 += 1;
+        // Incremental mean avoids an unbounded accumulating sum.
+        entry.1 += (confidence - entry.1) / entry.0 as f64;
+    }
+    days.into_iter()
+        .map(|(day, (samples, mean))| DailyConfidence { day, samples, mean })
+        .collect()
+}
+
 /// Labeled checkpoint decisions on one UTC day of the checkpoint itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DailyAccuracy {
@@ -378,6 +425,62 @@ mod tests {
         let groups = summary["groups"].as_array().unwrap();
         assert_eq!(groups.len(), 1, "{summary}");
         &groups[0]
+    }
+
+    #[test]
+    fn daily_confidence_uses_only_valid_recorded_samples_without_labels_or_baselines() {
+        let make = |day: i64, value: Value| {
+            let mut row = checkpoint(day * MICROS_PER_DAY, "same", "run", "hold", "m");
+            row["payload"]["recommendation_confidence"] = value;
+            row
+        };
+        let mut rows = vec![
+            make(0, json!(0)),
+            make(0, json!(1)),
+            make(1, Value::Null),
+            make(1, json!(-0.1)),
+            make(1, json!(1.1)),
+            make(1, json!("0.8")),
+            make(2, json!(0.75)),
+            label(100, "same", "correct"),
+        ];
+        let mut fixture = make(0, json!(1));
+        fixture["payload"]["model_returned"] = json!("fixture");
+        rows.push(fixture);
+        let mut missing_time = make(3, json!(0.8));
+        missing_time
+            .as_object_mut()
+            .unwrap()
+            .remove("recorded_at_us");
+        rows.push(missing_time);
+        let expected = vec![
+            DailyConfidence {
+                day: 0,
+                samples: 2,
+                mean: 0.5,
+            },
+            DailyConfidence {
+                day: 2,
+                samples: 1,
+                mean: 0.75,
+            },
+        ];
+        assert_eq!(daily_checkpoint_confidence(&rows, false), expected);
+        assert_eq!(daily_checkpoint_confidence(&rows, true)[0].samples, 3);
+        for row in &mut rows {
+            row["payload"]["baseline_action"] = json!("hold");
+            row["payload"]["outcome"] = json!("under_escalated");
+        }
+        assert_eq!(daily_checkpoint_confidence(&rows, false), expected);
+        assert_eq!(
+            recommendation_confidence(&json!({"recommendation_confidence": 0})),
+            Some(0.0)
+        );
+        assert_eq!(recommendation_confidence(&json!({})), None);
+        assert_eq!(
+            recommendation_confidence(&json!({"recommendation_confidence": f64::INFINITY})),
+            None
+        );
     }
 
     #[test]

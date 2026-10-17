@@ -148,7 +148,7 @@ printf '%s\n' allow-empty > "$TDIR/db/required-checks"
 (cd "$WT/sub" && "$CLI" build "done") > "$OUT" 2>&1 || fail "build done did not accept the target's verify record"
 [ ! -e "$PDIR/db/runs/current" ] || fail "the plain target must not share the worktree's run"
 
-# 11. With checkpoints on, the chained route and the observer write to the target database.
+# 11. With checkpoints on, the chained route writes to the target database; the observer asks nothing.
 export HARNESS_JEV_CHECKPOINTS=1
 export HARNESS_TYPESAFE_ROUTER="$ROOT/tests/fake_router.py"
 export FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
@@ -173,7 +173,8 @@ before=$(count "$TDIR/db/advice")
 for _ in 1 2 3; do
   payload PreToolUse "$WT/sub" Bash "make test" | sh "$OBSERVE" >/dev/null
 done
-[ "$(count "$TDIR/db/advice")" -eq $((before + 1)) ] || fail "observer did not record one checkpoint in the target database"
+# A repeated command is a mechanical gate: the observer counts it but asks Jev nothing.
+[ "$(count "$TDIR/db/advice")" -eq "$before" ] || fail "observer asked Jev about a repeated command"
 [ "$(count "$HARNESS_DB_ROOT/advice")" -eq 0 ] || fail "observer wrote to the shared database"
 [ "$(count "$HARNESS_DB_ROOT/routes")" -eq 0 ] || fail "route wrote to the shared database"
 export HARNESS_JEV_CHECKPOINTS=0

@@ -5,8 +5,10 @@ import os
 from contextlib import redirect_stdout
 import json
 from pathlib import Path
+import re
 import shlex
 import sys
+import traceback
 import uuid
 import permit
 import workflow_audit as audit
@@ -19,7 +21,8 @@ READ_ONLY = {"cat", "head", "tail", "wc", "ls", "tree", "grep", "egrep", "fgrep"
              "diff", "cmp", "file", "stat", "du", "df", "pwd", "echo", "printf", "which", "type", "basename",
              "dirname", "realpath", "readlink", "date", "id", "whoami", "hostname", "uname", "jq", "column",
              "nl", "od", "xxd", "md5sum", "sha1sum", "sha256sum", "cksum", "pdfinfo", "test", "[", "true",
-             "false", "cd", "less", "more", "env", "printenv", "nproc"}
+             "false", "cd", "less", "more", "env", "printenv", "nproc", "paste", "comm", "join", "tac", "rev",
+             "seq", "fold", "expand"}
 GIT_READS = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "grep", "describe", "shortlog",
              "rev-list", "merge-base", "cat-file", "ls-tree", "for-each-ref", "show-ref", "whatchanged"}
 
@@ -144,6 +147,16 @@ def management_command(payload, *, decision_bookkeeping=False, reads_only=False)
             return False
     return True
 
+NOTICE_BLOCK = re.compile(r"<(task-notification|system-reminder)>.*?</\1>", re.S)
+
+def runtime_notice(payload):
+    """A prompt made only of runtime notices (a background task's result) carries
+    no new words from the person, so it does not open a new request."""
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or "<task-notification>" not in prompt:
+        return False
+    return not NOTICE_BLOCK.sub("", prompt).strip()
+
 def authorize(payload):
     event = payload.get("hook_event_name")
     # Ending a conversational turn is not task completion. Do not access policy
@@ -156,7 +169,11 @@ def authorize(payload):
         db.execute("BEGIN IMMEDIATE")
         context = audit.load(db, sid)
         audit.ensure_session(sid, context)
-        if event == "UserPromptSubmit":
+        if event == "UserPromptSubmit" and context.get("request_id") and runtime_notice(payload):
+            # A background task finishing is not a new request from the person:
+            # the current prompt, its confirmed plan, and its role plan carry on.
+            print("Todo gate: background notice; the current prompt's todo and dispatch plans still apply.")
+        elif event == "UserPromptSubmit":
             context["request_seq"] = context.get("request_seq", 0) + 1
             context["request_id"] = str(uuid.uuid4())
             context["orchestration_project"] = str(Path(payload.get("cwd") or ".").resolve())
@@ -227,6 +244,8 @@ def decision_seam(payload, context):
         return
     event = payload.get('hook_event_name')
     if event == 'UserPromptSubmit':
+        if runtime_notice(payload):
+            return
         if enforcement:
             print('Decision policy: use harness decision evaluate for bounded reasoning, context, evidence and handoff judgments; deterministic rules bypass advice.')
         if dispatch:
@@ -240,10 +259,12 @@ def decision_seam(payload, context):
     if dispatch:
         from role_dispatch import session_has_plan
         if not session_has_plan(project, sid, context.get('request_id')):
-            raise ValueError('Dispatch plan required for this prompt: use harness dispatch create --plan PATH, including main-only for trivial work')
+            raise ValueError('Dispatch plan required for this prompt: use harness dispatch create --plan PATH, including main-only for trivial work. '
+                             'Main-only in one step: ' + str(audit.ROOT) + '/scripts/harness dispatch create --session-id ' + sid
+                             + ' --plan /dev/stdin <<\'JSON\' {"workers": [], "rationale": "WHY", "acceptance": ["CHECK"]} JSON (the JSON on its own line)')
     if not enforcement:
         return
-    from decision_checkpoint import evaluate, claim, digest
+    from decision_checkpoint import evaluate, claim, digest, resolve
     scope = {'request_id': context.get('request_id'), 'request_seq': context.get('request_seq'),
              'plan_revision': context.get('plan_revision'), 'action_hash': digest([tool, payload.get('tool_input')])}
     state = {'scope': scope, 'active_todo_id': context.get('active_todo_id'),
@@ -257,13 +278,18 @@ def decision_seam(payload, context):
         'Covered read observations: ' + str(context.get('evidence_revision', 0)),
         'The requested tool performs execution', 'Tool category: ' + ('shell' if tool in ('Bash', 'exec_command', 'shell') else 'edit_or_specialized')],
         choices={'execute': 'Execute the proposed tool action', 'gather_context': 'Gather relevant read-only context before execution'},
-        baseline='execute', scope=scope, state=state)
+        scope=scope, state=state)
     finally:
         for key, value in prior.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+    if receipt.get('needs_reasoning'):
+        # Below the confidence threshold (or without a usable answer) the main agent
+        # decides, and its decision is the tool call it proposed.
+        receipt = resolve(project=project, identifier=receipt['id'], session_id=sid, action='execute',
+                          reason='main agent proposed this tool call', scope=scope, state=state)
     if receipt['action'] != 'execute':
         raise ValueError('Decision checkpoint selected gather_context; perform relevant reads and evaluate the revised action state')
     claim(project=project, identifier=receipt['id'], session_id=sid, scope=scope, state=state, action_hash=scope['action_hash'])
@@ -341,6 +367,11 @@ if __name__ == "__main__":
     try: sys.exit(main())
     except Exception as error:
         # Denials disclose policy guidance, never raw hook payloads or tool content.
-        reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+        # A crash names its type and the harness frame that raised it, enough to find the fault.
+        if isinstance(error, ValueError):
+            reason = str(error)
+        else:
+            frames = [f for f in traceback.extract_tb(error.__traceback__) if f.filename.startswith(str(audit.ROOT))]
+            reason = type(error).__name__ + (f" at {Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else "")
         print("TODO GATE: " + reason, file=sys.stderr)
         sys.exit(2)

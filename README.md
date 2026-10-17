@@ -43,7 +43,7 @@ scripts/harness review done
 
 You cannot build before plan is done. You cannot review before build is done. Edits are allowed only in build.
 
-`plan done` needs a task contract (or a recorded waiver). `build done` needs a passing `scripts/verify.sh` on the current files, where at least one check ran, and every acceptance command in the contract. `review done` needs an independent reviewer's approving findings for the current files and no change in a non-goal path. The same command failing the same way twice pauses the run. See "Gates that decide done" in `docs/setup.md`.
+`plan done` needs a task contract (or a recorded waiver). `build done` needs a passing `scripts/verify.sh` on the current files, where at least one check ran, and every acceptance command in the contract (a `make` target that only repeats that verify run's checks on the same files is counted from it). `review done` needs an independent reviewer's approving findings for the current files and no change in a non-goal path. The same command failing the same way twice pauses the run. See "Gates that decide done" in `docs/setup.md`.
 
 If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
 
@@ -86,9 +86,9 @@ scripts/codex_budget.py     App Server-owned Codex goal-token meter and active-t
 scripts/audit_emit.py       Best-effort route, outcome, and token telemetry bridge
 scripts/audit-service.sh    Runs the versioned Arc audit service
 scripts/jev-enable.sh       Enables JEV checkpoint collection, the model pin, and Arc telemetry for a shell
-scripts/jev_delegation.py   The persisted `harness jev on|off|status` switch: shadow comparison, or follow Jev
-scripts/context_advice.py   Jev checkpoints (file or flag form), outcome labels, pending list, and cohort/pilot reports
-scripts/phase_checkpoint.py Automatic shadow checkpoints and mechanical labels at phase gates, verify, review, and hooks
+scripts/jev_delegation.py   The persisted `harness jev on|off|status` switch: observe Jev, or follow it above the confidence threshold
+scripts/context_advice.py   Jev checkpoints (file or flag form) with the confidence gate; legacy label and cohort reports
+scripts/phase_checkpoint.py Session-start route and verify history; phase gates ask Jev nothing
 scripts/install-hooks.sh    Installs the auto-init and Jev hooks into Claude Code and Codex user settings
 scripts/harness-target.sh   Machine-local target registry: project root, register, lookup, per-target database, bootstrap fingerprint
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
@@ -152,7 +152,7 @@ The script detects common project tooling:
 
 It attempts formatter check, lint, typecheck, tests, and build, never running a formatter that rewrites files. Missing checks are reported as explicit skips. Each check, and each harness test file, is stopped after `HARNESS_VERIFY_TIMEOUT` seconds (default 1800) and fails with exit `124`, while the remaining checks still run. On the harness itself it also runs `tests/*.sh`, and every run writes a record to its session-owned records directory (legacy manual runs use `.harness-db/records/verify.state`).
 
-Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. When every file changed since the upstream base (`@{upstream}`, else `origin/HEAD`) is documentation, verification runs only format and lint, skips typecheck, test and build (mandatory ones included), and records `SCOPE=docs-only`. Without a base, with no changes, or with any non-doc path, the full run applies. `scripts/review.sh` runs verification, prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
+Projects can make a category mandatory with `.harness-required-checks` (or `HARNESS_REQUIRED_CHECKS`) containing `format`, `lint`, `typecheck`, `test`, and/or `build`. A mandatory category that runs no check fails verification. When every file changed since the upstream base (`@{upstream}`, else `origin/HEAD`) is documentation, verification runs only format and lint, skips typecheck, test and build (mandatory ones included), and records `SCOPE=docs-only`. Without a base, with no changes, or with any non-doc path, the full run applies. `scripts/review.sh` runs verification (or reuses a passing run of the same harness run on the same files), prints the target patch (and the harness patch for cross-project work), and writes `.harness-db/records/review.state` even when verification fails.
 
 ## Agent Entry Points
 
@@ -160,7 +160,7 @@ Projects can make a category mandatory with `.harness-required-checks` (or `HARN
 
 For scripted starts, `scripts/harness route --state TASK.json --project PATH` accepts only compact enum metadata and applies deterministic gates before optional TypeSafe routing. `scripts/harness launch --state TASK.json --project PATH --agent codex` selects an exact argv profile without invoking a shell. Whether Jev's route is followed is the persisted switch `scripts/harness jev on|off|status` (stored in `~/.config/harness/config.json`, outside every checkout): off, shadow mode preserves the default command and records the comparison; on, `route` and `launch` run in active mode and select the profile Jev recommends, after the deterministic gates. `--mode` on a single call overrides the switch, and `HARNESS_TYPESAFE_ROLLOUT_PERCENT=10`, then `25`, `50`, and `100`, stages the delegation.
 
-`scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option. With the switch on, a v2 checkpoint's `action` is Jev's choice (`delegated: true`) instead of the agent's baseline; the agent takes it unless a deterministic rule decides otherwise.
+`scripts/harness advise --context DECISION.json` is a separate, non-executing TypeSafe choice for a live, context-specific judgment. It rejects sensitive or oversized contexts, returns one supplied option with confidence, and writes a private record under `.harness-db/advice/`; it never authorizes work or runs the option. With the switch on, a v2 checkpoint's `action` is Jev's choice (`delegated: true`) when its confidence meets `typesafe.min_confidence` (default 0.70); the agent takes it unless a deterministic rule decides otherwise. Below the threshold, or with the switch off, the `action` is `normal_reasoning` and the main agent decides.
 
 Open `tools/auditability-planning-wizard.html` directly in a browser to plan the first Arc/JEV auditability slice. It stores answers in that browser, warns against raw prompts and secrets, and exports a Markdown brief plus structured JSON without network requests or a build step.
 
@@ -200,7 +200,7 @@ Project-related documents are local database records for the harness. Keep proje
 
 ## Jev decision checkpoints
 
-Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices, v2 batches from a file or from flags (`--family ...`), `--record`/`--label` for outcomes, `--pending` for unlabeled checkpoints, and `--report` for versioned cohorts plus the pilot counter, all without executing anything. `scripts/harness jev on|off|status` is the persisted switch between comparing Jev with the agent's baseline (shadow, the default) and following Jev's choice; shadow and delegated checkpoints report as separate cohorts (`shadow-1`, `delegated-1`). With `HARNESS_JEV_CHECKPOINTS=1` the phase gates, `verify.sh`, `review.sh`, and the installed hooks emit and label checkpoints automatically; those stay shadow observations in both modes because the gates they predict are mechanical. See `docs/setup.md`.
+Consider Jev at meaningful decision points using the [checkpoint workflow](docs/jev-checkpoints.md). `scripts/harness advise` supports v1 choices and v2 batches from a file or from flags (`--family ...`), without executing anything; `--record`, `--label`, `--pending` and `--report` remain for historical cohorts. Jev is asked first, with no agent baseline. `scripts/harness jev on|off|status` is the persisted switch between observing Jev (shadow, the default) and following its choice when its confidence meets the threshold; below it the main agent decides. The phase gates, `verify.sh`, `review.sh`, and the tool-repeat hook no longer ask Jev or label outcomes, because the gates are mechanical. See `docs/setup.md`.
 
 ## Semantic retrieval
 

@@ -2,10 +2,12 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import subprocess
 import uuid
 
 TERMINAL = {"completed", "removed"}
+SAFE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 STATUSES = {"pending", "in_progress", "completed", "blocked"}
 
 class TodoValidationError(ValueError):
@@ -32,9 +34,21 @@ def unresolved(context):
 
 def assert_plan(context, active=False):
     if context.get("confirmed_request") != context.get("request_seq", 0) or context.get("plan_mode") != "execution" or not context.get("todos"):
-        raise TodoValidationError("Register or confirm a complete todo plan for the current prompt: harness workflow todo plan --items JSON --reason SUMMARY")
+        # Name every way forward with a runnable command, so an agent does not guess.
+        steps = []
+        if context.get("todos") and context.get("plan_mode") == "execution":
+            steps.append("keep the current plan: harness workflow todo confirm --reason SUMMARY")
+        steps.append("""set a plan: harness workflow todo plan --items '[{"id":"fix","description":"What to do","criterion":"How done is shown"}]' --reason SUMMARY""")
+        steps.append("only reading or answering: harness workflow todo exempt --reason SUMMARY")
+        raise TodoValidationError("Register or confirm a complete todo plan for the current prompt. " + "; ".join(steps)
+                                  + " (each with the --session-id from the prompt notice)")
     if active and context.get("todos", {}).get(context.get("active_todo_id"), {}).get("status") != "in_progress":
-        raise TodoValidationError("Select an active todo: harness workflow todo update --id ID --status in_progress --reason SUMMARY")
+        # Only plain ids are echoed: the message must stay trusted text.
+        waiting = [key for key, item in context.get("todos", {}).items()
+                   if item["status"] in ("pending", "blocked") and SAFE_ID.fullmatch(key)]
+        target = waiting[0] if waiting else "ID"
+        raise TodoValidationError("Select an active todo" + (" (open: " + ", ".join(waiting) + ")" if waiting else "")
+                                  + ": harness workflow todo update --id " + target + " --status in_progress --reason SUMMARY")
 
 def parse_time(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else datetime.min.replace(tzinfo=timezone.utc)

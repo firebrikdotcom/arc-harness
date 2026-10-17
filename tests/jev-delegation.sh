@@ -39,7 +39,7 @@ esac
 [ ! -e "$SWITCH_FILE" ] || fail "status wrote the switch file"
 
 # 2. on persists a private file with the reason and pin; a new process reads it back.
-scripts/harness jev on --reason "pilot reviewed" >/dev/null
+scripts/harness jev on --reason "confidence gate" >/dev/null
 [ -f "$SWITCH_FILE" ] || fail "jev on wrote no switch file"
 mode=$(stat -c '%a' "$SWITCH_FILE" 2>/dev/null || stat -f '%Lp' "$SWITCH_FILE")
 [ "$mode" = "600" ] || fail "switch file mode is $mode, expected 600"
@@ -47,7 +47,7 @@ state=$(scripts/harness jev status --json)
 [ "$(field "$state" enabled)" = "true" ] || fail "switch not on: $state"
 [ "$(field "$state" source)" = "file" ] || fail "switch source is not the file: $state"
 [ "$(field "$state" model)" = "fixture" ] || fail "switch did not store the pin: $state"
-[ "$(field "$state" reason)" = "pilot reviewed" ] || fail "switch did not store the reason: $state"
+[ "$(field "$state" reason)" = "confidence gate" ] || fail "switch did not store the reason: $state"
 out=$(scripts/harness jev status)
 case "$out" in
   "Jev delegation: on (active mode, from file)"*) ;;
@@ -92,15 +92,17 @@ route=$(scripts/harness route --state "$TMP_ROOT/gated.json" --project "$TMP_ROO
 [ "$(field "$route" source)" = "deterministic" ] || fail "authorization was not deterministic: $route"
 [ "$(field "$route" recommendation)" = "ask_user" ] || fail "authorization did not stop at the user: $route"
 
-# 6. advise follows Jev's choice with the switch on and keeps the baseline off.
-advice=$(FAKE_ROUTER_CHOICE=retrieval scripts/harness advise --family tool_selection --baseline grep \
-  --goal "Locate the code for one task." --choice grep="A targeted grep." --choice retrieval="One semantic retrieval first.")
+# 6. advise follows a confident Jev with the switch on; below the threshold or off, the agent decides.
+ask() { scripts/harness advise --family tool_selection \
+  --goal "Locate the code for one task." --choice grep="A targeted grep." --choice retrieval="One semantic retrieval first."; }
+advice=$(FAKE_ROUTER_CHOICE=retrieval ask)
 [ "$(field "$advice" action)" = "retrieval" ] || fail "delegated advise did not return Jev's choice: $advice"
 [ "$(field "$advice" delegated)" = "true" ] || fail "delegated advise is not marked delegated: $advice"
-[ "$(field "$advice" baseline)" = "grep" ] || fail "delegated advise lost the baseline: $advice"
-advice=$(FAKE_ROUTER_CHOICE=retrieval HARNESS_JEV_DELEGATION=off scripts/harness advise --family tool_selection --baseline grep \
-  --goal "Locate the code for one task." --choice grep="A targeted grep." --choice retrieval="One semantic retrieval first.")
-[ "$(field "$advice" action)" = "grep" ] || fail "shadow advise did not keep the baseline: $advice"
+advice=$(FAKE_ROUTER_CHOICE=retrieval FAKE_ROUTER_CONFIDENCE=0.69 ask)
+[ "$(field "$advice" action)" = "normal_reasoning" ] || fail "low-confidence advise did not leave the choice to the agent: $advice"
+[ "$(field "$advice" escalation_reason)" = "low_confidence" ] || fail "low-confidence advise did not say why: $advice"
+advice=$(FAKE_ROUTER_CHOICE=retrieval HARNESS_JEV_DELEGATION=off ask)
+[ "$(field "$advice" action)" = "normal_reasoning" ] || fail "shadow advise did not leave the choice to the agent: $advice"
 [ "$(field "$advice" delegated)" = "false" ] || fail "shadow advise is marked delegated: $advice"
 
 # 7. The session-start route names the delegated route to follow.
@@ -112,17 +114,17 @@ git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid add AGENTS.md
 git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid commit -q -m init
 out=$(HARNESS_JEV_CHECKPOINTS=1 python3 scripts/phase_checkpoint.py session-start --project "$TARGET" --db-root "$HARNESS_DB_ROOT")
 case "$out" in
-  "Jev delegated route for this session: proceed (source typesafe, active; follow it unless a deterministic rule decides)."*) ;;
+  "Jev session route: proceed (confidence 0.9, minimum 0.7); follow it unless a deterministic rule decides.") ;;
   *) fail "unexpected delegated session line: $out" ;;
 esac
 out=$(HARNESS_JEV_CHECKPOINTS=1 HARNESS_JEV_DELEGATION=off python3 scripts/phase_checkpoint.py session-start --project "$TARGET" --db-root "$HARNESS_DB_ROOT")
 case "$out" in
-  "Jev shadow route for this session: proceed (source typesafe, shadow; existing rules decide)."*) ;;
+  "Jev session route observed in shadow mode, not followed: the main agent decides.") ;;
   *) fail "unexpected shadow session line: $out" ;;
 esac
 
 # 8. off persists too, and a corrupt file is refused rather than guessed.
-scripts/harness jev off --reason "pause the pilot" >/dev/null
+scripts/harness jev off --reason "observe only" >/dev/null
 [ "$(field "$(scripts/harness jev status --json)" enabled)" = "false" ] || fail "jev off did not persist"
 route=$(scripts/harness route --state "$TMP_ROOT/task.json" --project "$TMP_ROOT")
 [ "$(field "$route" routing_mode)" = "shadow" ] || fail "route still active after jev off: $route"

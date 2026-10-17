@@ -28,6 +28,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import jev_delegation  # noqa: E402
+import harness_config  # noqa: E402
 
 MAX_BYTES = 32_000
 MAX_OPTIONS = 8
@@ -196,13 +197,15 @@ def validate_context(raw: Any, router: Any) -> dict[str, Any]:
     if raw["version"] != 2 or set(raw) != {"version", "checkpoint", "context", "questions"}:
         raise InputError("v2 requires exactly version, checkpoint, context, and questions")
     checkpoint = raw["checkpoint"]
-    required = {"family", "question_version", "policy_version", "baseline_action", "bypass_reason"}
-    if not isinstance(checkpoint, dict) or not required <= set(checkpoint) or set(checkpoint) - required - {"state_build_ms"}:
+    required = {"family", "question_version", "policy_version", "bypass_reason"}
+    if not isinstance(checkpoint, dict) or not required <= set(checkpoint) or set(checkpoint) - required - {"state_build_ms", "baseline_action"}:
         raise InputError("invalid checkpoint fields")
     if checkpoint["family"] not in FAMILIES or checkpoint["bypass_reason"] not in BYPASSES:
         raise InputError("unknown checkpoint family or bypass_reason")
-    for key in ("question_version", "policy_version", "baseline_action"):
+    for key in ("question_version", "policy_version"):
         text_field(checkpoint[key], key)
+    if "baseline_action" in checkpoint:
+        text_field(checkpoint["baseline_action"], "baseline_action")
     if checkpoint.get("state_build_ms") is not None and not finite(checkpoint["state_build_ms"]):
         raise InputError("state_build_ms must be non-negative or null")
     context = raw["context"]
@@ -276,7 +279,6 @@ def quick_context(args: argparse.Namespace) -> dict[str, Any]:
             "family": args.family,
             "question_version": args.question_version,
             "policy_version": policy_version,
-            "baseline_action": args.baseline or "",
             "bypass_reason": args.bypass,
             "state_build_ms": None,
         },
@@ -388,13 +390,12 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
         "question_version": checkpoint.get("question_version", "legacy-v1"),
         "question_hash": hashlib.sha256(json.dumps(batch, sort_keys=True).encode()).hexdigest(),
         "policy_version": checkpoint.get("policy_version", "legacy-v1"),
-        "shadow": context["version"] == 2, "delegation": "active" if delegated else "shadow",
-        "delegated_action": None, "context": context, "questions": batch,
-        "baseline_action": checkpoint.get("baseline_action"), "state_build_ms": checkpoint.get("state_build_ms"),
+        "shadow": not delegated, "delegation": "active" if delegated else "shadow",
+        "delegated_action": None, "context": {**context, "checkpoint": {k: v for k, v in checkpoint.items() if k != "baseline_action"}}, "questions": batch, "state_build_ms": checkpoint.get("state_build_ms"),
         "model_requested": model, "model_returned": None, "usage": None, "latency_ms": None,
         "status": "pending", "fallback_reason": None, "answers": None,
     }
-    # Persist the baseline before evaluation; do not send it to Jev (avoids anchoring).
+    # Persist the request without an agent answer; provider facts never contain a baseline.
     write_record(record, db_root)
     bypass = checkpoint.get("bypass_reason", "none")
     began = time.monotonic()
@@ -408,7 +409,7 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
     else:
         try:
             response, meta = router.post_json(
-                router.api_url(), {"state": context["context"] if record["shadow"] else context,
+                router.api_url(), {"state": context["context"] if context["version"] == 2 else context,
                                    "model": model, "questions": batch},
                 router.resolve_api_key()[0], request_timeout(router), **request_options())
             if isinstance(response, dict):
@@ -430,23 +431,30 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
             # Exception text can echo credentials or provider content. Store only its type.
             record.update(status="fallback", fallback_reason=type(error).__name__, exit_code=1)
         record["evaluation_wall_ms"] = round((time.monotonic() - began) * 1000)
+    minimum = harness_config.load()["typesafe"].get("min_confidence", 0.70)
+    confidence = ((record["answers"] or {}).get("recommendation") or {}).get("confidence")
+    record.update(confidence=confidence, min_confidence=minimum)
+    if record["status"] == "evaluated" and (not finite(confidence, 0, 1) or confidence < minimum):
+        record.update(status="fallback", fallback_reason="missing_confidence" if confidence is None else "low_confidence", exit_code=1)
     chosen = None
     if delegated and record["status"] == "evaluated":
         chosen = ((record["answers"] or {}).get("recommendation") or {}).get("choice")
         record["delegated_action"] = chosen
+    record.update(needs_reasoning=chosen is None, escalation_reason=(record.get("fallback_reason") or ("shadow_mode" if not delegated else "no_recommendation")) if chosen is None else None)
     record_path = write_record(record, db_root)
     if bypass == "none":
         router.append_jsonl(router.requests_log_path(started), {k: v for k, v in record.items() if k != "context"})
         audit_emit("checkpoint", "--record", str(record_path))
     result = {k: record[k] for k in ("call_id", "status", "fallback_reason", "latency_ms", "answers", "shadow", "delegation")}
-    baseline = record["baseline_action"] if record["shadow"] else "normal_reasoning"
-    result.update(advisory=chosen is None, delegated=chosen is not None, baseline=baseline,
-                  action=chosen if chosen is not None else baseline, record_path=str(record_path))
+    result.update(advisory=chosen is None, delegated=chosen is not None,
+                  action=chosen if chosen is not None else "normal_reasoning", record_path=str(record_path),
+                  confidence=confidence, min_confidence=minimum, needs_reasoning=chosen is None,
+                  escalation_reason=record.get("fallback_reason") or ("shadow_mode" if not delegated else "no_recommendation") if chosen is None else None)
     if delegated and chosen is None:
         # The switch is on but there is nothing to follow: a bypass, a fallback, or no recommendation question.
         result["delegation_gate"] = record["status"] if record["status"] != "evaluated" else "no recommendation choice"
     # Keep the successful v1 CLI response compatible.
-    if not record["shadow"] and record["status"] == "evaluated":
+    if context["version"] == 1 and record["status"] == "evaluated":
         result.update(choice=record["answers"]["recommendation"]["choice"],
                       confidence=record["answers"]["recommendation"]["confidence"])
     return result
@@ -676,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--pending", action="store_true", help="list evaluated checkpoints without a label")
     mode.add_argument("--report", action="store_true", help="report local advice cohorts without API access")
     quick = parser.add_argument_group("flag-form checkpoint (with --family)")
-    quick.add_argument("--baseline", help="the action you intend to take before asking")
+    quick.add_argument("--baseline", help="deprecated optional historical baseline (not used for active decisions)")
     quick.add_argument("--goal", help="concise redacted goal")
     quick.add_argument("--question", help="instructions for the recommendation choice")
     quick.add_argument("--choice", action="append", metavar="ID=DESCRIPTION", help="one recommendation option; repeatable")

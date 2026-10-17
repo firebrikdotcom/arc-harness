@@ -193,6 +193,29 @@ class DispatcherTest(unittest.TestCase):
             run = self.create(self.worker(profiles=['scan', 'second']))
         self.assertEqual(d.status(run)['workers'][0]['profile_id'], 'scan')
 
+    def test_profile_follows_confident_jev_and_otherwise_the_main_agents_first_choice(self):
+        import decision_checkpoint
+        import workflow_audit
+        import harness_config
+        self.config['profiles']['second'] = dict(self.config['profiles']['scan'])
+        config = copy.deepcopy(harness_config.DEFAULTS)
+        config['typesafe']['mode'] = 'active'
+        config['dispatch'] = self.config
+        record = self.root / 'advice.json'
+        record.write_text('{}')
+        for confidence, expected in ((0.9, 'second'), (0.69, 'scan')):
+            answer = {'call_id': 'c', 'status': 'evaluated', 'latency_ms': 1, 'fallback_reason': None, 'confidence': confidence,
+                      'answers': {'recommendation': {'choice': 'second', 'confidence': confidence}}, 'record_path': str(record)}
+            with patch.dict(os.environ, {'HARNESS_DB_ROOT': str(self.root / f'db-{confidence}'), 'HARNESS_WORKFLOW_STATE': str(self.root / 'workflow.sqlite')}), \
+                 patch.object(d.harness_config, 'load', return_value=config), \
+                 patch.object(decision_checkpoint.advice, 'load_router', return_value=object()), \
+                 patch.object(decision_checkpoint.advice, 'validate_context'), \
+                 patch.object(decision_checkpoint.advice, 'advise', return_value=answer):
+                with workflow_audit.context_db() as db:
+                    workflow_audit.save(db, 'session', {'request_id': 'request-a', 'request_seq': 2, 'plan_revision': 1})
+                run = self.create(self.worker(profiles=['scan', 'second']))
+            self.assertEqual(d.status(run)['workers'][0]['profile_id'], expected, confidence)
+
     def test_concurrent_execute_acquires_one_atomic_launch_lease(self):
         report = {'status': 'completed', 'evidence': 'one real process', 'acceptance': [{'criterion': 'Evidence checked', 'passed': True, 'evidence': 'verified'}]}
         count = self.root / 'launch-count'

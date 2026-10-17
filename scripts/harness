@@ -957,7 +957,8 @@ require_contract() {
 
 run_contract_criteria() {
   info "Contract acceptance criteria:"
-  if ! contract_tool criteria "$(contract_file)" --project "$(run_target)"; then
+  # require_gate_record has already proved this verify record fresh and passing.
+  if ! contract_tool criteria "$(contract_file)" --project "$(run_target)" --verified "$RECORDS_DIR/verify.state"; then
     info "FAIL: cannot mark build done: an acceptance criterion failed."
     exit "$EXIT_PHASE"
   fi
@@ -1098,9 +1099,9 @@ cmd_review_submit() {
   info "Findings stored: $RECORDS_DIR/review-findings.json"
 }
 
-# --- Jev shadow checkpoints --------------------------------------------------
-# Phase gates emit shadow checkpoints only when HARNESS_JEV_CHECKPOINTS=1.
-# They observe; they never change a gate result or block a phase.
+# --- Jev phase notifications -------------------------------------------------
+# Phase gates notify phase_checkpoint.py only when HARNESS_JEV_CHECKPOINTS=1. The
+# gates are mechanical, so it asks Jev nothing; it never changes a gate result.
 
 jev_checkpoint() {
   [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ] || return 0

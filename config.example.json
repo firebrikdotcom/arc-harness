@@ -2,7 +2,7 @@
   "version": 1,
   "_doc": "Machine-wide runtime switches. No credentials. CLI and dashboard preserve other sections.",
   "typesafe": {
-    "_doc": "mode: off = no calls; shadow = compare only; active = follow decisions within existing rules.",
+    "_doc": "mode: off = no calls; shadow = observe advice, the agent decides; active = follow choices at or above min_confidence within existing rules.",
     "mode": "shadow",
     "model": "jev-1.13.0",
     "checkpoints": true,
@@ -10,7 +10,9 @@
     "_doc_enforce_decisions": "Require decision records at covered native execution seams; internal judgments use harness decision explicitly.",
     "decision_ttl_seconds": 300,
     "_doc_decision_ttl_seconds": "Reuse only unchanged decision states within this many seconds; consumed action receipts remain single-use.",
-    "_doc_checkpoints": "Enable automatic phase/session checkpoints; required checks always remain enforced."
+    "_doc_checkpoints": "Enable automatic phase/session checkpoints; required checks always remain enforced.",
+    "min_confidence": 0.7,
+    "_doc_min_confidence": "Accept Jev choices at or above this confidence; otherwise escalate to agent reasoning."
   },
   "dispatch": {
     "_doc": "Enable role-scoped dispatch. False keeps execution with the parent and prevents new worker launches.",

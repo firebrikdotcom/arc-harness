@@ -21,7 +21,7 @@ the route call itself.
 
 Browser pages (Arc UI host, same read model as the API):
 
-- `GET /` — audit workbench: a daily accuracy line (labeled checkpoint decisions by UTC day of the checkpoint), headline totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
+- `GET /` — audit workbench: a daily Jev confidence line (mean recorded recommendation confidence by client calendar day), event and checkpoint totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
 - `GET /events[?type=jev.checkpoint&limit=200]` — newest-first event log with a type filter
 - `GET /public/styles.css` — the dashboard stylesheet, embedded at build time
 
@@ -87,11 +87,16 @@ the grouped checkpoint and route summaries from `summary.rs` plus the newest
 events; `GET /events` lists the log. Both pages read `audit_events_view`
 through the same `ReadModelStore` as the JSON endpoints. There is no sign-in:
 the installed service binds to all IPv4 interfaces, and the framework's authenticated navigation is
-replaced by the host's own links. The accuracy chart at the top is inline
-SVG computed server-side by `summary::daily_checkpoint_accuracy` and
-`ui::accuracy_chart`, so it needs no JavaScript; its daily counts sum to the
-headline labeled and correct totals, and it pools families and question
-versions, so use the checkpoint table to compare cohorts. Open http://127.0.0.1:18080/ after
+replaced by the host's own links. The confidence chart at the top is inline
+SVG computed server-side by `summary::daily_checkpoint_confidence` and
+`ui::confidence_chart`, so it needs no JavaScript. It averages genuine
+`recommendation_confidence` values from checkpoints, accepting finite numbers
+from 0 through 1 (including zero). Confidence is Jev's self-reported certainty,
+not measured accuracy. Missing or invalid values remain unknown and days without
+samples break the line. Labels, outcomes and baseline agreement never affect the
+chart. Fixture filtering and the client's timezone apply before daily grouping.
+Historical labels and comparison APIs remain available for compatibility.
+Open http://127.0.0.1:18080/ after
 `scripts/audit-service.sh serve` (a restart rebuilds the binary).
 
 
@@ -157,7 +162,7 @@ Session details explain each event and provide search, type and result filters. 
 
 ### Browser timezone
 
-All displayed instants use the browser's current IANA timezone and locale. A session-only `audit_timezone` cookie shares that timezone with server-rendered calendar grouping and activity-date filters. An initial page load or timezone change refreshes the current URL once; filter/navigation state is retained. Daily accuracy and inclusive activity dates use the client's calendar, including historical daylight-saving offsets. Tool durations remain elapsed milliseconds. Stored event timestamps and API responses retain their original UTC/epoch representation. Without cookies, instants still localize but calendar grouping is hidden and date filters are disabled instead of presenting a different timezone. The service reuses the existing chrono and chrono-tz dependencies for calendar conversion.
+All displayed instants use the browser's current IANA timezone and locale. A session-only `audit_timezone` cookie shares that timezone with server-rendered calendar grouping and activity-date filters. An initial page load or timezone change refreshes the current URL once; filter/navigation state is retained. Daily confidence and inclusive activity dates use the client's calendar, including historical daylight-saving offsets. Tool durations remain elapsed milliseconds. Stored event timestamps and API responses retain their original UTC/epoch representation. Without cookies, instants still localize but calendar grouping is hidden and date filters are disabled instead of presenting a different timezone. The service reuses the existing chrono and chrono-tz dependencies for calendar conversion.
 
 
 ## Audited todo enforcement

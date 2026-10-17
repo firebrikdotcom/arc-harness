@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """The persisted on/off switch for delegating decisions to Jev.
 
-Off (the default), every Jev call runs in shadow mode: the agent's own baseline
-is recorded first, Jev answers, the baseline is what happens, and the two are
-compared later. On, the harness follows Jev where it has a lever: the task-entry
-route selects the launch profile, the session-start route is reported as the
-route to follow, and `harness advise` returns Jev's choice as the action.
-Deterministic gates (permissions, required checks, known failures, explicit user
-choices, irreversible work) decide before any call in either mode, and the
-phase-gate checkpoints stay observations because the gates they predict are
-mechanical.
+Active mode asks Jev first and follows valid recommendations meeting the configured
+confidence threshold. Low or unusable confidence requires normal agent reasoning.
+Shadow mode observes advice without requiring a prior baseline or accuracy labels.
+Deterministic rules, permissions, required checks and known failures decide first.
+Mechanical phase gates do not request predictions or automatic correctness labels.
 
 The switch lives outside every checkout, in one JSON file:
 `$HARNESS_CONFIG_HOME/config.json`, defaulting to
@@ -142,11 +138,11 @@ def describe(current: dict[str, Any]) -> str:
         lines.append(f"  changed: {current['changed_at']}" + (f" ({current['reason']})" if current["reason"] else ""))
     if current["enabled"]:
         lines.append("  effect: route and launch select Jev's profile, the session route is the one to follow,")
-        lines.append("          advise returns Jev's choice as the action. Deterministic gates still decide first.")
+        lines.append("          advise accepts choices meeting the confidence threshold; otherwise agent reasoning runs.")
     elif current["mode"] == "off":
         lines.append("  effect: TypeSafe calls are disabled; normal agent reasoning runs.")
     else:
-        lines.append("  effect: every Jev call is a shadow comparison; the agent's baseline is what runs.")
+        lines.append("  effect: Jev advice is observed; normal agent reasoning runs without accuracy comparison.")
     return "\n".join(lines)
 
 

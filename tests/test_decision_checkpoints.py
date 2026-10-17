@@ -30,7 +30,7 @@ class Decisions(unittest.TestCase):
         self.db.start()
         self.args = dict(project=self.root, session_id='session', family='tool_selection', goal='Choose next step',
                          facts=['A bounded choice remains'], choices={'execute': 'Execute', 'read': 'Read'},
-                         baseline='execute', scope={'request_id': 'r1', 'action_hash': 'abc'}, state={'revision': 1})
+                         scope={'request_id': 'r1', 'action_hash': 'abc'}, state={'revision': 1})
 
     def tearDown(self):
         self.db.stop()
@@ -43,7 +43,7 @@ class Decisions(unittest.TestCase):
         path = self.root / 'advice.json'
         path.write_text(json.dumps({'usage': {'input_tokens': 3}}))
         return dict(call_id='provider-id', status='evaluated', latency_ms=12, fallback_reason=None,
-                    answers={'recommendation': {'choice': 'read'}}, record_path=str(path))
+                    answers={'recommendation': {'choice': 'read', 'confidence': 0.9}}, confidence=0.9, record_path=str(path))
 
     def evaluate(self, **changes):
         with patch.object(decision.advice, 'load_router', return_value=object()), \
@@ -53,12 +53,98 @@ class Decisions(unittest.TestCase):
             return result, api.call_count
 
     def test_modes_and_deterministic_bypass(self):
-        for mode, action, count in [('off', 'execute', 0), ('shadow', 'execute', 1), ('active', 'read', 1)]:
+        for mode, action, count in [('off', 'normal_reasoning', 0), ('shadow', 'normal_reasoning', 1), ('active', 'read', 1)]:
             self.config['typesafe']['mode'] = mode
             row, calls = self.evaluate()
             self.assertEqual((row['action'], calls), (action, count))
-        row, calls = self.evaluate(bypass='required_check')
-        self.assertEqual((row['status'], row['action'], calls), ('bypassed', 'execute', 0))
+        # A deterministic bypass names its own action; nothing else uses a baseline.
+        row, calls = self.evaluate(bypass='required_check', baseline='execute')
+        self.assertEqual((row['status'], row['action'], row['action_source'], calls), ('bypassed', 'execute', 'deterministic', 0))
+
+    def jev(self, choice, confidence):
+        def provider(context, router, db, delegate):
+            result = self.provider(context, router, db, delegate)
+            result['answers']['recommendation'] = {'choice': choice, 'confidence': confidence}
+            result['confidence'] = confidence
+            return result
+        return patch.object(decision.advice, 'advise', side_effect=provider)
+
+    def test_confidence_threshold_decides_who_chooses(self):
+        with patch.object(decision.advice, 'load_router', return_value=object()), \
+             patch.object(decision.advice, 'validate_context'):
+            for confidence, action, needs in ((0.7, 'read', False), (0.69, 'normal_reasoning', True), (0.0, 'normal_reasoning', True)):
+                with self.jev('read', confidence):
+                    row = decision.evaluate(**{**self.args, 'state': {'revision': confidence}})
+                self.assertEqual((row['action'], row['needs_reasoning'], row['confidence']), (action, needs, confidence))
+                if needs:
+                    self.assertEqual((row['status'], row['escalation_reason']), ('fallback', 'low_confidence'))
+            self.config['typesafe']['min_confidence'] = 0.5
+            with self.jev('read', 0.6):
+                row = decision.evaluate(**{**self.args, 'state': {'revision': 'custom'}})
+            self.assertEqual((row['action'], row['action_source']), ('read', 'jev'))
+
+    def test_cache_prefers_a_resolved_receipt_over_open_escalations(self):
+        with patch.object(decision.advice, 'load_router', return_value=object()), \
+             patch.object(decision.advice, 'validate_context'), self.jev('read', 0.4) as api:
+            first = decision.evaluate(**self.args)
+            copies = [decision.evaluate(**self.args) for _ in range(3)]
+            self.assertEqual(api.call_count, 1)
+            self.assertTrue(all(row['needs_reasoning'] for row in [first, *copies]))
+            decision.resolve(project=self.root, identifier=copies[1]['id'], session_id='session', action='execute',
+                             reason='main agent decided', scope=self.args['scope'], state=self.args['state'])
+            for _ in range(5):
+                cached = decision.evaluate(**self.args)
+                self.assertEqual((cached['action'], cached['needs_reasoning'], cached['action_source']),
+                                 ('execute', False, 'agent_after_escalation'))
+            with self.assertRaisesRegex(ValueError, 'original bounded choices'):
+                decision.resolve(project=self.root, identifier=first['id'], session_id='session', action='delete',
+                                 reason='not offered')
+
+    def gate_payload(self):
+        return {'cwd': str(self.root), 'session_id': 'session', 'hook_event_name': 'PreToolUse',
+                'tool_name': 'Edit', 'tool_input': {'file_path': 'a'}}
+
+    def receipts(self):
+        return [json.loads(path.read_text()) for path in (self.root / 'decisions').glob('*.json')]
+
+    def test_gate_below_the_threshold_lets_the_main_agent_run_its_call(self):
+        self.context()
+        with patch.object(decision.advice, 'load_router', return_value=object()), \
+             patch.object(decision.advice, 'validate_context'), self.jev('gather_context', 0.69):
+            workflow_gate.authorize(self.gate_payload())
+        [receipt] = self.receipts()
+        self.assertEqual((receipt['status'], receipt['action'], receipt['action_source'], receipt['escalation_reason']),
+                         ('resolved', 'execute', 'agent_after_escalation', 'low_confidence'))
+        self.assertTrue(receipt['claimed_at'])
+
+    def test_gate_at_the_threshold_follows_jev(self):
+        self.context()
+        with patch.object(decision.advice, 'load_router', return_value=object()), \
+             patch.object(decision.advice, 'validate_context'), self.jev('gather_context', 0.7):
+            with self.assertRaisesRegex(ValueError, 'gather_context'):
+                workflow_gate.authorize(self.gate_payload())
+        with patch.object(decision.advice, 'load_router', return_value=object()), \
+             patch.object(decision.advice, 'validate_context'), self.jev('execute', 0.95):
+            workflow_gate.authorize({**self.gate_payload(), 'tool_input': {'file_path': 'b'}})
+        accepted = [r for r in self.receipts() if r['action_source'] == 'jev' and r['action'] == 'execute']
+        self.assertEqual(len(accepted), 1)
+        self.assertTrue(accepted[0]['claimed_at'])
+
+    def test_gate_runs_the_agent_call_when_jev_is_unavailable(self):
+        self.context()
+        with patch.object(decision.advice, 'load_router', side_effect=OSError):
+            workflow_gate.authorize(self.gate_payload())
+        [receipt] = self.receipts()
+        self.assertEqual((receipt['fallback_reason'], receipt['action'], receipt['status']), ('OSError', 'execute', 'resolved'))
+
+    def test_shadow_and_off_modes_leave_the_gate_to_the_main_agent(self):
+        for mode in ('shadow', 'off'):
+            self.config['typesafe']['mode'] = mode
+            self.context()
+            with patch.object(decision.advice, 'load_router', return_value=object()), \
+                 patch.object(decision.advice, 'validate_context'), self.jev('gather_context', 0.99):
+                workflow_gate.authorize({**self.gate_payload(), 'tool_input': {'file_path': mode}})
+        self.assertEqual({r['action'] for r in self.receipts()}, {'execute'})
 
     def test_exact_cache_state_and_scope(self):
         first, _ = self.evaluate()
@@ -99,7 +185,8 @@ class Decisions(unittest.TestCase):
             self.assertEqual(api.call_count, 1)
             self.assertEqual(row['status'], 'fallback')
             self.assertTrue(second['cache_hit'])
-            self.assertEqual(row['action'], 'execute')
+            self.assertEqual(row['action'], 'normal_reasoning')
+            self.assertTrue(row['needs_reasoning'])
 
     def test_current_prompt_invalidates_old_receipt(self):
         row, _ = self.evaluate()
@@ -273,6 +360,62 @@ class Decisions(unittest.TestCase):
         with patch.dict(sys.modules, role_dispatch=types.SimpleNamespace(session_has_plan=lambda *args: False)):
             with self.assertRaisesRegex(ValueError, 'Dispatch plan required'):
                 workflow_gate.decision_seam(payload, {'request_id': 'r1'})
+        # The denial carries the one-step main-only plan the gate lets through.
+        with patch.dict(sys.modules, role_dispatch=types.SimpleNamespace(session_has_plan=lambda *args: False)):
+            with self.assertRaises(ValueError) as denied:
+                workflow_gate.decision_seam(payload, {'request_id': 'r1'})
+        self.assertIn('dispatch create --session-id session --plan /dev/stdin', str(denied.exception))
+
+    def prompt(self, text):
+        import io
+        from contextlib import redirect_stdout
+        output = io.StringIO()
+        with redirect_stdout(output):
+            workflow_gate.authorize({'cwd': str(self.root), 'session_id': 'session', 'hook_event_name': 'UserPromptSubmit', 'prompt': text})
+        return output.getvalue()
+
+    def stored(self):
+        import workflow_audit
+        with workflow_audit.context_db() as db:
+            return workflow_audit.load(db, 'session')
+
+    NOTICE = ('<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n'
+              '<summary>Background command "Run tests" completed (exit code 0)</summary>\n</task-notification>')
+
+    def test_background_notice_keeps_the_current_prompt_and_its_plan(self):
+        self.config['typesafe']['enforce_decisions'] = False
+        self.context()
+        edit = {'cwd': str(self.root), 'session_id': 'session', 'hook_event_name': 'PreToolUse',
+                'tool_name': 'Edit', 'tool_input': {'file_path': 'a'}}
+        before = self.stored()
+        for notice in (self.NOTICE, '<system-reminder>note</system-reminder>\n' + self.NOTICE + '\n'):
+            output = self.prompt(notice)
+            self.assertIn('background notice', output)
+            self.assertNotIn('Dispatch policy', output)
+            after = self.stored()
+            self.assertEqual((after['request_id'], after['request_seq'], after['confirmed_request']),
+                             (before['request_id'], before['request_seq'], before['confirmed_request']))
+            workflow_gate.authorize(edit)
+        # Words from the person, even beside a notice, are a new prompt that needs its plan confirmed.
+        for text in ('continue', self.NOTICE + '\nnow fix the other test'):
+            self.assertIn('Todo gate: confirm', self.prompt(text))
+            self.assertNotEqual(self.stored()['request_id'], before['request_id'])
+            with self.assertRaisesRegex(ValueError, 'complete todo plan') as denied:
+                workflow_gate.authorize(edit)
+            self.assertIn('harness workflow todo confirm --reason', str(denied.exception))
+            self.assertIn('harness workflow todo exempt --reason', str(denied.exception))
+            self.context()
+            before = self.stored()
+
+    def test_select_active_todo_names_the_open_ids(self):
+        from workflow_todos import TodoValidationError, assert_plan
+        context = {'request_seq': 1, 'confirmed_request': 1, 'plan_mode': 'execution', 'active_todo_id': None,
+                   'todos': {'done': {'status': 'completed', 'required': True}, 'next': {'status': 'pending', 'required': True},
+                             'bad\x1bid': {'status': 'pending', 'required': True}}}
+        with self.assertRaises(TodoValidationError) as denied:
+            assert_plan(context, active=True)
+        self.assertIn('(open: next): harness workflow todo update --id next --status in_progress', str(denied.exception))
+        self.assertNotIn('\x1b', str(denied.exception))
 
 
 if __name__ == '__main__':
