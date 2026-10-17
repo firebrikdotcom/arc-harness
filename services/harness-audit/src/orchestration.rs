@@ -220,9 +220,124 @@ fn statuses(items: &[Value]) -> BTreeMap<String, usize> {
     }
     counts
 }
+
+fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value[key].as_str().filter(|s| !s.trim().is_empty())
+}
+
+/// Join compact session metadata to observed dispatch identities. Never infer
+/// parentage from a name, model, time interval or worker ID.
+pub fn diagram(summary: &Value, directory: &[Value], selected: Option<&str>) -> Value {
+    let mut sessions = BTreeMap::<String, Value>::new();
+    for key in ["runs", "workers", "decisions"] {
+        for item in summary[key].as_array().into_iter().flatten() {
+            let id = text(item, "parent_session_id").unwrap_or("");
+            sessions.entry(id.into()).or_insert_with(|| {
+                let metadata = directory.iter().find(|s| s["session_id"] == id);
+                let name = metadata
+                    .and_then(|s| {
+                        text(s, "session_name")
+                            .or_else(|| text(s, "herdr_tab"))
+                            .or_else(|| text(s, "label"))
+                    })
+                    .unwrap_or(if id.is_empty() {
+                        "Unlinked observations"
+                    } else {
+                        "Unnamed session"
+                    });
+                json!({"id":id, "name":name,"workflow_available":metadata.is_some(),
+                    "model":metadata.and_then(|s| text(s,"model")).unwrap_or("Unknown model"),
+                    "agent":metadata.and_then(|s| text(s,"agent")).unwrap_or("Unknown agent"),
+                    "status":metadata.and_then(|s| text(s,"status")).unwrap_or("unknown"),
+                    "last_at":metadata.and_then(|s| text(s,"last_at")).unwrap_or(""),
+                    "run_count":0,"worker_count":0,"decision_count":0})
+            });
+            let count = match key {
+                "runs" => "run_count",
+                "workers" => "worker_count",
+                _ => "decision_count",
+            };
+            let session = sessions.get_mut(id).unwrap();
+            session[count] = json!(session[count].as_u64().unwrap_or(0) + 1);
+        }
+    }
+    let mut sessions: Vec<Value> = sessions.into_values().collect();
+    sessions.sort_by(|a, b| {
+        b["last_at"]
+            .as_str()
+            .cmp(&a["last_at"].as_str())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    let chosen = selected.or_else(|| sessions.first().and_then(|s| s["id"].as_str()));
+    let session = sessions
+        .iter()
+        .find(|s| s["id"].as_str() == chosen)
+        .cloned();
+    let belongs = |item: &&Value| Some(text(item, "parent_session_id").unwrap_or("")) == chosen;
+    let workers: Vec<&Value> = summary["workers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(belongs)
+        .collect();
+    json!({"sessions":sessions,"session":session,
+        "children":workers.iter().take(200).collect::<Vec<_>>(),
+        "child_count":workers.len(),"hidden_children":workers.len().saturating_sub(200)})
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagram_joins_names_by_session_id_and_keeps_worker_run_scope() {
+        let rows = vec![
+            json!({"event_type":"orchestration.worker_started","payload":{"run_id":"a","worker_id":"inspect","parent_session_id":"s1","model":"worker-a"}}),
+            json!({"event_type":"orchestration.worker_started","payload":{"run_id":"b","worker_id":"inspect","parent_session_id":"s2","model":"worker-b"}}),
+            json!({"event_type":"orchestration.run_created","payload":{"run_id":"empty","parent_session_id":"s1"}}),
+            json!({"event_type":"orchestration.decision_evaluated","payload":{"decision_id":"d","parent_session_id":"s3"}}),
+            json!({"event_type":"orchestration.worker_failed","payload":{"run_id":"orphan","worker_id":"w"}}),
+        ];
+        let summary = summarize(&rows);
+        let directory = vec![
+            json!({"session_id":"s1","session_name":"Same name","model":"parent-a"}),
+            json!({"session_id":"s2","session_name":"Same name","model":"parent-b"}),
+        ];
+        let graph = diagram(&summary, &directory, Some("s1"));
+        assert_eq!(graph["sessions"].as_array().unwrap().len(), 4);
+        assert_eq!(graph["session"]["model"], "parent-a");
+        assert_eq!(graph["child_count"], 1);
+        assert_eq!(graph["children"][0]["model"], "worker-a");
+        assert_eq!(graph["children"][0]["run_id"], "a");
+        assert!(!graph["children"].to_string().contains("worker-b"));
+        assert!(diagram(&summary, &directory, Some("missing"))["session"].is_null());
+        let checkpoints = diagram(&summary, &directory, Some("s3"));
+        assert_eq!(checkpoints["child_count"], 0);
+        let orphan = diagram(&summary, &directory, Some(""));
+        assert_eq!(orphan["session"]["name"], "Unlinked observations");
+        assert_eq!(orphan["children"][0]["status"], "failed");
+    }
+
+    #[test]
+    fn diagram_does_not_invent_run_membership_for_workers_without_run_ids() {
+        let rows = vec![
+            json!({"event_type":"orchestration.worker_started","payload":{"parent_session_id":"s","worker_id":"a","model":"m"}}),
+            json!({"event_type":"orchestration.worker_started","payload":{"parent_session_id":"s","worker_id":"b","model":"m"}}),
+        ];
+        let graph = diagram(&summarize(&rows), &[], Some("s"));
+        assert_eq!(graph["child_count"], 2);
+        assert!(graph["children"][0]["run_id"].is_null());
+        assert!(graph["children"][1]["run_id"].is_null());
+    }
+
+    #[test]
+    fn diagram_bounds_rendered_nodes_without_losing_counts() {
+        let rows: Vec<Value> = (0..260).map(|i| json!({"event_type":"orchestration.worker_started","payload":{"run_id":"r","worker_id":format!("w{i}"),"parent_session_id":"s"}})).collect();
+        let graph = diagram(&summarize(&rows), &[], None);
+        assert_eq!(graph["session"]["worker_count"], 260);
+        assert_eq!(graph["child_count"], 260);
+        assert_eq!(graph["hidden_children"], 60);
+        assert_eq!(graph["children"].as_array().unwrap().len(), 200);
+    }
+
     #[test]
     fn extreme_timestamp_intervals_remain_unknown_without_panicking() {
         let rows = vec![

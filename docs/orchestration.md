@@ -150,10 +150,20 @@ options, model or mode requires a fresh decision.
 ## Measurement and dashboard
 
 Open `/orchestration` on the existing audit service, or query
-`/api/audit/orchestration`. The view merges lifecycle events into runs and
-workers and shows roles, providers, models, effort, status, queue/execution
-latency, context bytes, usage coverage, failures, decision overhead and cache
-hits. Concurrency is calculated only from measured complete intervals. Unknown
+`/api/audit/orchestration`. The page shows a direct parent-to-child diagram. The selector contains session
+names only and changing it immediately opens that session, with no submit button.
+The parent box shows its name and a small session-ID subtitle; each arrow branch
+ends at a compact child-model box. Expand a model box for recorded worker identity,
+status and measurements. Dispatch runs and decision checkpoints are not diagram
+nodes. Session details and the complete measurement API remain linked below.
+Names come from compact Workflow reports joined by exact session ID. Children
+are selected by their recorded parent ID; run IDs are not needed to draw that
+relationship, and identical models or worker names never merge separate jobs.
+Observations without parent IDs remain unlinked, without connecting arrows.
+The view draws up to 200 children and reports omitted counts. Missing child session
+IDs and measurements stay explicitly unknown in expanded details.
+The JSON API retains all aggregate records and measurements.
+ Concurrency is calculated only from measured complete intervals. Unknown
 usage/cost is distinct from zero. No speedup is claimed without a comparable
 measured baseline.
 

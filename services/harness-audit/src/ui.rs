@@ -479,20 +479,23 @@ async fn workbench(
 async fn orchestration_page(
     request: HttpRequest,
     session: Session,
+    query: web::Query<OrchestrationQuery>,
     store: web::Data<ReportStore>,
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
-    let mut summary = match read_report(store, |store| store.orchestration()).await {
+    let (summary, directory) = match read_report(store, |store| {
+        Ok((store.orchestration()?, store.sessions()?))
+    })
+    .await
+    {
         Ok(report) => report,
         Err(error) => return unavailable(error),
     };
-    // Bound rendered details while preserving full summary denominators.
-    for key in ["workers", "runs", "decisions", "worker_groups"] {
-        if let Some(items) = summary[key].as_array_mut() {
-            items.truncate(100);
-        }
-    }
     let mut context = Context::new();
+    context.insert(
+        "diagram",
+        &crate::orchestration::diagram(&summary, &directory, query.session_id.as_deref()),
+    );
     context.insert("orchestration", &summary);
     render(
         &registry,
@@ -503,6 +506,11 @@ async fn orchestration_page(
         context,
         vec![Breadcrumb::current("Orchestration")],
     )
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OrchestrationQuery {
+    session_id: Option<String>,
 }
 
 #[get("/events")]
@@ -2803,20 +2811,64 @@ mod tests {
             context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
             context.insert("admin_navigation", &Vec::<Value>::new());
             context.insert("admin_actions", &Vec::<Value>::new());
-            context.insert("orchestration", &crate::orchestration::summarize(&rows));
+            let summary = crate::orchestration::summarize(&rows);
+            context.insert("orchestration", &summary);
+            context.insert(
+                "diagram",
+                &crate::orchestration::diagram(&summary, &[], None),
+            );
             let html = registry_tera(&registry)
                 .render("audit/orchestration.html", &context)
                 .unwrap();
             assert!(html.contains("Orchestration"));
-            assert!(html.contains("unknown"));
             assert!(!html.contains("must not render"));
             if rows.is_empty() {
-                assert!(html.contains("No dispatch evidence"));
+                assert!(html.contains("No orchestration activity yet"));
             } else {
                 assert!(html.contains("review &lt;script&gt;"));
                 assert!(html.contains("failed"));
             }
         }
+    }
+
+    #[test]
+    fn orchestration_diagram_escapes_metadata_and_links_the_exact_session() {
+        let registry = UiRegistry::build(Some(&host()), &[contribution()])
+            .unwrap()
+            .unwrap();
+        let summary = crate::orchestration::summarize(&[
+            json!({"event_type":"orchestration.worker_started", "payload":{"run_id":"r", "worker_id":"w", "parent_session_id":"s&other=1", "model":"model <img>", "role":"build"}}),
+        ]);
+        let directory = vec![
+            json!({"session_id":"s&other=1", "session_name":"Session <script>", "model":"parent-model"}),
+        ];
+        let mut context = Context::new();
+        decorate(&mut context, "Orchestration");
+        for key in ["app_name", "environment", "csrf_token", "request_path"] {
+            context.insert(key, "x");
+        }
+        context.insert("breadcrumbs", &Vec::<Breadcrumb>::new());
+        context.insert("admin_navigation", &Vec::<Value>::new());
+        context.insert("admin_actions", &Vec::<Value>::new());
+        context.insert("orchestration", &summary);
+        context.insert(
+            "diagram",
+            &crate::orchestration::diagram(&summary, &directory, None),
+        );
+        let html = registry_tera(&registry)
+            .render("audit/orchestration.html", &context)
+            .unwrap();
+        assert!(html.contains("Session &lt;script&gt;"));
+        assert!(html.contains("model &lt;img&gt;"));
+        assert!(!html.contains("parent-model"));
+        assert!(html.contains(">Session &lt;script&gt;</option>"));
+        assert!(html.contains("onchange=\"this.form.requestSubmit()\""));
+        assert!(!html.contains("Show diagram"));
+        assert!(!html.contains("Dispatch run"));
+        assert!(html.contains("/workflow?session_id=s%26other%3D1"));
+        assert!(html.contains("Worker ID"));
+        assert!(!html.contains("Session <script>"));
+        assert!(!html.contains("model <img>"));
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly

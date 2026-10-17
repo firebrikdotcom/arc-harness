@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile.test
     volumes:
       - .:/app:ro
+      - ../../scripts:/scripts:ro
       - ${HOME}/.cargo/registry:/usr/local/cargo/registry:ro
       - target:/target
     environment:

@@ -461,3 +461,36 @@ details[open] > .row-summary::after { content:"\2212"; }
 }
 .tool-label { font:.8rem/1.45 var(--mono); padding:.3rem .5rem; background:var(--panel); border-left:3px solid var(--border-subtle); overflow-wrap:anywhere; }
 .tool-command { display:block; margin:.25rem 0 0; font:.78rem/1.45 var(--mono); padding:.3rem .5rem; background:var(--panel); border-left:3px solid var(--border-subtle); white-space:pre-wrap; overflow-wrap:anywhere; }
+/* Orchestration: a parent session branches directly to child models. */
+.orchestration-picker { display:flex; align-items:center; gap:.8rem; margin:0 0 1.5rem; max-width:40rem; }
+.orchestration-picker label { font-weight:650; }
+.orchestration-picker select { min-width:0; flex:1; padding:.7rem; border:1px solid var(--border); background:var(--raised); color:var(--ink); font:inherit; }
+.orchestration-map { padding:clamp(1rem,3vw,2rem); background:var(--panel); border:1px solid var(--border-subtle); }
+.orch-parent { display:inline-block; max-width:100%; padding:.9rem 1.1rem; background:var(--raised); border:1px solid var(--border); border-top:3px solid var(--primary); overflow-wrap:anywhere; }
+.orch-parent h2 { margin:0; font-size:1.1rem; line-height:1.4; }
+.orch-session-id { margin:.35rem 0 0; color:var(--ink-muted); font:.68rem/1.6 var(--mono); overflow-wrap:anywhere; }
+.orch-children { list-style:none; margin:0 0 0 1.25rem; padding:1.5rem 0 .1rem; max-width:34rem; }
+.orch-children > li { position:relative; margin:0; padding:0 0 1rem 2rem; border-left:1px solid var(--ink-muted); }
+.orch-children > li:last-child { border-left-color:transparent; }
+.orch-children > li:last-child::after { content:""; position:absolute; left:-1px; top:0; height:1.35rem; border-left:1px solid var(--ink-muted); }
+.orch-children > li::before { content:""; position:absolute; left:0; top:1.35rem; width:2rem; border-top:1px solid var(--ink-muted); }
+.orch-children::before { content:""; display:block; height:1.5rem; margin-top:-1.5rem; border-left:1px solid var(--ink-muted); }
+.orch-child { position:relative; width:fit-content; min-width:min(12rem,100%); max-width:100%; background:var(--raised); border:1px solid var(--border); overflow-wrap:anywhere; }
+.orch-child::before { content:""; position:absolute; top:calc(1.35rem - 4px); left:-6px; border-top:4px solid transparent; border-bottom:4px solid transparent; border-left:6px solid var(--ink-muted); }
+.orch-child summary { padding:.75rem 1rem; cursor:pointer; font-size:.95rem; font-weight:650; line-height:1.2rem; }
+.orch-child[data-failed] { border-color:var(--danger); }
+.orch-measurements { display:grid; grid-template-columns:auto minmax(0,1fr); gap:.55rem 1rem; font-size:.75rem; padding:.8rem 1rem; margin:0; border-top:1px solid var(--border-subtle); }
+.orch-measurements dt { color:var(--ink-muted); }
+.orch-measurements dd { margin:0; overflow-wrap:anywhere; }
+.orch-empty { margin:1rem 0 0; color:var(--ink-muted); font-size:.85rem; }
+.orch-footer { display:flex; flex-wrap:wrap; gap:1.5rem; margin-top:1rem; font-size:.75rem; color:var(--ink-muted); }
+.orch-children[data-unlinked] { margin-left:0; }
+.orch-children[data-unlinked] > li { border:0; padding-left:0; }
+.orch-children[data-unlinked]::before, .orch-children[data-unlinked] > li::before, .orch-children[data-unlinked] > li::after, .orch-children[data-unlinked] .orch-child::before { display:none; }
+@media(max-width:600px) {
+  .orchestration-picker { align-items:stretch; flex-direction:column; gap:.4rem; }
+  .orchestration-picker select { width:100%; }
+  .orch-children { margin-left:.75rem; }
+  .orch-children > li { padding-left:1.25rem; }
+  .orch-children > li::before { width:1.25rem; }
+}
