@@ -263,7 +263,7 @@ scripts/harness contract set task.json      # or: contract waive "<reason>", con
 scripts/harness review submit findings.json
 scripts/harness brief
 scripts/harness prune --keep 20 --dry-run
-scripts/harness sites doctor               # or: sites publish FILE ROUTE [NAME], sites list
+scripts/harness sites doctor               # or: sites publish PATH ROUTE [NAME], sites list
 ```
 
 ## Gates that decide done
@@ -578,22 +578,22 @@ It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to
 
 ### Publishing to Firebrik Sites
 
-Any agent session on the machine can publish or update a Firebrik Sites page through the harness:
+Any agent session on the machine can publish or update a Firebrik Sites page or static site through the harness:
 
 ```sh
 scripts/harness sites doctor                      # what publishing needs, and what is missing
-scripts/harness sites publish FILE ROUTE [NAME]   # create or update /{username}/ROUTE from FILE
+scripts/harness sites publish PATH ROUTE [NAME]   # create or update /{username}/ROUTE from PATH
 scripts/harness sites list                        # id, route and URL of every page the token sees
 scripts/install-sites-skill.sh [--home DIR]       # install the firebrik-sites skill for Claude Code and Codex
 ```
 
-`publish` looks the route up with the `list-pages` MCP tool, then calls `create-page` or `update-page` on `URL/mcp/sites` with `expected_bytes` and `expected_sha256`, so the server refuses a cut-off upload before writing. It succeeds (exit 0, `OK: <url>`) only when the receipt's `received_sha256` equals the local file's, the server read the stored file back (`verified`), and the live page answers 200 and contains the stored `tail_excerpt`. Server `warnings`, such as the sanitizer removing scripts, are printed as `WARN:` lines. The file is read from disk, so a model's output limit cannot truncate it.
+PATH is an `.html` file (published as `index.html`; an existing page keeps its other files), a `.zip` with `index.html` at its root or inside one top folder, or a folder with `index.html`, which `scripts/sites_manifest.py` zips without hidden files (`.git`, `.env`) and refuses when it holds a symlink. `publish` uploads it to the token-authenticated `POST URL/api/pages` endpoint (Firebrik Sites 0.1.3+), which stores it like a dashboard upload: scripts, forms and assets are kept, and the extension allowlist and size limits apply. It sends the upload's sha256, so the server refuses a cut-off upload before writing, then succeeds (exit 0, `OK: <url>`) only when the receipt's `received_sha256` matches, every local file appears in the receipt's `files` with the same sha256, and the live site answers 200 with the stored `index.html` tail and serves every non-HTML asset byte for byte (up to 25 assets). Server `warnings` are printed as `WARN:` lines. Files are read from disk, so a model's output limit cannot truncate them. `list` uses the MCP `list-pages` tool.
 
-When publishing cannot work, `doctor` (and `publish` before it sends anything) prints one `MISSING` line per problem with a `fix:` line: publishing turned off, a missing tool (`curl`, `jq`, `sha256sum`, `python3`), no token file, a token file readable by other users, an unreachable or failing endpoint (a 5xx is named as a server fault, which Cloudflare shows as "Scheduled Maintenance"), a rejected token with the server's reason, or a server that does not support `expected_sha256` (Sites before 0.1.2). Exit codes: 0 ok, 1 publish or verification failed, 2 usage, 3 setup missing.
+When publishing cannot work, `doctor` (and `publish` before it sends anything) prints one `MISSING` line per problem with a `fix:` line: publishing turned off, a missing tool (`curl`, `jq`, `sha256sum`, `python3`), no token file, a token file readable by other users, an unreachable or failing endpoint (a 5xx is named as a server fault, which Cloudflare shows as "Scheduled Maintenance"), a server without the upload endpoint, a rejected token with the server's reason, or a token without the `pages:write` ability. Doctor proves the token by posting an empty upload: `422` means accepted. Exit codes: 0 ok, 1 publish or verification failed, 2 usage, 3 setup missing.
 
 Settings are the `sites` section of `config.json`: `enabled`, `url` (https; http only for localhost) and `token_file` (absolute or `~/` path, default `~/.config/firebrik-sites/token`). The token is never stored there, never printed, and reaches `curl` through a 0600 header file rather than its argument list. `FIREBRIK_SITES_URL`, `FIREBRIK_SITES_TOKEN_FILE` and `FIREBRIK_SITES_TOKEN` override the settings for one shell. Create the token in the Sites dashboard (Settings, API tokens) and save it from your own terminal: `mkdir -p ~/.config/firebrik-sites && read -rs t && printf %s "$t" > ~/.config/firebrik-sites/token && chmod 600 ~/.config/firebrik-sites/token`.
 
-`scripts/install-sites-skill.sh` renders `skills/firebrik-sites/SKILL.md` with this checkout's absolute `scripts/harness` path into `~/.claude/skills/firebrik-sites/` and `~/.agents/skills/firebrik-sites/`; rerun it after moving the checkout. `tests/sites.sh` exercises every path against `tests/fake_sites.py` on localhost.
+`scripts/install-sites-skill.sh` renders `skills/firebrik-sites/SKILL.md` with this checkout's absolute `scripts/harness` path into `~/.claude/skills/firebrik-sites/` and `~/.agents/skills/firebrik-sites/`; rerun it after moving the checkout or changing the skill. `tests/sites.sh` exercises every path against `tests/fake_sites.py` on localhost.
 
 ## Agent Guide Block
 

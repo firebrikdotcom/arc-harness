@@ -75,7 +75,7 @@ usage() {
   info "  dispatch create|next|run|status|bind|complete|cancel  Role-scoped worker orchestration."
   info "  decision evaluate|consume|outcome|status  TypeSafe judgment lifecycle."
   info "  config show|init|update  Shared documented runtime toggles (config.json)."
-  info "  sites doctor|publish FILE ROUTE [NAME]|list"
+  info "  sites doctor|publish PATH ROUTE [NAME]|list"
   info "                       Publish or update a Firebrik Sites page with proof; doctor names what is missing."
   info "  jev on|off|status    The persisted delegation switch: off compares Jev with the agent's"
   info "                       baseline (shadow); on follows Jev where the harness has a lever."

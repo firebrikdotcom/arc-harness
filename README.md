@@ -105,7 +105,8 @@ scripts/required-tools.sh   Checks the tools in .harness-required-tools (init.sh
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
 scripts/jg.sh               Semantic retrieval through jevgrep (jg) with refusals, per-target opt-out, and compact private records
 scripts/install-jg-skill.sh Install the jevgrep skill plus harness guidance for Claude Code and Codex sessions (skills and global guides)
-scripts/sites.sh            `harness sites doctor|publish|list`: publish a Firebrik Sites page with a sha256 receipt and live check; doctor names what is missing
+scripts/sites.sh            `harness sites doctor|publish|list`: upload a Firebrik Sites page or site with sha256 receipts and live checks; doctor names what is missing
+scripts/sites_manifest.py   Zips a site folder and lists the sha256 of every file a publish should produce
 scripts/install-sites-skill.sh Install the firebrik-sites skill for Claude Code and Codex, pointing at this checkout
 skills/firebrik-sites/SKILL.md Source of that skill (`@HARNESS@` is replaced with the absolute harness command)
 scripts/permit.sh           Denylist check for commands and write paths
@@ -207,7 +208,7 @@ Consider Jev at meaningful decision points using the [checkpoint workflow](docs/
 
 ## Publishing to Firebrik Sites
 
-`scripts/harness sites publish FILE ROUTE [NAME]` creates or updates `/{username}/ROUTE` on Firebrik Sites from any directory and prints `OK: <url>` only after the server confirms the exact sha256 it received and stored and the live URL serves it. `scripts/harness sites doctor` lists each missing requirement (token, file permissions, endpoint health, server version, the config switch) with its fix, and `publish` prints the same list instead of failing vaguely. Settings live in the `sites` section of `config.json`; the API token lives only in its own 0600 file. `scripts/install-sites-skill.sh` installs the `firebrik-sites` skill so Claude Code and Codex sessions know the command. See [docs/setup.md](docs/setup.md#publishing-to-firebrik-sites).
+`scripts/harness sites publish PATH ROUTE [NAME]` creates or updates `/{username}/ROUTE` on Firebrik Sites from any directory, from an `.html` file, a `.zip`, or a folder (scripts and assets kept, as in a dashboard upload). It prints `OK: <url>` only after the server confirms the sha256 of the upload and of every stored file and the live site serves them. `scripts/harness sites doctor` lists each missing requirement (token, file permissions, endpoint health, server version, the token's publish ability, the config switch) with its fix, and `publish` prints the same list instead of failing vaguely. Settings live in the `sites` section of `config.json`; the API token lives only in its own 0600 file. `scripts/install-sites-skill.sh` installs the `firebrik-sites` skill so Claude Code and Codex sessions know the command. See [docs/setup.md](docs/setup.md#publishing-to-firebrik-sites).
 
 Audited todo plans are enforced by additive native hooks, independently of collection switches. See [todo enforcement](docs/setup.md#audited-todo-enforcement) for registration, revisions, evidence, completion gates, and runtime limitations.
 

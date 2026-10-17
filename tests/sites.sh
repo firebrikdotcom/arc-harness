@@ -78,7 +78,7 @@ start_server healthy
 run 3 doctor
 expect "MISSING  no API token: $TOKEN_FILE does not exist"
 expect "settings?tab=api-tokens"
-expect "ok       endpoint .*answers"
+expect "ok       upload endpoint .*answers"
 expect "NOT READY: 1 item"
 run 3 publish "$PAGE" hello
 expect "Cannot publish to"
@@ -98,19 +98,37 @@ expect "the server rejected the token: Invalid or expired API token"
 printf 'good-token' > "$TOKEN_FILE"
 refute "good-token"
 
-# Ready: create, then update the same route, both verified against the live page.
+# Ready: an HTML file with scripts is created, then updated, both checked live.
 run 0 doctor
-expect "ok       server verifies uploads"
+expect "ok       token accepted and allowed to publish"
 expect "READY"
+printf '<html><body><script>window.online = true;</script></body></html>\n' > "$PAGE"
 run 0 publish "$PAGE" hello "Hello page"
-expect "create-page hello"
+expect "hello: html, 1 file(s)"
 expect "OK: http://127.0.0.1:[0-9]*/testuser/hello"
+expect "created, 1 file(s) match sha256"
 printf '<html><body><p>Second version</p></body></html>\n' > "$PAGE"
 run 0 publish "$PAGE" hello
-expect "update-page hello"
-expect "OK: "
+expect "updated, 1 file(s) match sha256"
+
+# A folder is zipped (hidden files left out) and every asset is checked live.
+SITE="$TMP_ROOT/site"
+mkdir -p "$SITE/css" "$SITE/.git"
+printf '<html><head><link rel="stylesheet" href="css/style.css"></head><body><script src="app.js"></script></body></html>\n' > "$SITE/index.html"
+printf 'document.title = "ready";\n' > "$SITE/app.js"
+printf 'body { color: red; }\n' > "$SITE/css/style.css"
+printf 'secret\n' > "$SITE/.git/config"
+run 0 publish "$SITE" app
+expect "app: folder, 3 file(s)"
+expect "created, 3 file(s) match sha256"
+# A zip is uploaded as it is.
+(cd "$SITE" && python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1], "w"); [z.write(f) for f in ("index.html", "app.js", "css/style.css")]; z.close()' "$TMP_ROOT/site.zip")
+run 0 publish "$TMP_ROOT/site.zip" app
+expect "app: zip, 3 file(s)"
+expect "updated, 3 file(s) match sha256"
 run 0 list
 expect "hello"
+expect "app"
 refute "good-token"
 
 # The token never appears on a command line other processes can read.
@@ -120,17 +138,27 @@ grep -q "auth.header" "$TMP_ROOT/curl-argv.log" || fail "curl argv was not recor
 # Bad input is a usage error before any network call.
 run 2 publish "$TMP_ROOT/missing.html" hello
 run 2 publish "$PAGE" "Bad Route"
+mkdir -p "$TMP_ROOT/empty"
+run 2 publish "$TMP_ROOT/empty" hello
+expect "has no index.html"
+printf 'notes\n' > "$TMP_ROOT/notes.txt"
+run 2 publish "$TMP_ROOT/notes.txt" hello
 
 # A server that stores something else than it received fails the publish.
 start_server mangle
 run 1 publish "$PAGE" hello
-expect "the server received sha256"
+expect "the server's files differ from the local ones: index.html"
 
-# A server without upload verification is called out.
+# A token without the publish ability is named.
+start_server readonly
+run 3 doctor
+expect "pages:write"
+
+# A server without the upload endpoint is called out.
 start_server old
 run 3 doctor
-expect "does not verify uploads"
-expect "deploy Firebrik Sites 0.1.2 or newer"
+expect "has no upload endpoint"
+expect "deploy Firebrik Sites 0.1.3 or newer"
 
 # A failing server (Cloudflare's maintenance page) is named as a server fault.
 start_server broken
@@ -151,7 +179,7 @@ for agent in .claude .agents; do
   skill="$TMP_ROOT/home/$agent/skills/firebrik-sites/SKILL.md"
   [ -f "$skill" ] || fail "skill not installed for $agent"
   grep -q "^name: firebrik-sites$" "$skill" || fail "skill front matter missing for $agent"
-  grep -q "$HARNESS_ROOT_UNDER_TEST/scripts/harness sites publish FILE ROUTE" "$skill" || fail "skill does not name this harness for $agent"
+  grep -q "$HARNESS_ROOT_UNDER_TEST/scripts/harness sites publish PATH ROUTE" "$skill" || fail "skill does not name this harness for $agent"
   ! grep -q "@HARNESS@" "$skill" || fail "unrendered placeholder in $agent skill"
 done
 "$HARNESS_ROOT_UNDER_TEST/scripts/install-sites-skill.sh" --home "$TMP_ROOT/home" > "$OUT"
