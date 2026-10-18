@@ -27,6 +27,7 @@ from run_paths import records_dir  # noqa: E402
 import jev_delegation  # noqa: E402
 import harness_config
 import context_advice as advice
+from jev_usage import normalize_usage
 KINDS = {"change", "bug", "review", "research", "question", "ops"}
 AREAS = {"mobile", "frontend", "backend", "infrastructure", "docs", "other"}
 ACTIONS = {"start_routine_agent", "run_targeted_check", "start_deep_agent", "ask_for_missing_input"}
@@ -275,7 +276,7 @@ def invoke_router(state: dict[str, Any], router: Path, mode: str) -> tuple[dict[
                     "confidence": choice['confidence'], "reason": "bounded_task_route"},
                 "model": {"requested": pinned_model(), "returned": response.get('model'),
                           "drift": response.get('model') != pinned_model()},
-                "usage": response.get('usage'), "latency_ms": meta.get('latency_ms') if isinstance(meta, dict) else None}, None
+                "usage": normalize_usage(response, provider.api_url()), "latency_ms": meta.get('latency_ms') if isinstance(meta, dict) else None}, None
     except Exception as error:
         return None, "provider_error:" + type(error).__name__
 

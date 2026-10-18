@@ -455,6 +455,8 @@ async fn workbench(
     context.insert("confidence_chart", &chart);
     context.insert("checkpoints", &checkpoints);
     context.insert("routes", &routes);
+    context.insert("usage_labels", &json!({"input_tokens":"Input tokens", "output_tokens":"Output tokens", "tokens":"Total tokens", "cost_usd":"Cost · USD"}));
+    context.insert("usage", &grouped::usage_totals(&[&checkpoints, &routes]));
     context.insert("recent", &recent);
     context.insert("include_fixtures", &query.include_fixtures);
     let settings = match crate::settings::load() {
@@ -1941,6 +1943,24 @@ mod tests {
     }
 
     #[test]
+    fn workbench_shows_token_and_cost_coverage_and_preserves_zero() {
+        let html = render_workbench(&[
+            json!({"event_type":"jev.checkpoint","payload":{"jev_input_tokens":120,"jev_output_tokens":3,"jev_cost_usd":0.00000504,"jev_cost_source":"list_price_estimate"}}),
+            json!({"event_type":"jev.route","payload":{"jev_total_tokens":0,"jev_cost_usd":0,"jev_cost_source":"provider"}}),
+            json!({"event_type":"jev.route","payload":{}}),
+        ]);
+        assert!(html.contains("Jev tokens</span><strong>123</strong>"));
+        assert!(html.contains("$0.00000504"));
+        assert!(html.contains("2 / 3 calls measured"));
+        assert!(html.contains("1 provider-reported calls; 1 list-price estimates"));
+        assert!(html.contains("Input tokens"));
+        assert!(html.contains("Output tokens"));
+        let empty = render_workbench(&[]);
+        assert!(empty.contains("Jev tokens</span><strong>Unknown</strong>"));
+        assert!(empty.contains("Jev cost · USD</span><strong>Unknown</strong>"));
+    }
+
+    #[test]
     fn confidence_chart_breaks_the_line_on_days_without_samples() {
         let day = |day, samples, value| grouped::DailyConfidence {
             day,
@@ -1991,6 +2011,11 @@ mod tests {
         );
         context.insert("checkpoints", &checkpoints);
         context.insert("routes", &grouped::route_groups(rows, false));
+        context.insert("usage_labels", &json!({"input_tokens":"Input tokens", "output_tokens":"Output tokens", "tokens":"Total tokens", "cost_usd":"Cost · USD"}));
+        context.insert(
+            "usage",
+            &grouped::usage_totals(&[&checkpoints, &grouped::route_groups(rows, false)]),
+        );
         context.insert("recent", &rows.iter().map(event_row).collect::<Vec<_>>());
         context.insert("include_fixtures", &false);
         context.insert(

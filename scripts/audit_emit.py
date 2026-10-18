@@ -52,6 +52,12 @@ def route_payload(record: dict[str, Any]) -> dict[str, Any]:
         "jev_input_tokens": scalar(usage.get("input_tokens")),
         "jev_output_tokens": scalar(usage.get("output_tokens")),
         "jev_total_tokens": scalar(usage.get("total_tokens")),
+        "jev_cost_usd": scalar(usage.get("cost_usd")),
+        "jev_cost_source": scalar(usage.get("cost_source")),
+        "jev_price_version": scalar(usage.get("price_version")),
+        "jev_input_usd_per_million": scalar(usage.get("input_usd_per_million")),
+        "jev_output_usd_per_million": scalar(usage.get("output_usd_per_million")),
+        "recommendation_confidence": scalar(record.get("confidence")),
         "jev_latency_ms": scalar(record.get("latency_ms")),
     }
 
@@ -140,6 +146,11 @@ def checkpoint_payload(record: dict[str, Any]) -> dict[str, Any]:
         "jev_input_tokens": scalar(usage.get("input_tokens")),
         "jev_output_tokens": scalar(usage.get("output_tokens")),
         "jev_total_tokens": scalar(usage.get("total_tokens")),
+        "jev_cost_usd": scalar(usage.get("cost_usd")),
+        "jev_cost_source": scalar(usage.get("cost_source")),
+        "jev_price_version": scalar(usage.get("price_version")),
+        "jev_input_usd_per_million": scalar(usage.get("input_usd_per_million")),
+        "jev_output_usd_per_million": scalar(usage.get("output_usd_per_million")),
         "jev_latency_ms": scalar(record.get("latency_ms")),
         "state_build_ms": scalar(record.get("state_build_ms")),
     }

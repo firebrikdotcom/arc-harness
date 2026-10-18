@@ -7,7 +7,8 @@
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-const FIXTURE_MODEL: &str = "fixture";
+// The task-routing regression suite also historically used this synthetic pin.
+const FIXTURE_MODELS: &[&str] = &["fixture", "jev-9.9.9"];
 const TOP_PAIRS: usize = 5;
 
 type GroupKey = Vec<Option<String>>;
@@ -28,6 +29,96 @@ struct Group {
     token_samples: usize,
     token_overflowed: bool,
     token_overflowed_samples: usize,
+    usage: Usage,
+}
+
+/// Each measurement has its own coverage; absent values never become measured zero.
+#[derive(Default)]
+struct Usage {
+    input: Vec<i64>,
+    output: Vec<i64>,
+    costs: Vec<f64>,
+    estimated: usize,
+    reported: usize,
+}
+
+impl Usage {
+    fn record(&mut self, p: &Map<String, Value>) {
+        for (key, values) in [
+            ("jev_input_tokens", &mut self.input),
+            ("jev_output_tokens", &mut self.output),
+        ] {
+            if let Some(n) = p.get(key).and_then(Value::as_i64).filter(|n| *n >= 0) {
+                values.push(n);
+            }
+        }
+        if let Some(n) = p
+            .get("jev_cost_usd")
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && *n >= 0.0)
+        {
+            self.costs.push(n);
+            match p.get("jev_cost_source").and_then(Value::as_str) {
+                Some("list_price_estimate") => self.estimated += 1,
+                Some("provider") => self.reported += 1,
+                _ => {}
+            }
+        }
+    }
+
+    fn render(&self) -> Value {
+        let tokens = |values: &[i64]| {
+            json!({
+                "total": if values.is_empty() { None } else { values.iter().try_fold(0_i64, |a, b| a.checked_add(*b)) },
+                "samples": values.len(),
+            })
+        };
+        let cost = self.costs.iter().sum::<f64>();
+        json!({"input_tokens": tokens(&self.input), "output_tokens": tokens(&self.output),
+            "cost_usd": {"total": if self.costs.is_empty() || !cost.is_finite() { None } else { Some(cost) },
+                "samples": self.costs.len(), "estimated_samples": self.estimated, "provider_samples": self.reported}})
+    }
+}
+
+/// Combine only call reports, never orchestration mirrors or outcome events.
+pub fn usage_totals(reports: &[&Value]) -> Value {
+    let groups: Vec<&Value> = reports
+        .iter()
+        .flat_map(|r| r["groups"].as_array().into_iter().flatten())
+        .collect();
+    let population: u64 = groups.iter().filter_map(|g| g["count"].as_u64()).sum();
+    let mut result = json!({"calls": population});
+    for key in ["tokens", "input_tokens", "output_tokens", "cost_usd"] {
+        let samples: u64 = groups
+            .iter()
+            .filter_map(|g| g[key]["samples"].as_u64())
+            .sum();
+        let mut value = json!({"samples": samples, "total": null});
+        if key == "cost_usd" {
+            let total = groups
+                .iter()
+                .filter(|g| g[key]["samples"].as_u64().unwrap_or(0) > 0)
+                .try_fold(0.0, |a, g| g[key]["total"].as_f64().map(|b| a + b));
+            if samples > 0 {
+                value["total"] = json!(total.filter(|n| n.is_finite()));
+            }
+            for source in ["estimated_samples", "provider_samples"] {
+                value[source] = json!(groups
+                    .iter()
+                    .filter_map(|g| g[key][source].as_u64())
+                    .sum::<u64>());
+            }
+        } else if samples > 0 {
+            value["total"] = json!(groups
+                .iter()
+                .filter(|g| g[key]["samples"].as_u64().unwrap_or(0) > 0)
+                .try_fold(0_i64, |a, g| g[key]["total"]
+                    .as_i64()
+                    .and_then(|b| a.checked_add(b))));
+        }
+        result[key] = value;
+    }
+    result
 }
 
 #[derive(Clone, Copy)]
@@ -87,9 +178,12 @@ fn text(payload: &Map<String, Value>, key: &str) -> Option<String> {
 }
 
 fn is_fixture(payload: &Map<String, Value>) -> bool {
-    ["model_requested", "model_returned"]
-        .iter()
-        .any(|key| payload.get(*key).and_then(Value::as_str) == Some(FIXTURE_MODEL))
+    ["model_requested", "model_returned"].iter().any(|key| {
+        payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|model| FIXTURE_MODELS.contains(&model))
+    })
 }
 
 fn median(values: &mut [f64]) -> Option<f64> {
@@ -111,13 +205,25 @@ fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
 
 /// Missing measurements remain distinct from measured, unrepresentable totals.
 fn total_tokens(payload: &Map<String, Value>) -> Result<Option<i64>, ()> {
-    if let Some(total) = payload.get("jev_total_tokens").and_then(Value::as_i64) {
+    if let Some(total) = payload
+        .get("jev_total_tokens")
+        .and_then(Value::as_i64)
+        .filter(|n| *n >= 0)
+    {
         return Ok(Some(total));
     }
-    let Some(input) = payload.get("jev_input_tokens").and_then(Value::as_i64) else {
+    let Some(input) = payload
+        .get("jev_input_tokens")
+        .and_then(Value::as_i64)
+        .filter(|n| *n >= 0)
+    else {
         return Ok(None);
     };
-    let Some(output) = payload.get("jev_output_tokens").and_then(Value::as_i64) else {
+    let Some(output) = payload
+        .get("jev_output_tokens")
+        .and_then(Value::as_i64)
+        .filter(|n| *n >= 0)
+    else {
         return Ok(None);
     };
     input.checked_add(output).map(Some).ok_or(())
@@ -186,6 +292,7 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
             .collect();
         let group = groups.entry(key).or_default();
         group.count += 1;
+        group.usage.record(payload);
 
         let recommendation = text(payload, kind.recommendation_field());
         if let Some(recommendation) = &recommendation {
@@ -278,6 +385,9 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
             tokens["overflowed_samples"] = json!(group.token_overflowed_samples);
         }
         entry.insert("tokens".into(), tokens);
+        for (key, value) in group.usage.render().as_object().unwrap() {
+            entry.insert(key.clone(), value.clone());
+        }
         rendered.push(Value::Object(entry));
     }
     json!({
@@ -393,6 +503,49 @@ pub fn daily_checkpoint_accuracy(rows: &[Value], include_fixtures: bool) -> Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_counts_calls_once_and_keeps_partial_zero_and_overflow_measurements() {
+        let rows = vec![
+            json!({"event_type":"jev.checkpoint","payload":{"family":"a","jev_input_tokens":10,"jev_output_tokens":2,"jev_cost_usd":0.00000042,"jev_cost_source":"list_price_estimate"}}),
+            json!({"event_type":"jev.route","payload":{"jev_total_tokens":0,"jev_input_tokens":0,"jev_output_tokens":0,"jev_cost_usd":0,"jev_cost_source":"provider"}}),
+            json!({"event_type":"jev.route","payload":{}}),
+            json!({"event_type":"jev.checkpoint_outcome","payload":{"jev_total_tokens":999}}),
+            json!({"event_type":"orchestration.decision_evaluated","payload":{"total_tokens":999,"cost_usd":99}}),
+            json!({"event_type":"jev.checkpoint","payload":{"model_requested":"fixture","jev_total_tokens":999}}),
+            json!({"event_type":"jev.route","payload":{"model_returned":"jev-9.9.9","jev_total_tokens":999,"jev_cost_usd":0.0005}}),
+        ];
+        let checkpoints = super::checkpoint_groups(&rows, false);
+        let routes = super::route_groups(&rows, false);
+        let totals = super::usage_totals(&[&checkpoints, &routes]);
+        assert_eq!(totals["calls"], 3);
+        assert_eq!(totals["tokens"]["total"], 12);
+        assert_eq!(totals["tokens"]["samples"], 2);
+        assert_eq!(totals["input_tokens"]["total"], 10);
+        assert_eq!(totals["output_tokens"]["total"], 2);
+        assert_eq!(totals["cost_usd"]["samples"], 2);
+        assert_eq!(totals["cost_usd"]["estimated_samples"], 1);
+        assert_eq!(totals["cost_usd"]["provider_samples"], 1);
+        assert_eq!(totals["cost_usd"]["total"], 0.00000042);
+        let missing = super::usage_totals(&[&super::route_groups(&[rows[2].clone()], false)]);
+        assert!(missing["tokens"]["total"].is_null());
+        assert!(missing["cost_usd"]["total"].is_null());
+        let overflow = super::route_groups(
+            &[
+                json!({"event_type":"jev.route","payload":{"jev_total_tokens":i64::MAX}}),
+                json!({"event_type":"jev.route","payload":{"jev_total_tokens":1}}),
+            ],
+            false,
+        );
+        assert!(super::usage_totals(&[&overflow])["tokens"]["total"].is_null());
+        let invalid = super::route_groups(
+            &[
+                json!({"event_type":"jev.route","payload":{"jev_total_tokens":-1,"jev_input_tokens":true,"jev_cost_usd":-1}}),
+            ],
+            false,
+        );
+        assert_eq!(invalid["groups"][0]["tokens"]["samples"], 0);
+        assert!(invalid["groups"][0]["cost_usd"]["total"].is_null());
+    }
     use super::*;
 
     fn event(event_type: &str, at: i64, payload: Value) -> Value {
@@ -696,7 +849,7 @@ mod tests {
                 event(kind, 1, json!({"jev_total_tokens": i64::MAX})),
                 event(kind, 2, json!({"jev_total_tokens": 1})),
                 // A later sample cannot turn an overflowed total into a known one.
-                event(kind, 3, json!({"jev_total_tokens": -1})),
+                event(kind, 3, json!({"jev_total_tokens": 0})),
             ];
             assert_eq!(
                 only_group(&report(&group_rows))["tokens"],

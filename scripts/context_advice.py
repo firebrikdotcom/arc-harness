@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import jev_delegation  # noqa: E402
 import harness_config  # noqa: E402
+from jev_usage import normalize_usage  # noqa: E402
 
 MAX_BYTES = 32_000
 MAX_OPTIONS = 8
@@ -415,10 +416,7 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
             if isinstance(response, dict):
                 returned = response.get("model")
                 record["model_returned"] = returned if isinstance(returned, str) else None
-                usage = response.get("usage")
-                if isinstance(usage, dict):
-                    record["usage"] = {k: v for k, v in usage.items()
-                                       if k in {"input_tokens", "output_tokens", "total_tokens"} and type(v) is int and v >= 0} or None
+                record["usage"] = normalize_usage(response, router.api_url())
             if isinstance(meta, dict):
                 record["latency_ms"] = meta.get("latency_ms") if finite(meta.get("latency_ms")) else None
             record["answers"] = validated_answers(batch, response)

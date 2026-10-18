@@ -160,7 +160,7 @@ class ContextAdviceTests(unittest.TestCase):
 
     def batch_router(self, response=None):
         router = FakeRouter()
-        expected = response or {"model": "fixture", "usage": {"input_tokens": 10, "output_tokens": 3}, "answers": {
+        expected = response or {"model": "fixture", "usage": {"input_tokens": 10, "output_tokens": 3, "cost_usd": 0.0004}, "answers": {
             "recommendation": {"choice": "trace", "confidence": .8, "probabilities": {"inspect": .1, "trace": .9}},
             "impact": {"score": .4, "confidence": .2, "probabilities": {"0": .6, "1": .4}},
             "sufficient": {"noul": .05},
@@ -193,6 +193,9 @@ class ContextAdviceTests(unittest.TestCase):
         record = json.loads(Path(result["record_path"]).read_text())
         self.assertEqual(record["model_returned"], "fixture")
         self.assertEqual(record["usage"]["input_tokens"], 10)
+        self.assertEqual(record["usage"]["total_tokens"], 13)
+        self.assertEqual(record["usage"]["cost_usd"], 0.0004)
+        self.assertEqual(record["usage"]["cost_source"], "provider")
 
     def test_delegated_checkpoint_returns_jev_choice_as_the_action(self):
         router = self.batch_router()

@@ -134,6 +134,9 @@ cmd_lookup() {
   _dir=$(absolute_dir "$1") || return 1
   [ -d "$TARGETS_DIR" ] || return 1
   while :; do
+    # The control-plane checkout owns its base database. Never inherit a
+    # registered ancestor (for example a user's workspace directory).
+    [ "$_dir" != "$HARNESS_ROOT" ] || return 1
     _candidate=$TARGETS_DIR/$(target_id "$_dir")
     if [ -f "$_candidate/target.state" ] && [ "$(state_value "$_candidate/target.state" TARGET_ROOT)" = "$_dir" ]; then
       printf '%s\n' "$_candidate"

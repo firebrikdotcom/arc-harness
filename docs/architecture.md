@@ -148,3 +148,12 @@ event queries instead of loading all audit history. WAL permits concurrent reads
 unchanged catch-up checks do not acquire a write lock. Arc's aggregate runtime
 retains a startup stream read but no longer rewrites the historical projector.
 See `services/harness-audit/README.md` for restart and rebuild semantics.
+
+- `scripts/jev_usage.py` normalizes compact provider token/cost measurements for
+  both dynamic advice and task-entry routing. It snapshots a dated, model-specific
+  list-price estimate only for direct TypeSafe requests lacking provider USD cost.
+  `audit_emit.py` forwards measurements and pricing provenance; grouped service
+  reports aggregate checkpoint/route calls and expose independent coverage for
+  each token and cost measurement without adding orchestration mirrors again.
+- `scripts/harness-target.sh` stops ancestor lookup at the control-plane root,
+  keeping its own run and evidence database separate from registered workspaces.

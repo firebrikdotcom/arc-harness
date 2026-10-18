@@ -805,3 +805,18 @@ No credential or environment change is needed. Source events and the legacy
 audit view are preserved. Report schema changes rebuild only derived reports.
 See [incremental dashboard reports](../services/harness-audit/README.md#incremental-dashboard-reports)
 for consistency guarantees, remaining Arc startup reads and performance checks.
+
+### Workbench usage and cost collection
+
+The Jev collection switch includes confidence, input/output/total tokens and USD
+costs. Workbench shows measured-call coverage; missing values remain unknown.
+Direct TypeSafe calls for supported returned model versions receive a dated
+list-price estimate when no provider USD amount is supplied. Other models and
+endpoints stay unpriced. See
+[service cost collection](../services/harness-audit/README.md#jev-tokens-and-costs)
+for rate provenance, exclusions and Docker regression commands. Restart the
+installed service after updating: `systemctl --user restart harness-audit.service`.
+
+The harness checkout uses its base `.harness-db` even when its parent workspace
+is registered as a target. Subdirectories of the control plane stop target lookup
+at the harness root; other projects still use their nearest registered ancestor.

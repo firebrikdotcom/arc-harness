@@ -39,7 +39,7 @@ def post_json(url, payload, key, timeout, **options):
     choice = os.environ.get('FAKE_RECOMMENDATION', 'proceed')
     confidence = float(os.environ.get('FAKE_CONFIDENCE', '0.9'))
     return ({'answers': {'recommendation': {'type': 'choice', 'choice': choice, 'confidence': confidence}},
-             'model': os.environ.get('FAKE_MODEL', payload['model']), 'usage': {'input_tokens': 12, 'output_tokens': 2}},
+             'model': os.environ.get('FAKE_MODEL', payload['model']), 'usage': {'input_tokens': 12, 'output_tokens': 2, 'cost_usd': 0.0005}},
             {'latency_ms': 5})
 '''
 
@@ -66,6 +66,8 @@ class TaskRoutingTests(unittest.TestCase):
                     "HARNESS_AUDIT_ENABLED", "HARNESS_AUDIT_URL", "HARNESS_JEV_DELEGATION",
                     "HARNESS_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
             self.env.pop(key, None)
+        # Tests with a version-shaped fixture pin must not emit into a live service.
+        self.env["HARNESS_AUDIT_ENABLED"] = "0"
 
     def switch(self, action: str, *extra: str, env: dict | None = None) -> dict:
         return json.loads(self.run_cli("jev", action, "--json", *extra, env=env).stdout)
@@ -126,6 +128,9 @@ class TaskRoutingTests(unittest.TestCase):
         stored = Path(record["record_path"])
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(record["usage"]["total_tokens"], 14)
+        self.assertEqual(record["usage"]["cost_usd"], 0.0005)
+        self.assertEqual(record["usage"]["cost_source"], "provider")
 
     def write_run(self, run_id: str, status: str, loops: int, events: list[str]) -> None:
         run = self.db / "runs" / run_id

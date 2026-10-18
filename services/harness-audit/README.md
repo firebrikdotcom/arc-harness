@@ -63,7 +63,7 @@ outcome (joined from `jev.outcome`), accuracy, latency and token fields, and
 `recommendations` holding the `observed_recommendation` distribution.
 
 Regression-test fixtures (`model_requested` or `model_returned` equal to
-`fixture`) are excluded by default and reported in `excluded_fixture_events`;
+`fixture` or the historical task-routing fixture pin `jev-9.9.9`) are excluded by default and reported in `excluded_fixture_events`;
 pass `include_fixtures=true` to keep them.
 
 ```sh
@@ -235,3 +235,33 @@ first report backfill took 60.6 seconds, and the subsequent checkpoint restart
 was ready in 4.67 seconds. Five concurrent page/API reads returned HTTP 200
 in 7–410 ms. A SHA-256 comparison confirmed all 60,944 original event IDs and
 payloads remained unchanged. These are observed samples, not latency guarantees.
+
+## Jev tokens and costs
+
+Workbench keeps the confidence chart and adds input, output and total tokens,
+USD costs, and measured-call coverage across checkpoint and task-entry calls.
+Orchestration mirrors, outcomes and cached decision receipts are not added again.
+Fixture filtering applies to both tables and totals, including the historical
+synthetic task-routing pin `jev-9.9.9`. Routing tests disable telemetry explicitly. Missing measurements are
+unknown, measured zero is valid, and a partial total is labelled by its coverage.
+Grouped checkpoint and route APIs also expose `input_tokens`, `output_tokens`
+and `cost_usd`, each with `total` and `samples`; costs include
+`provider_samples` and `estimated_samples`.
+
+`scripts/jev_usage.py` normalizes provider usage before it is saved and emitted.
+Explicit `usage.cost_usd` takes precedence and is marked `provider`. Otherwise,
+only direct HTTPS TypeSafe calls with a returned `jev-1.13.0` or `jev-1.14.0`
+and measured input tokens get a `list_price_estimate`: $0.042 per million input
+tokens, free output ([official models page](https://docs.typesafe.ai/models),
+checked 2026-10-17). The event saves the USD amount, source, rate and dated price
+version. Unknown models, unresolved aliases, other endpoints and absent input
+usage are not priced. These are inference estimates, not invoices; account
+credits, discounts, unobserved retry charges and downstream agent costs are not
+included. Historical events are preserved and are not repriced retrospectively.
+
+After updating, `systemctl --user restart harness-audit.service` rebuilds the
+installed service. Embedded templates require that rebuild. The derived report
+schema rebuilds automatically from original events; never delete source history.
+Run `sh tests/jev-usage.sh`, `sh tests/task-routing.sh`, and
+`docker compose -f services/harness-audit/compose.test.yml run --rm tests` from
+the repository root to check normalization, producer integration and rendering.
