@@ -197,6 +197,17 @@ class ContextAdviceTests(unittest.TestCase):
         self.assertEqual(record["usage"]["cost_usd"], 0.0004)
         self.assertEqual(record["usage"]["cost_source"], "provider")
 
+    def test_interaction_metadata_is_validated_and_persisted(self):
+        context = self.checkpoint()
+        context["checkpoint"].update(interaction_origin="automatic_tool", context_version="tool-context-1")
+        result = self.evaluate(context=context)
+        record = json.loads(Path(result["record_path"]).read_text())
+        self.assertEqual(record["interaction_origin"], "automatic_tool")
+        self.assertEqual(record["context_version"], "tool-context-1")
+        context["checkpoint"]["interaction_origin"] = "unbounded value"
+        with self.assertRaises(ADVICE.InputError):
+            ADVICE.validate_context(context, self.batch_router())
+
     def test_delegated_checkpoint_returns_jev_choice_as_the_action(self):
         router = self.batch_router()
         self.write(self.checkpoint())

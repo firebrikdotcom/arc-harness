@@ -273,11 +273,11 @@ def decision_seam(payload, context):
     os.environ['HARNESS_JEV_TIMEOUT'] = '5'
     os.environ['HARNESS_JEV_ATTEMPTS'] = '1'
     try:
+        from jev_context import build
+        routing = build(payload, context)
         receipt = evaluate(project=project, session_id=sid, family='tool_selection',
-        goal='Select the next bounded execution step', facts=['A confirmed active task plan exists',
-        'Covered read observations: ' + str(context.get('evidence_revision', 0)),
-        'The requested tool performs execution', 'Tool category: ' + ('shell' if tool in ('Bash', 'exec_command', 'shell') else 'edit_or_specialized')],
-        choices={'execute': 'Execute the proposed tool action', 'gather_context': 'Gather relevant read-only context before execution'},
+        goal=routing['goal'], facts=routing['facts'], origin=routing['origin'], context_version=routing['context_version'],
+        choices=routing['choices'],
         scope=scope, state=state)
     finally:
         for key, value in prior.items():
@@ -301,8 +301,14 @@ def decision_posttool(payload):
         return
     from decision_checkpoint import directory, digest, outcome
     sid = payload.get('session_id')
+    if not isinstance(sid, str) or not sid:
+        return
     with audit.context_db() as db:
+        db.execute('BEGIN IMMEDIATE')
         context = audit.load(db, sid)
+        from jev_context import observe_read
+        if observe_read(payload, context):
+            audit.save(db, sid, context)
     project = Path(context.get('orchestration_project') or context.get('cwd') or payload.get('cwd') or '.').resolve()
     fingerprint = digest([payload.get('tool_name', ''), payload.get('tool_input')])
     response = payload.get('tool_response') or {}

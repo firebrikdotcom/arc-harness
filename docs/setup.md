@@ -820,3 +820,21 @@ installed service after updating: `systemctl --user restart harness-audit.servic
 The harness checkout uses its base `.harness-db` even when its parent workspace
 is registered as a target. Subdirectories of the control plane stop target lookup
 at the harness root; other projects still use their nearest registered ancestor.
+
+### Jev routing context and interaction categories
+
+Supply a compact non-sensitive task purpose with `scripts/harness workflow task
+--name NAME --description DESCRIPTION`; the current todo plan reason is the
+fallback when no task description exists. Automatic tool checks add the active
+step/criterion, locally classified action metadata, scoped read observations,
+completed-step evidence, blocked steps and recorded check results. No prompt,
+source, patch body, command arguments or tool output is sent. See
+[bounded automatic-tool context](jev-checkpoints.md#bounded-automatic-tool-context)
+for redaction limits and the origin taxonomy.
+
+Hooks reference these scripts directly, so the context update applies to the next
+covered call without reinstalling hooks. Restart the audit service to embed the
+categorized tables: `systemctl --user restart harness-audit.service`. Its derived
+reports rebuild from original events. `sh tests/jev-context.sh` checks privacy,
+bounds and missing-data semantics; `sh tests/decision-checkpoints.sh` verifies
+context propagation and the unchanged confidence/receipt policy.

@@ -274,6 +274,9 @@ pub fn event_row(row: &Value) -> Value {
         "recorded_at_us": recorded_at_us,
         "call_id": text(&payload, "call_id"),
         "family": text(&payload, "family"),
+        "interaction_origin": text(&payload, "interaction_origin"),
+        "interaction_label": grouped::origin_label(payload.get("interaction_origin").and_then(Value::as_str)),
+        "context_version": text(&payload, "context_version"),
         "question_version": text(&payload, "question_version"),
         "baseline_action": text(&payload, "baseline_action"),
         "recommendation": recommendation,
@@ -1958,6 +1961,26 @@ mod tests {
         let empty = render_workbench(&[]);
         assert!(empty.contains("Jev tokens</span><strong>Unknown</strong>"));
         assert!(empty.contains("Jev cost · USD</span><strong>Unknown</strong>"));
+    }
+
+    #[test]
+    fn workbench_renders_interaction_categories_and_context_versions() {
+        let html = render_workbench(&[
+            json!({"event_type":"jev.checkpoint","payload":{"family":"tool_selection","interaction_origin":"automatic_tool","context_version":"tool-context-1","recommendation_confidence":0.8}}),
+            json!({"event_type":"jev.route","payload":{"interaction_origin":"session_routing","context_version":"task-metadata-1","recommendation_confidence":0.9}}),
+            json!({"event_type":"jev.checkpoint","payload":{"family":"old"}}),
+        ]);
+        for label in [
+            "Automatic tool check",
+            "tool-context-1",
+            "Session routing",
+            "task-metadata-1",
+            "Legacy",
+            "Mean confidence",
+        ] {
+            assert!(html.contains(label), "missing category {label}");
+        }
+        assert!(!html.contains(">Accuracy<"));
     }
 
     #[test]

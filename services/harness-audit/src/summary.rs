@@ -13,6 +13,18 @@ const TOP_PAIRS: usize = 5;
 
 type GroupKey = Vec<Option<String>>;
 
+pub fn origin_label(origin: Option<&str>) -> &'static str {
+    match origin {
+        Some("automatic_tool") => "Automatic tool check",
+        Some("explicit_decision") => "Explicit decision",
+        Some("direct_advice") => "Direct advice",
+        Some("worker_selection") => "Worker selection",
+        Some("session_routing") => "Session routing",
+        Some("task_routing") => "Task routing",
+        _ => "Legacy / unknown",
+    }
+}
+
 #[derive(Default)]
 struct Group {
     count: usize,
@@ -150,12 +162,16 @@ impl Kind {
                 "policy_version",
                 "model_requested",
                 "model_returned",
+                "interaction_origin",
+                "context_version",
             ],
             Kind::Route => &[
                 "source",
                 "routing_mode",
                 "model_requested",
                 "model_returned",
+                "interaction_origin",
+                "context_version",
             ],
         }
     }
@@ -353,6 +369,12 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
             entry.insert((*field).to_string(), json!(value));
         }
         entry.insert("count".into(), json!(group.count));
+        entry.insert(
+            "interaction_label".into(),
+            json!(origin_label(
+                entry.get("interaction_origin").and_then(Value::as_str)
+            )),
+        );
         entry.insert("labeled".into(), json!(group.labeled));
         entry.insert("unlabeled".into(), json!(group.count - group.labeled));
         entry.insert("outcomes".into(), json!(group.outcomes));
@@ -362,6 +384,15 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
             json!(ratio(group.correct, group.labeled)),
         );
         entry.insert("recommendations".into(), json!(group.recommendations));
+        entry.insert("confidence_samples".into(), json!(group.confidence.len()));
+        entry.insert(
+            "mean_confidence".into(),
+            json!(if group.confidence.is_empty() {
+                None
+            } else {
+                Some(group.confidence.iter().sum::<f64>() / group.confidence.len() as f64)
+            }),
+        );
         if matches!(kind, Kind::Checkpoint) {
             entry.insert("comparable".into(), json!(group.comparable));
             entry.insert(
@@ -503,6 +534,39 @@ pub fn daily_checkpoint_accuracy(rows: &[Value], include_fixtures: bool) -> Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn categories_separate_origins_and_context_versions_without_inventing_history() {
+        let row = |origin, version, confidence| {
+            json!({"event_type":"jev.checkpoint","payload":{
+            "family":"tool_selection", "interaction_origin":origin,"context_version":version,
+            "recommendation_confidence":confidence,"jev_input_tokens":10,"jev_output_tokens":2,"jev_cost_usd":0.01}})
+        };
+        let rows = vec![
+            row(json!("automatic_tool"), json!("tool-context-1"), 0.4),
+            row(json!("automatic_tool"), json!("tool-context-1"), 0.8),
+            row(json!("explicit_decision"), json!("decision-context-1"), 0.9),
+            row(json!("automatic_tool"), json!("tool-context-2"), 0.7),
+            row(Value::Null, Value::Null, 0.3),
+        ];
+        let report = checkpoint_groups(&rows, false);
+        let groups = report["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 4);
+        let automatic = groups
+            .iter()
+            .find(|g| g["context_version"] == "tool-context-1")
+            .unwrap();
+        assert_eq!(automatic["interaction_label"], "Automatic tool check");
+        assert_eq!(automatic["confidence_samples"], 2);
+        assert!((automatic["mean_confidence"].as_f64().unwrap() - 0.6).abs() < 1e-12);
+        assert_eq!(automatic["tokens"]["total"], 24);
+        assert_eq!(automatic["cost_usd"]["total"], 0.02);
+        let historical = groups
+            .iter()
+            .find(|g| g["interaction_origin"].is_null())
+            .unwrap();
+        assert_eq!(historical["interaction_label"], "Legacy / unknown");
+        assert!(historical["context_version"].is_null());
+    }
     #[test]
     fn usage_counts_calls_once_and_keeps_partial_zero_and_overflow_measurements() {
         let rows = vec![

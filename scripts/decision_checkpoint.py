@@ -11,6 +11,7 @@ import time
 import uuid
 import context_advice as advice
 import harness_config
+from jev_context import ORIGINS
 from audit_transport import emit
 
 
@@ -36,7 +37,7 @@ def save(root, row):
 def telemetry(kind, row):
     keys = ('id', 'parent_session_id', 'family', 'mode', 'status', 'action', 'confidence', 'min_confidence', 'needs_reasoning', 'escalation_reason', 'action_source',
             'cache_hit', 'duration_ms', 'latency_ms', 'input_tokens', 'output_tokens', 'total_tokens',
-            'state_build_ms', 'fallback_reason', 'action_taken', 'exit_code', 'outcome', 'action_duration_ms')
+            'state_build_ms', 'fallback_reason', 'action_taken', 'exit_code', 'outcome', 'action_duration_ms', 'interaction_origin', 'context_version')
     try:
         emit('orchestration.' + kind, {'decision_id': row['id'], 'usage': {k: row.get(k) for k in ('input_tokens', 'output_tokens', 'total_tokens')}, **{k: row.get(k) for k in keys}}, flush_now=False)
     except Exception:
@@ -45,10 +46,14 @@ def telemetry(kind, row):
 
 def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: list[str],
              choices: dict[str, str], scope: dict, state: dict, baseline: str | None = None,
-             bypass: str | None = None, router_path: Path | None = None) -> dict:
+             bypass: str | None = None, router_path: Path | None = None,
+             origin: str = 'explicit_decision', context_version: str = 'decision-context-1') -> dict:
     began = time.monotonic()
     settings = harness_config.load()['typesafe']
     mode = settings['mode']
+    import re
+    if not isinstance(origin, str) or origin not in ORIGINS or not isinstance(context_version, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', context_version):
+        raise ValueError('Invalid interaction origin or context version')
     if family not in advice.FAMILIES:
         raise ValueError('Invalid decision family')
     if bypass and bypass not in advice.BYPASSES - {'none'}:
@@ -63,8 +68,9 @@ def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: l
         advice.text_field(description, 'choice')
     advice.text_field(goal, 'goal', 4000)
     advice.strings(facts, 'facts')
-    context = {'version': 2, 'checkpoint': {'family': family, 'question_version': 'decision-1',
-        'policy_version': 'decision-2', 'bypass_reason': bypass or 'none'},
+    context = {'version': 2, 'checkpoint': {'family': family, 'question_version': 'tool-decision-3' if origin == 'automatic_tool' else 'decision-1',
+        'policy_version': 'decision-2', 'bypass_reason': bypass or 'none',
+        'interaction_origin': origin, 'context_version': context_version},
         'context': {'goal': goal, 'facts': facts}, 'questions': {'recommendation': {
             'type': 'choice', 'instructions': 'Choose the best bounded next action using the supplied facts.',
             'criteria': choices}}}
@@ -93,6 +99,7 @@ def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: l
                 telemetry('decision_evaluated', result)
                 return result
         row = {'id': str(uuid.uuid4()), 'parent_session_id': session_id, 'family': family, 'mode': mode,
+            'interaction_origin': origin, 'context_version': context_version,
             'status': 'pending', 'action': 'normal_reasoning', 'scope': scope, 'choices': choices,
             'confidence': None, 'min_confidence': settings.get('min_confidence', 0.70),
             'needs_reasoning': True, 'action_source': 'escalation', 'model': settings['model'],

@@ -466,6 +466,8 @@ def main() -> int:
                 todos.reset_task(context)
             record("task_started" if args.new else "task_updated", sid, context,
                    name=args.name, description=args.description, parent_task_id=args.parent_task_id, status="running")
+            # Local curated metadata for bounded routing; never use captured prompts.
+            context["task_summary"] = {"name": args.name, "description": args.description}
         elif args.command == "decision":
             record("decision", sid, context, description=args.description, options=args.option, selected=args.selected)
         elif args.command == "outcome":

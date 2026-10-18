@@ -167,7 +167,7 @@ def create(plan: dict, project: Path, session_id: str) -> dict:
             state = {'contract_hash': hashlib.sha256(json.dumps(w, sort_keys=True).encode()).hexdigest()}
             action_hash = hashlib.sha256(json.dumps(candidates).encode()).hexdigest()
             scope = {'kind': 'dispatch', 'run_id': run['id'], 'worker_id': w['id'], 'stage': 'profile', 'action_hash': action_hash, **{key: workflow_context.get(key) for key in ('request_id', 'request_seq', 'plan_revision')}}
-            receipt = evaluate(project=project, session_id=session_id, family='reasoning_allocation', goal='select_worker_profile', facts=['access_' + w['access']], choices={p: ' '.join(str(config['profiles'][p].get(k, 'unknown')) for k in ('provider', 'model', 'effort')) for p in candidates}, scope=scope, state=state)
+            receipt = evaluate(project=project, session_id=session_id, family='reasoning_allocation', goal='select_worker_profile', facts=['access_' + w['access']], choices={p: ' '.join(str(config['profiles'][p].get(k, 'unknown')) for k in ('provider', 'model', 'effort')) for p in candidates}, scope=scope, state=state, origin='worker_selection')
             if receipt.get('needs_reasoning'):
                 # Below the confidence threshold the main agent decides: its first-listed profile.
                 receipt = resolve(project=project, identifier=receipt['id'], session_id=session_id, action=choice,

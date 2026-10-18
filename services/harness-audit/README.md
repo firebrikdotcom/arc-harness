@@ -265,3 +265,20 @@ schema rebuilds automatically from original events; never delete source history.
 Run `sh tests/jev-usage.sh`, `sh tests/task-routing.sh`, and
 `docker compose -f services/harness-audit/compose.test.yml run --rm tests` from
 the repository root to check normalization, producer integration and rendering.
+
+## Categorized Jev interactions
+
+Checkpoint and route groups now include `interaction_origin`, `interaction_label`
+and `context_version`, plus `mean_confidence` and `confidence_samples` over valid
+recorded confidence. Those dimensions join the existing family/question/policy/
+model keys, keeping new automatic-tool context separate from old prompts.
+Workbench shows readable origin labels and context versions alongside confidence,
+tokens and USD costs. Original events stay immutable; missing historical origins
+or versions are displayed as legacy/unknown, without inference or backfill.
+
+The producers distinguish automatic tool checks, explicit agent decisions, direct
+advice, worker profile selection, session routing and task routing. Only compact
+category/version metadata enters audit events; the bounded, redacted task/action/
+evidence context remains in private advice records. The 70% acceptance policy is
+unchanged. Restart the installed service after updating to rebuild derived reports
+and embed the revised templates.

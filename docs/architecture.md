@@ -157,3 +157,10 @@ See `services/harness-audit/README.md` for restart and rebuild semantics.
   each token and cost measurement without adding orchestration mirrors again.
 - `scripts/harness-target.sh` stops ancestor lookup at the control-plane root,
   keeping its own run and evidence database separate from registered workspaces.
+
+- `scripts/jev_context.py` converts curated Workflow task/todo/check facts and
+  locally parsed action metadata into bounded redacted routing facts. It never
+  reads transcripts, source contents or tool output. The policy state keeps only
+  bounded read kinds/statuses; decision records carry the context version and
+  interaction origin through the existing private receipt/advice and audit paths.
+  Grouped reports separate context generations without reclassifying history.

@@ -92,6 +92,7 @@ class AuditEmitterTests(unittest.TestCase):
         advice = Path(self.temp.name) / "advice.json"
         advice.write_text(json.dumps({
             "call_id": "11111111-1111-4111-8111-111111111111", "family": "evidence_assessment",
+            "interaction_origin":"automatic_tool", "context_version":"tool-context-1",
             "question_version": "verify-predict-1", "policy_version": "shadow-1", "question_hash": "abc",
             "status": "evaluated", "fallback_reason": None, "shadow": True, "baseline_action": "run_full_verification",
             "context": {"goal": "PRIVATE GOAL TEXT", "facts": ["PRIVATE FACT"]},
@@ -106,6 +107,7 @@ class AuditEmitterTests(unittest.TestCase):
         self.run_emitter("checkpoint-outcome", "--record", str(advice), "--outcome-record", str(outcome))
         self.assertEqual([event["event_type"] for event in CaptureHandler.events], ["jev.checkpoint", "jev.checkpoint_outcome"])
         checkpoint, labeled = (event["payload"] for event in CaptureHandler.events)
+        self.assertEqual((checkpoint["interaction_origin"], checkpoint["context_version"]), ("automatic_tool", "tool-context-1"))
         self.assertEqual((checkpoint["family"], checkpoint["recommendation"], checkpoint["question_count"], checkpoint["jev_input_tokens"]),
                          ("evidence_assessment", "run_full_verification", 2, 30))
         self.assertEqual((labeled["outcome"], labeled["action_taken"]), ("correct", "run_full_verification"))

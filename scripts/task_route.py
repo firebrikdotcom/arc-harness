@@ -317,9 +317,12 @@ def audit_route_record(record_path: Path) -> None:
         print(result.stderr.strip(), file=sys.stderr)
 
 
-def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str | None) -> dict[str, Any]:
+def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode: str | None,
+               origin: str = "task_routing") -> dict[str, Any]:
     """Route one task. MODE None means: active when the delegation switch is on, else shadow."""
     data = load_metadata(metadata)
+    if origin not in {"task_routing", "session_routing"}:
+        raise InputError("invalid routing origin")
     fixed = deterministic_route(data)
     answer = error = None
     history: dict[str, str] | None = None
@@ -379,6 +382,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
         "delegation": mode_source == "delegation",
         "routing_mode": routing_mode,
         "source": source,
+        "interaction_origin": origin, "context_version": "task-metadata-1",
         "recommendation": recommendation,
         "reason": reason,
         "confidence": confidence, "min_confidence": minimum, "needs_reasoning": needs_reasoning,

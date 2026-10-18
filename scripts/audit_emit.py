@@ -40,6 +40,8 @@ def route_payload(record: dict[str, Any]) -> dict[str, Any]:
         "route_id": scalar(record.get("id")),
         "call_id": scalar(record.get("call_id")),
         "source": scalar(record.get("source")),
+        "interaction_origin": scalar(record.get("interaction_origin")),
+        "context_version": scalar(record.get("context_version")),
         "recommendation": scalar(record.get("recommendation")),
         "observed_recommendation": scalar(record.get("observed_recommendation")),
         "mode": scalar(record.get("mode")),
@@ -128,6 +130,8 @@ def checkpoint_payload(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "call_id": scalar(record.get("call_id")),
         "family": scalar(record.get("family")),
+        "interaction_origin": scalar(record.get("interaction_origin")),
+        "context_version": scalar(record.get("context_version")),
         "question_version": scalar(record.get("question_version")),
         "policy_version": scalar(record.get("policy_version")),
         "question_hash": scalar(record.get("question_hash")),

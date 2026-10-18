@@ -52,3 +52,32 @@ Mechanical phase, verification, review and repeat-command seams no longer reques
 Workbench plots daily mean Jev confidence from genuine valid recommendation samples, in the selected browser timezone. Missing confidence remains unknown; zero is a valid sample. The chart does not join agent choices or correctness labels. It is confidence, not observed accuracy.
 
 Private decision and advice records retain confidence, timings and available usage. Historical events, manual outcome APIs and legacy reports remain readable for compatibility; they are not prerequisites for accepting a new recommendation. No pilot accuracy batch is required for the intended active flow.
+
+## Bounded automatic-tool context
+
+Automatic tool checks now use `tool-decision-3` / `tool-context-1`. The local
+`scripts/jev_context.py` builder supplies the curated task description (or plan
+reason), current plan purpose, active todo and criterion, action intent, completed
+step evidence, blocked steps, recent read-result kinds/statuses, and recorded
+verify/review results. Unknown values stay unknown. Agent-recorded evidence is
+identified as such; read counts and returned tools do not prove correctness, and
+old checks are not asserted fresh. Provide a short non-sensitive purpose through
+`harness workflow task --name ... --description ...` and the todo plan's `--reason`.
+
+Shell inputs are parsed locally into fixed action labels; arguments and command
+strings are not sent. Patch headers yield only artifact types, operation kinds
+and counts. Source, diffs, tool output, captured prompts, transcript contents and
+repository paths are excluded. Curated prose is bounded and redacted for common
+credential, contact, address and name patterns; multiline/code-like bodies are
+withheld. Redaction is pattern-based, so agents must never put personal data or
+secrets into task/todo purposes or evidence. The existing provider-input rejection
+remains a second check. This context does not authorize actions or waive gates.
+
+Audit events record `interaction_origin` and `context_version`, not the new prose
+facts. Origins are `automatic_tool`, `explicit_decision`, `direct_advice`,
+`worker_selection`, `session_routing`, and `task_routing`. Workbench and grouped
+APIs separate those origins and context versions alongside the existing family,
+question, policy and model dimensions, with confidence samples/means and the
+existing usage/cost coverage. Historical origins remain unknown; original events
+are not rewritten. New measurements must establish any improvement—more context
+is not a claim of greater confidence or correctness. The threshold stays at 70%.

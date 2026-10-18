@@ -206,6 +206,33 @@ class Decisions(unittest.TestCase):
                 workflow_gate.decision_seam(payload, {'request_id': 'r1'})
             consume.assert_not_called()
 
+    def test_hook_passes_action_specific_context_and_audit_category(self):
+        context = {'request_id':'r1', 'task_summary':{'description':'Improve routing context'},
+                   'active_todo_id':'edit', 'todos':{'edit':{'description':'Add category fields', 'criterion':'Categorized reports render', 'status':'in_progress'}}}
+        payload = {**self.gate_payload(), 'tool_input':{'file_path':'private/report.rs','old_string':'PRIVATE SOURCE','new_string':'PRIVATE CHANGE'}}
+        with patch.object(decision, 'evaluate', return_value={'id':'receipt','action':'execute'}) as evaluate, patch.object(decision, 'claim'):
+            workflow_gate.decision_seam(payload, context)
+        sent = evaluate.call_args.kwargs
+        self.assertEqual((sent['origin'], sent['context_version']), ('automatic_tool','tool-context-1'))
+        text = json.dumps(sent['facts'])
+        self.assertIn('Improve routing context', text)
+        self.assertIn('Add category fields', text)
+        self.assertIn('update Rust logic', text)
+        for private in ('PRIVATE SOURCE','PRIVATE CHANGE','private/report.rs'):
+            self.assertNotIn(private, text)
+
+    def test_origin_and_context_version_invalidate_cached_decisions(self):
+        first, _ = self.evaluate()
+        second, calls = self.evaluate(origin='automatic_tool', context_version='tool-context-1')
+        self.assertEqual(calls, 1)
+        self.assertNotEqual(first['cache_key'], second['cache_key'])
+        self.assertEqual(second['interaction_origin'], 'automatic_tool')
+
+    def test_read_observation_without_a_session_is_not_persisted(self):
+        with patch.object(workflow_gate.audit, 'context_db') as database:
+            workflow_gate.decision_posttool({'tool_name':'Read','tool_response':{'content':'PRIVATE'}})
+        database.assert_not_called()
+
     def test_invalid_context_is_rejected_without_provider_call(self):
         with patch.object(decision.advice, 'load_router', return_value=object()), \
              patch.object(decision.advice, 'validate_context', side_effect=decision.advice.InputError('invalid')), \

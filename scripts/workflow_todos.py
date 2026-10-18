@@ -26,7 +26,7 @@ def text(value, name):
     return value
 
 def reset_task(context):
-    for key in ("todos", "plan_revision", "confirmed_request", "active_todo_id", "plan_mode", "plan_scope_at", "checks", "task_status", "last_execution_at"):
+    for key in ("todos", "plan_revision", "confirmed_request", "active_todo_id", "plan_mode", "plan_scope_at", "checks", "task_status", "last_execution_at", "task_summary", "plan_summary"):
         context.pop(key, None)
 
 def unresolved(context):
@@ -137,6 +137,7 @@ def handle(args, sid, context, record):
         context["plan_mode"] = "execution"
         context["confirmed_request"] = context.get("request_seq", 0)
         context["plan_scope_at"] = timestamp()
+        context["plan_summary"] = reason
         if next_items.get(context.get("active_todo_id"), {}).get("status") != "in_progress": context.pop("active_todo_id", None)
         record("plan_registered" if not todos else "plan_revised", sid, context, description=reason, revision=revision, todo_count=sum(item["status"] != "removed" for item in next_items.values()))
     elif action == "update":
@@ -147,7 +148,7 @@ def handle(args, sid, context, record):
             raise TodoValidationError("Resolve or pause the active todo before selecting another")
         evidence = text(args.evidence, "evidence") if args.status == "completed" else ""
         previous_status = current["status"]
-        current.update(status=args.status, evidence=evidence)
+        current.update(status=args.status, evidence=evidence, updated_at=timestamp())
         if args.status == "in_progress": context["active_todo_id"] = args.id
         elif context.get("active_todo_id") == args.id: context.pop("active_todo_id", None)
         record("todo_updated", sid, context, todo_id=args.id, description=current["description"], criterion=current["criterion"], status=args.status, evidence=evidence, previous_status=previous_status, reason=reason, revision=revision)

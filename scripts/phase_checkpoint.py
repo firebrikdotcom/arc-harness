@@ -367,7 +367,7 @@ def session_start(project: Path, db_root: Path, router: Path) -> str:
         path = Path(handle.name)
     try:
         # None: active when `harness jev` is on, shadow otherwise.
-        route = task_route.route_task(path, project, db_root, router, None)
+        route = task_route.route_task(path, project, db_root, router, None, origin="session_routing")
     finally:
         path.unlink(missing_ok=True)
     if route["source"] == "fallback":

@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import jev_delegation  # noqa: E402
 import harness_config  # noqa: E402
 from jev_usage import normalize_usage  # noqa: E402
+from jev_context import ORIGINS  # noqa: E402
 
 MAX_BYTES = 32_000
 MAX_OPTIONS = 8
@@ -199,8 +200,12 @@ def validate_context(raw: Any, router: Any) -> dict[str, Any]:
         raise InputError("v2 requires exactly version, checkpoint, context, and questions")
     checkpoint = raw["checkpoint"]
     required = {"family", "question_version", "policy_version", "bypass_reason"}
-    if not isinstance(checkpoint, dict) or not required <= set(checkpoint) or set(checkpoint) - required - {"state_build_ms", "baseline_action"}:
+    if not isinstance(checkpoint, dict) or not required <= set(checkpoint) or set(checkpoint) - required - {"state_build_ms", "baseline_action", "interaction_origin", "context_version"}:
         raise InputError("invalid checkpoint fields")
+    if "interaction_origin" in checkpoint and (not isinstance(checkpoint["interaction_origin"], str) or checkpoint["interaction_origin"] not in ORIGINS):
+        raise InputError("invalid interaction origin")
+    if "context_version" in checkpoint and (not isinstance(checkpoint["context_version"], str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', checkpoint["context_version"])):
+        raise InputError("invalid context version")
     if checkpoint["family"] not in FAMILIES or checkpoint["bypass_reason"] not in BYPASSES:
         raise InputError("unknown checkpoint family or bypass_reason")
     for key in ("question_version", "policy_version"):
@@ -391,6 +396,8 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
         "question_version": checkpoint.get("question_version", "legacy-v1"),
         "question_hash": hashlib.sha256(json.dumps(batch, sort_keys=True).encode()).hexdigest(),
         "policy_version": checkpoint.get("policy_version", "legacy-v1"),
+        "interaction_origin": checkpoint.get("interaction_origin", "direct_advice"),
+        "context_version": checkpoint.get("context_version", "advice-context-1"),
         "shadow": not delegated, "delegation": "active" if delegated else "shadow",
         "delegated_action": None, "context": {**context, "checkpoint": {k: v for k, v in checkpoint.items() if k != "baseline_action"}}, "questions": batch, "state_build_ms": checkpoint.get("state_build_ms"),
         "model_requested": model, "model_returned": None, "usage": None, "latency_ms": None,

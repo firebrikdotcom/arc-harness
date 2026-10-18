@@ -119,6 +119,7 @@ class TaskRoutingTests(unittest.TestCase):
         record = json.loads(self.route().stdout)
         self.assertEqual((record["source"], record["recommendation"]), ("typesafe", "default"))
         self.assertEqual((record["routing_mode"], record["needs_reasoning"]), ("shadow", True))
+        self.assertEqual((record["interaction_origin"], record["context_version"]), ("task_routing", "task-metadata-1"))
         sent = json.loads(self.state_capture.read_text())
         self.assertEqual(sent["state"]["task"], {"kind": "change", "area": "mobile"})
         self.assertNotIn("prompt", json.dumps(sent["state"]).lower())
