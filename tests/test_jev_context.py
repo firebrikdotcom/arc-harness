@@ -22,7 +22,7 @@ class ContextTests(unittest.TestCase):
         for wanted in ("Improve decision routing context", "Add bounded action metadata", "run_checks", "Read producer and reducer definitions", "Find missing category field", "verify: passed", "review: unknown", "not independently established"):
             self.assertIn(wanted, text)
         self.assertEqual(result["origin"], "automatic_tool")
-        self.assertEqual(result["context_version"], "tool-context-1")
+        self.assertEqual(result["context_version"], "tool-context-2")
         self.assertLess(len(text.encode()), 6000)
         self.assertIn("unknown", json.dumps(jev_context.build({}, {})))
 
@@ -83,6 +83,38 @@ class ContextTests(unittest.TestCase):
         for n in range(4):
             context['todos'][str(n)] = {'status':'completed', 'evidence':'Older unrelated evidence', 'updated_at':'2026-10-17T01:00:00Z'}
         self.assertIn('Current installed service target verified', json.dumps(jev_context.build({}, context)))
+
+    def test_action_context_is_redacted_scoped_and_reset(self):
+        from types import SimpleNamespace
+        import workflow_todos
+        context = self.context()
+        context.update(plan_mode="execution", request_seq=1, confirmed_request=1, plan_revision=3)
+        workflow_todos.handle(SimpleNamespace(todo_action="context", reason="Describe change",
+            action_summary="Preserve missing costs", finding=["Provider field is optional", "Contact alice@example.org"],
+            gap=["Rendering remains unverified"]), "session", context, lambda *a, **kw: None)
+        output = json.dumps(jev_context.build({}, context))
+        for value in ("Preserve missing costs", "Provider field is optional", "Rendering remains unverified", "insufficient_information"):
+            self.assertIn(value, output)
+        self.assertNotIn("alice@example.org", output)
+        self.assertLess(len(output.encode()), 8500)
+        for key, value in (("request_id", "next"), ("active_todo_id", "other"), ("plan_revision", 4)):
+            self.assertNotIn("Preserve missing costs", json.dumps(jev_context.build({}, dict(context, **{key:value}))))
+        workflow_todos.reset_task(context)
+        self.assertNotIn("jev_action_context", context)
+
+    def test_action_types(self):
+        for command, expected in (("cat file.py", "inspection"), ("npm test", "verification"), ("git push", "publication"), ("touch file.py", "implementation")):
+            self.assertEqual(jev_context.action_type({"tool_name":"exec_command", "tool_input":{"cmd":command}}), expected)
+        self.assertEqual(jev_context.action_type({"tool_name":"apply_patch"}), "implementation")
+
+    def test_context_list_limit(self):
+        from types import SimpleNamespace
+        import workflow_todos
+        context = self.context()
+        context.update(plan_mode="execution", request_seq=1, confirmed_request=1)
+        with self.assertRaises(workflow_todos.TodoValidationError):
+            workflow_todos.handle(SimpleNamespace(todo_action="context", reason="Summary", action_summary="Change behavior", finding=["finding"]*5, gap=[]), "session", context, lambda *a, **kw: None)
+        self.assertNotIn("jev_action_context", context)
 
 
 if __name__ == "__main__":

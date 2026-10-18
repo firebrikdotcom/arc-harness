@@ -838,3 +838,16 @@ categorized tables: `systemctl --user restart harness-audit.service`. Its derive
 reports rebuild from original events. `sh tests/jev-context.sh` checks privacy,
 bounds and missing-data semantics; `sh tests/decision-checkpoints.sh` verifies
 context propagation and the unchanged confidence/receipt policy.
+
+For action-specific Jev context, use `harness workflow todo context
+--action-summary SUMMARY --finding FINDING --gap GAP --reason REASON` while a
+todo is active. Repeat findings/gaps up to four times; omit a flag when unknown.
+Refresh before a different proposed operation. Context expires on prompt, todo
+or plan revision changes and is redacted before storage/provider use. See
+[action findings and prerequisites](jev-checkpoints.md#action-findings-and-prerequisites).
+
+Audit delivery retains HTTP 400/422 schema rejections in the local outbox's
+`rejected_events` table (original body, destination and status), prints their
+identifiers and continues valid deliveries. Other HTTP/network errors remain
+retryable. Rejected records are retained for inspection rather than silently
+lost or retried unchanged forever.

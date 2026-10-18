@@ -47,6 +47,7 @@ def connection() -> sqlite3.Connection:
     db = sqlite3.connect(path, timeout=5)
     path.chmod(0o600)
     db.execute("CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, body TEXT NOT NULL, destination TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS rejected_events (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, body TEXT NOT NULL, destination TEXT NOT NULL, http_status INTEGER NOT NULL)")
     return db
 
 def flush() -> bool:
@@ -68,6 +69,17 @@ def flush() -> bool:
                 with urllib.request.urlopen(request, timeout=remaining) as response:
                     if not 200 <= response.status < 300:
                         return False
+            except urllib.error.HTTPError as error:
+                if error.code not in (400, 422):
+                    print(f"AUDIT DELIVERY QUEUED: HTTP {error.code}", file=sys.stderr)
+                    return False
+                # Preserve invalid records for inspection; they cannot succeed unchanged.
+                db.execute("INSERT OR IGNORE INTO rejected_events VALUES (?,?,?,?,?)",
+                           (event_id, event_type, body, destination, error.code))
+                db.execute("DELETE FROM outbox WHERE id=?", (event_id,))
+                db.commit()
+                print(f"AUDIT EVENT RETAINED AS REJECTED: HTTP {error.code}; {event_type}; {event_id}", file=sys.stderr)
+                continue
             except (OSError, urllib.error.URLError) as error:
                 print(f"AUDIT DELIVERY QUEUED: {type(error).__name__}", file=sys.stderr)
                 return False

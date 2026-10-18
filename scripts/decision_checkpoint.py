@@ -68,7 +68,7 @@ def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: l
         advice.text_field(description, 'choice')
     advice.text_field(goal, 'goal', 4000)
     advice.strings(facts, 'facts')
-    context = {'version': 2, 'checkpoint': {'family': family, 'question_version': 'tool-decision-3' if origin == 'automatic_tool' else 'decision-1',
+    context = {'version': 2, 'checkpoint': {'family': family, 'question_version': 'tool-decision-4' if origin == 'automatic_tool' else 'decision-1',
         'policy_version': 'decision-2', 'bypass_reason': bypass or 'none',
         'interaction_origin': origin, 'context_version': context_version},
         'context': {'goal': goal, 'facts': facts}, 'questions': {'recommendation': {

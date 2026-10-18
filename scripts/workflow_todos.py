@@ -26,7 +26,7 @@ def text(value, name):
     return value
 
 def reset_task(context):
-    for key in ("todos", "plan_revision", "confirmed_request", "active_todo_id", "plan_mode", "plan_scope_at", "checks", "task_status", "last_execution_at", "task_summary", "plan_summary"):
+    for key in ("todos", "plan_revision", "confirmed_request", "active_todo_id", "plan_mode", "plan_scope_at", "checks", "task_status", "last_execution_at", "task_summary", "plan_summary", "jev_action_context"):
         context.pop(key, None)
 
 def unresolved(context):
@@ -99,6 +99,20 @@ def handle(args, sid, context, record):
             raise TodoValidationError("An execution plan must exist before confirmation")
         context["confirmed_request"] = context.get("request_seq", 0)
         record("plan_confirmed", sid, context, description=reason, revision=context.get("plan_revision", 1))
+        return
+    if action == "context":
+        assert_plan(context, active=True)
+        from jev_context import summary
+        proposed = text(args.action_summary, "action-summary")
+        if len(args.finding) > 4 or len(args.gap) > 4:
+            raise TodoValidationError("At most four findings and four gaps are allowed")
+        findings = [summary(text(value, "finding"), 180) for value in args.finding]
+        gaps = [summary(text(value, "gap"), 180) for value in args.gap]
+        context["jev_action_context"] = {
+            "request_id": context.get("request_id"), "todo_id": context.get("active_todo_id"),
+            "plan_revision": context.get("plan_revision"),
+            "action_summary": summary(proposed), "findings": findings, "gaps": gaps}
+        record("task_updated", sid, context, description="Bounded Jev action context updated")
         return
     revision = context.get("plan_revision", 0) + 1
     if action == "plan":

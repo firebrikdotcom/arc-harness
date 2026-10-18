@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-VERSION = "tool-context-1"
+VERSION = "tool-context-2"
 ORIGINS = {"automatic_tool", "explicit_decision", "direct_advice", "worker_selection",
            "session_routing", "task_routing"}
 
@@ -116,6 +116,19 @@ def action_facts(payload):
     return result
 
 
+def action_type(payload):
+    labels = " ".join(action_facts(payload))
+    # Compound actions retain their most consequential type.
+    for kind, signals in (
+        ("publication", ("publish_", "restart_", "start_service", "stop_service")),
+        ("implementation", ("edit_files", "write_files", "delete_files", "format_code", "stage_changes", "record_commit", "install_dependencies")),
+        ("verification", ("run_checks", "run_container_checks", "inspect_ci_status")),
+        ("inspection", ("inspect_",))):
+        if any(signal in labels for signal in signals):
+            return kind
+    return "unknown"
+
+
 def build(payload, context):
     active = context.get("todos", {}).get(context.get("active_todo_id"), {})
     task = context.get("task_summary", {})
@@ -125,6 +138,21 @@ def build(payload, context):
              "Acceptance criterion: " + summary(active.get("criterion")),
              "Active step status: " + (active.get("status") if active.get("status") in {"pending", "in_progress", "completed", "blocked"} else "unknown")]
     facts.extend(action_facts(payload))
+    facts.append("Action type: " + action_type(payload))
+    supplied = context.get("jev_action_context", {})
+    scoped = (supplied.get("request_id") == context.get("request_id")
+              and supplied.get("todo_id") == context.get("active_todo_id")
+              and supplied.get("plan_revision") == context.get("plan_revision"))
+    if supplied and scoped:
+        facts.append("Agent-supplied proposed behavior (unverified): " + summary(supplied.get("action_summary")))
+        for finding in supplied.get("findings", [])[:4]:
+            facts.append("Agent-reported evidence finding (not independently established): " + summary(finding, 180))
+        for gap in supplied.get("gaps", [])[:4]:
+            facts.append("Relevant unresolved prerequisite (agent-reported): " + summary(gap, 180))
+        if not supplied.get("gaps"):
+            facts.append("Relevant prerequisites: no gaps reported; this is not proof that none exist")
+    else:
+        facts.append("Proposed behavior, evidence findings and relevant prerequisites: unknown; no current action context supplied")
     items = list(context.get("todos", {}).values())
     completed = sorted([item for item in items if item.get("status") == "completed"], key=lambda item: item.get("updated_at", ""))
     blocked = [item for item in items if item.get("status") == "blocked"]
@@ -145,10 +173,12 @@ def build(payload, context):
         status = "unknown" if type(check.get("exit_code")) is not int else "passed" if check["exit_code"] == 0 else "failed"
         facts.append(f"Last recorded {kind}: {status}; freshness for current files is not established by this summary")
     facts.append("This choice concerns the next useful step, not permission or final completion. Do not demand proof of an action's outcome before performing it; later verification remains mandatory.")
-    return {"goal":"Choose the next step that advances the active todo. Request a read only when the supplied facts identify a material prerequisite that a read can resolve.",
+    return {"goal":"Assess whether the proposed next action has enough relevant supporting context. Judge inspection, implementation, verification and publication by their own prerequisites; do not infer support from read counts or task alignment alone.",
             "facts":facts, "origin":"automatic_tool", "context_version":VERSION,
-            "choices":{"execute":"The proposed action advances the active step using the available context. Missing unrelated detail or checks due after this action do not require another read first.",
-                       "gather_context":"The supplied facts identify a specific missing prerequisite relevant to this action that an additional read can resolve before execution."}}
+            "choices":{"execute":"The described action has sufficient relevant support for its immediate prerequisites. Checks that can only follow execution remain later obligations.",
+                       "gather_context":"A specific relevant prerequisite is unresolved and a targeted read can resolve it before this action.",
+                       "insufficient_information":"The action or its supporting findings are too underspecified to assess. The agent should supply a concrete behavior summary and relevant findings or gaps; do not invent a prerequisite or default to approval."}}
+
 
 
 def observe_read(payload, context):

@@ -206,6 +206,12 @@ class Decisions(unittest.TestCase):
                 workflow_gate.decision_seam(payload, {'request_id': 'r1'})
             consume.assert_not_called()
 
+    def test_insufficient_information_requests_context_without_consuming(self):
+        with patch.object(decision, 'evaluate', return_value={'action':'insufficient_information'}), patch.object(decision, 'claim') as consume:
+            with self.assertRaisesRegex(ValueError, 'todo context --action-summary'):
+                workflow_gate.decision_seam(self.gate_payload(), {'request_id':'r1'})
+            consume.assert_not_called()
+
     def test_hook_passes_action_specific_context_and_audit_category(self):
         context = {'request_id':'r1', 'task_summary':{'description':'Improve routing context'},
                    'active_todo_id':'edit', 'todos':{'edit':{'description':'Add category fields', 'criterion':'Categorized reports render', 'status':'in_progress'}}}
@@ -213,7 +219,7 @@ class Decisions(unittest.TestCase):
         with patch.object(decision, 'evaluate', return_value={'id':'receipt','action':'execute'}) as evaluate, patch.object(decision, 'claim'):
             workflow_gate.decision_seam(payload, context)
         sent = evaluate.call_args.kwargs
-        self.assertEqual((sent['origin'], sent['context_version']), ('automatic_tool','tool-context-1'))
+        self.assertEqual((sent['origin'], sent['context_version']), ('automatic_tool','tool-context-2'))
         text = json.dumps(sent['facts'])
         self.assertIn('Improve routing context', text)
         self.assertIn('Add category fields', text)
@@ -223,7 +229,7 @@ class Decisions(unittest.TestCase):
 
     def test_origin_and_context_version_invalidate_cached_decisions(self):
         first, _ = self.evaluate()
-        second, calls = self.evaluate(origin='automatic_tool', context_version='tool-context-1')
+        second, calls = self.evaluate(origin='automatic_tool', context_version='tool-context-2')
         self.assertEqual(calls, 1)
         self.assertNotEqual(first['cache_key'], second['cache_key'])
         self.assertEqual(second['interaction_origin'], 'automatic_tool')

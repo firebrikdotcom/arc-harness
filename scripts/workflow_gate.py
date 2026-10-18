@@ -290,6 +290,8 @@ def decision_seam(payload, context):
         # decides, and its decision is the tool call it proposed.
         receipt = resolve(project=project, identifier=receipt['id'], session_id=sid, action='execute',
                           reason='main agent proposed this tool call', scope=scope, state=state)
+    if receipt['action'] == 'insufficient_information':
+        raise ValueError('Decision checkpoint selected insufficient_information; supply current action context with harness workflow todo context --action-summary SUMMARY --finding FINDING --gap GAP --reason SUMMARY')
     if receipt['action'] != 'execute':
         raise ValueError('Decision checkpoint selected gather_context; perform relevant reads and evaluate the revised action state')
     claim(project=project, identifier=receipt['id'], session_id=sid, scope=scope, state=state, action_hash=scope['action_hash'])

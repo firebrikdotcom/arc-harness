@@ -55,7 +55,7 @@ Private decision and advice records retain confidence, timings and available usa
 
 ## Bounded automatic-tool context
 
-Automatic tool checks now use `tool-decision-3` / `tool-context-1`. The local
+Automatic tool checks now use `tool-decision-4` / `tool-context-2`. The local
 `scripts/jev_context.py` builder supplies the curated task description (or plan
 reason), current plan purpose, active todo and criterion, action intent, completed
 step evidence, blocked steps, recent read-result kinds/statuses, and recorded
@@ -81,3 +81,40 @@ question, policy and model dimensions, with confidence samples/means and the
 existing usage/cost coverage. Historical origins remain unknown; original events
 are not rewritten. New measurements must establish any improvement—more context
 is not a claim of greater confidence or correctness. The threshold stays at 70%.
+
+### Action findings and prerequisites
+
+Before an action whose purpose or evidence is not apparent from tool metadata,
+provide curated context for the active todo:
+
+```sh
+scripts/harness workflow todo context \
+  --action-summary "Store absent provider costs as unknown" \
+  --finding "Inspected provider responses omit the optional cost field" \
+  --gap "Dashboard rendering for missing values remains unverified" \
+  --reason "Describe the next proposed behavior change"
+```
+
+Replace this context before a different proposed operation. It is scoped to the
+current prompt, active todo and plan revision; a new prompt, todo transition or
+plan revision makes it unavailable. Starting a new task clears it. Findings and
+gaps are optional repeated flags, limited to four each and 180 characters after
+redaction; the behavior summary is limited to 220 characters. Supply only
+non-sensitive prose, never raw source, diffs, commands, output or personal data.
+The local context is redacted before storage and again before provider use.
+Audit events record only that context was updated, not these new prose fields.
+
+Automatic inputs identify inspection, implementation, verification, publication
+or unknown action types using local tool metadata. These are observations, not
+authorization. Agent-supplied findings remain explicitly unverified; an omitted
+gap means none was reported, not that prerequisites are satisfied. Generic read
+success cannot establish what evidence proves.
+
+`tool-context-2` / `tool-decision-4` evaluates sufficient immediate support,
+a specific missing prerequisite resolvable by a read, or
+`insufficient_information` when the action/findings are underspecified. In active
+mode a confident insufficient-information result requests the command above;
+a confident gather-context result requests relevant reads. The existing 70%
+threshold, below-threshold main-agent decision and deterministic gates remain.
+Checks that can only follow the action remain later obligations. Versioned
+Workbench cohorts distinguish these calls without rewriting historical events.

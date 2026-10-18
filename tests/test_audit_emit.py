@@ -23,7 +23,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         length = int(self.headers["Content-Length"])
         self.events.append(json.loads(self.rfile.read(length)))
-        self.send_response(201)
+        self.send_response(400 if self.events[-1]["event_type"] == "workflow.invalid_fixture" else 201)
         self.end_headers()
 
     def log_message(self, *_args: object) -> None:
@@ -69,6 +69,19 @@ class AuditEmitterTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_invalid_event_is_retained_without_blocking_valid_delivery(self):
+        import sqlite3
+        program = "import sys;sys.path.insert(0, 'scripts');import audit_transport as t;t.emit('workflow.invalid_fixture', {'fixture':True}, flush_now=False);t.emit('jev.route', {'fixture':True})"
+        result = subprocess.run([sys.executable, "-c", program], cwd=ROOT, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("RETAINED AS REJECTED", result.stderr)
+        with sqlite3.connect(self.env["HARNESS_AUDIT_OUTBOX"]) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM outbox").fetchone()[0], 0)
+            row = db.execute("SELECT event_type,body,http_status FROM rejected_events").fetchone()
+            self.assertEqual((row[0], row[2]), ("workflow.invalid_fixture", 400))
+            self.assertTrue(json.loads(row[1])["payload"]["fixture"])
+        self.assertEqual(len(CaptureHandler.events), 2)
 
     def test_route_and_agent_events_keep_measurements_compact(self) -> None:
         self.run_emitter("route", "--record", str(self.record))
