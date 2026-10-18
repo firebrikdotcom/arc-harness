@@ -851,3 +851,12 @@ Audit delivery retains HTTP 400/422 schema rejections in the local outbox's
 identifiers and continues valid deliveries. Other HTTP/network errors remain
 retryable. Rejected records are retained for inspection rather than silently
 lost or retried unchanged forever.
+
+Jev may request additional context twice per prompt/task/active todo. Each
+accepted request blocks the proposed tool action and reports its count; after
+two, the harness records `context_request_limit` and runs the main agent's
+proposed action through the normal receipt and deterministic gates, with no
+third Jev call. Counts survive changed commands, context and plan revisions.
+Confidence below 70% immediately falls back to the agent; configuration can
+raise this threshold but cannot lower the 70% floor. See
+[two context requests](jev-checkpoints.md#two-context-requests-then-the-agent-decides).

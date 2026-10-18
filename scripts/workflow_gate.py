@@ -267,7 +267,7 @@ def decision_seam(payload, context):
     from decision_checkpoint import evaluate, claim, digest, resolve
     scope = {'request_id': context.get('request_id'), 'request_seq': context.get('request_seq'),
              'plan_revision': context.get('plan_revision'), 'action_hash': digest([tool, payload.get('tool_input')])}
-    state = {'scope': scope, 'active_todo_id': context.get('active_todo_id'),
+    state = {'scope': scope, 'task_id': context.get('task_id'), 'active_todo_id': context.get('active_todo_id'),
              'evidence_revision': context.get('evidence_revision', 0)}
     prior = {key: os.environ.get(key) for key in ('HARNESS_JEV_TIMEOUT', 'HARNESS_JEV_ATTEMPTS')}
     os.environ['HARNESS_JEV_TIMEOUT'] = '5'
@@ -289,11 +289,13 @@ def decision_seam(payload, context):
         # Below the confidence threshold (or without a usable answer) the main agent
         # decides, and its decision is the tool call it proposed.
         receipt = resolve(project=project, identifier=receipt['id'], session_id=sid, action='execute',
-                          reason='main agent proposed this tool call', scope=scope, state=state)
+                          reason='main agent proposed this tool call after ' + (receipt.get('escalation_reason') or 'Jev escalation'), scope=scope, state=state)
+    requests = receipt.get('context_requests', 0)
+    progress = f' (context request {requests}/2; then the main agent decides)' if requests else ''
     if receipt['action'] == 'insufficient_information':
-        raise ValueError('Decision checkpoint selected insufficient_information; supply current action context with harness workflow todo context --action-summary SUMMARY --finding FINDING --gap GAP --reason SUMMARY')
+        raise ValueError('Decision checkpoint selected insufficient_information' + progress + '; supply current action context with harness workflow todo context --action-summary SUMMARY --finding FINDING --gap GAP --reason SUMMARY')
     if receipt['action'] != 'execute':
-        raise ValueError('Decision checkpoint selected gather_context; perform relevant reads and evaluate the revised action state')
+        raise ValueError('Decision checkpoint selected gather_context' + progress + '; perform relevant reads and evaluate the revised action state')
     claim(project=project, identifier=receipt['id'], session_id=sid, scope=scope, state=state, action_hash=scope['action_hash'])
 
 

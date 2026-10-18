@@ -81,7 +81,86 @@ class Decisions(unittest.TestCase):
             self.config['typesafe']['min_confidence'] = 0.5
             with self.jev('read', 0.6):
                 row = decision.evaluate(**{**self.args, 'state': {'revision': 'custom'}})
-            self.assertEqual((row['action'], row['action_source']), ('read', 'jev'))
+            self.assertEqual((row['action'], row['action_source'], row['min_confidence']), ('normal_reasoning', 'escalation', 0.7))
+
+    def automatic_args(self):
+        return {**self.args, 'origin':'automatic_tool', 'context_version':'tool-context-2',
+                'choices':{'execute':'Execute', 'gather_context':'Read prerequisite', 'insufficient_information':'Supply missing findings'},
+                'state':{'active_todo_id':'step', 'task_id':'task', 'evidence_revision':0}}
+
+    def test_two_context_requests_share_budget_across_choices_and_revisions(self):
+        args = self.automatic_args()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'):
+            with self.jev('gather_context', 0.9):
+                first = decision.evaluate(**args)
+            revised = {**args, 'scope':{**args['scope'], 'plan_revision':2, 'action_hash':'changed'},
+                       'state':{**args['state'], 'evidence_revision':1}, 'facts':['Additional evidence supplied']}
+            with self.jev('insufficient_information', 0.95):
+                second = decision.evaluate(**revised)
+            with patch.object(decision.advice, 'advise', side_effect=AssertionError('No third provider call')):
+                third = decision.evaluate(**{**revised, 'state':{**revised['state'], 'evidence_revision':2}})
+        self.assertEqual((first['context_requests'], second['context_requests'], third['context_requests']), (1,2,2))
+        self.assertEqual((third['action'],third['needs_reasoning'],third['fallback_reason']), ('normal_reasoning',True,'context_request_limit'))
+        budget = list((self.root/'decisions'/'context-rounds').glob('*.json'))
+        self.assertEqual(len(budget),1)
+        self.assertEqual(json.loads(budget[0].read_text()), {'count':2})
+        self.assertEqual(budget[0].stat().st_mode & 0o777, 0o600)
+
+    def test_cached_context_denials_are_bounded_and_new_prompt_or_step_resets(self):
+        args = self.automatic_args()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'), self.jev('gather_context', 0.9) as api:
+            rows = [decision.evaluate(**args) for _ in range(4)]
+            self.assertEqual(api.call_count,1)
+            self.assertEqual([r['action'] for r in rows], ['gather_context','gather_context','normal_reasoning','normal_reasoning'])
+            for changed in ({'scope':{**args['scope'],'request_id':'new'}}, {'state':{**args['state'],'active_todo_id':'other'}}, {'state':{**args['state'],'task_id':'other'}}):
+                reset = decision.evaluate(**{**args, **changed})
+                self.assertEqual(reset['context_requests'],1)
+
+    def test_low_confidence_does_not_request_context_or_consume_budget(self):
+        args = self.automatic_args()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'):
+            for confidence in (0.0,0.6999):
+                with self.jev('gather_context', confidence):
+                    row = decision.evaluate(**{**args,'facts':[str(confidence)]})
+                self.assertTrue(row['needs_reasoning'])
+                self.assertEqual(row['context_requests'],0)
+            with self.jev('insufficient_information',0.7):
+                row = decision.evaluate(**args)
+                self.assertEqual((row['action'],row['context_requests']),('insufficient_information',1))
+
+    def test_two_high_confidence_hook_denials_then_agent_receipt(self):
+        self.context()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'), self.jev('insufficient_information',0.99) as api:
+            for number in (1,2):
+                with self.assertRaisesRegex(ValueError, f'context request {number}/2'):
+                    workflow_gate.authorize(self.gate_payload())
+            workflow_gate.authorize(self.gate_payload())
+            self.assertEqual(api.call_count,1)
+        [accepted] = [row for row in self.receipts() if row.get('claimed_at')]
+        self.assertEqual((accepted['action_source'],accepted['fallback_reason']),('agent_after_escalation','context_request_limit'))
+        self.assertEqual(accepted['action'],'execute')
+
+    def test_concurrent_context_requests_do_not_exceed_two(self):
+        from concurrent.futures import ThreadPoolExecutor
+        args = self.automatic_args()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'), self.jev('gather_context',0.99) as api:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                rows = list(pool.map(lambda n: decision.evaluate(**{**args,'facts':[f'Action {n}']}),range(4)))
+            self.assertEqual(api.call_count,2)
+        self.assertEqual(sum(row['action']=='gather_context' for row in rows),2)
+        self.assertEqual(sum(row.get('fallback_reason')=='context_request_limit' for row in rows),2)
+
+    def test_context_budget_never_waives_todo_gate(self):
+        self.context()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'), self.jev('gather_context',0.99):
+            for _ in range(2):
+                with self.assertRaises(ValueError):
+                    workflow_gate.authorize(self.gate_payload())
+        import workflow_audit
+        with workflow_audit.context_db() as db:
+            current = workflow_audit.load(db,'session');current.pop('confirmed_request');workflow_audit.save(db,'session',current)
+        with self.assertRaisesRegex(ValueError,'complete todo plan'):
+            workflow_gate.authorize(self.gate_payload())
 
     def test_cache_prefers_a_resolved_receipt_over_open_escalations(self):
         with patch.object(decision.advice, 'load_router', return_value=object()), \
@@ -283,7 +362,9 @@ class Decisions(unittest.TestCase):
             self.assertEqual(api.call_count, 1)
             workflow_gate.authorize({**payload, 'tool_name': 'Read', 'tool_input': {'file_path': 'a'}})
             workflow_gate.authorize(payload)
-            self.assertEqual(api.call_count, 2)
+            self.assertEqual(api.call_count, 1)
+            accepted = [r for r in self.receipts() if r.get('claimed_at')]
+            self.assertEqual(accepted[-1]['fallback_reason'], 'context_request_limit')
 
     def test_dispatch_execution_requires_todo_and_create_breaks_bootstrap_cycle(self):
         self.config['dispatch']['enabled'] = True

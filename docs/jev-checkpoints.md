@@ -118,3 +118,31 @@ a confident gather-context result requests relevant reads. The existing 70%
 threshold, below-threshold main-agent decision and deterministic gates remain.
 Checks that can only follow the action remain later obligations. Versioned
 Workbench cohorts distinguish these calls without rewriting historical events.
+
+### Two context requests, then the agent decides
+
+Automatic tool checkpoints may enforce at most **two** Jev requests for more
+context per native session, prompt, task and active todo. Both `gather_context`
+and `insufficient_information` consume the same budget. The first two accepted
+requests block the proposed call and show `context request 1/2` or `2/2` with
+instructions to supply findings or perform relevant reads. If Jev accepts the
+revised action earlier, it proceeds without asking unnecessary questions.
+
+The next execution attempt after two requests uses the main agent without a
+third Jev call. Its receipt records `context_request_limit` and the normal
+agent-resolution/claim/outcome lifecycle. It is not permission to skip a todo,
+phase, authorization, failure-handling rule or required verification.
+
+The counter persists privately under `decisions/context-rounds/`, protected by
+an interprocess lock. Cached retries count too, so identical repeated calls
+cannot form an endless denial loop. Changed commands, reads, supplied findings,
+plan revisions and hook-process restarts do not refill the budget. A different
+prompt, task or active todo gets its own budget; returning to an earlier todo
+within the same prompt retains that todo's count.
+
+Below **70%**, with missing/invalid confidence, or when Jev is unavailable, the
+agent decides immediately without consuming a context request. A configured
+confidence threshold may be stricter than 70%, but cannot lower that floor.
+This floor applies to explicit advice, decision receipts and task-entry routing.
+Policy cohorts now use `decision-3`; context/question versions remain unchanged
+because the provider question did not change.

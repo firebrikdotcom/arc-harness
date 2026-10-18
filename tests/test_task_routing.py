@@ -222,6 +222,11 @@ class TaskRoutingTests(unittest.TestCase):
         record = json.loads(self.route(mode="active", env={**self.eligible_env(), "FAKE_CONFIDENCE": "0.7"}).stdout)
         self.assertEqual((record["source"], record["recommendation"], record["needs_reasoning"]), ("typesafe", "proceed", False))
 
+    def test_configured_threshold_cannot_lower_seventy_percent_floor(self):
+        self.run_cli("config", "update", "--section", "typesafe", "--values", '{"min_confidence":0.5}')
+        record = json.loads(self.route(mode="active", env={**self.eligible_env(),"FAKE_CONFIDENCE":"0.6"}).stdout)
+        self.assertEqual((record["action"],record["min_confidence"]),("normal_reasoning",0.7))
+
     def test_launcher_keeps_the_main_agent_launch_below_the_threshold(self) -> None:
         default = self.command_file("default.json", "DEFAULT")
         routine = self.command_file("routine.json", "ROUTINE")

@@ -436,7 +436,7 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
             # Exception text can echo credentials or provider content. Store only its type.
             record.update(status="fallback", fallback_reason=type(error).__name__, exit_code=1)
         record["evaluation_wall_ms"] = round((time.monotonic() - began) * 1000)
-    minimum = harness_config.load()["typesafe"].get("min_confidence", 0.70)
+    minimum = max(0.70, harness_config.load()["typesafe"].get("min_confidence", 0.70))
     confidence = ((record["answers"] or {}).get("recommendation") or {}).get("confidence")
     record.update(confidence=confidence, min_confidence=minimum)
     if record["status"] == "evaluated" and (not finite(confidence, 0, 1) or confidence < minimum):

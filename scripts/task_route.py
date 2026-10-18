@@ -367,7 +367,7 @@ def route_task(metadata: Path, project: Path, db_root: Path, router: Path, mode:
                 model = {}
             if routing_mode == "active" and (model.get("returned") != pinned_model() or model.get("drift")):
                 recommendation, reason, source = "default", "model drift or missing returned model", "fallback"
-    minimum = harness_config.load()['typesafe'].get('min_confidence', 0.70)
+    minimum = max(0.70, harness_config.load()['typesafe'].get('min_confidence', 0.70))
     confidence = answer['policy'].get('confidence') if answer else None
     if answer and routing_mode == 'active' and source == 'typesafe':
         if not advice.finite(confidence, 0, 1) or confidence < minimum:

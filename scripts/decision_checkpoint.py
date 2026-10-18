@@ -44,13 +44,59 @@ def telemetry(kind, row):
         pass  # Collection is best-effort and never changes action policy.
 
 
-def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: list[str],
+CONTEXT_REQUEST_LIMIT = 2
+CONTEXT_ACTIONS = {'gather_context', 'insufficient_information'}
+
+
+def evaluate(**kwargs) -> dict:
+    """Persist a two-request budget per prompt and active step, across processes.
+
+    Counting every enforced request includes cached retries, so an unchanged
+    action cannot leave the agent in an unbounded denial loop. Command edits,
+    reads, context updates and plan revisions do not refill the budget.
+    """
+    if kwargs.get('origin', 'explicit_decision') != 'automatic_tool' or kwargs.get('bypass'):
+        return _evaluate(**kwargs)
+    root = directory(kwargs['project'])
+    scope, state = kwargs['scope'], kwargs['state']
+    if not isinstance(scope, dict) or not isinstance(state, dict):
+        raise ValueError('Decision scope and state must be objects')
+    key = digest([kwargs['session_id'], scope.get('request_id'),
+                  scope.get('request_seq'), state.get('task_id'), state.get('active_todo_id')])
+    budgets = root / 'context-rounds'
+    budgets.mkdir(exist_ok=True, mode=0o700)
+    path = budgets / (key + '.json')
+    # Serialize budget check, provider evaluation and increment together. No
+    # Workflow DB transaction is held during a provider call.
+    with (budgets / (key + '.lock')).open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        count = json.loads(path.read_text())['count'] if path.exists() else 0
+        if type(count) is not int or not 0 <= count <= CONTEXT_REQUEST_LIMIT:
+            raise ValueError('Invalid Jev context request budget')
+        result = _evaluate(**kwargs, agent_reason='context_request_limit' if count >= CONTEXT_REQUEST_LIMIT else None)
+        if not result.get('needs_reasoning') and result.get('action_source') == 'jev' and result['action'] in CONTEXT_ACTIONS:
+            count += 1
+            temporary = budgets / ('.' + str(uuid.uuid4()))
+            with temporary.open('x') as stream:
+                os.chmod(temporary, 0o600)
+                json.dump({'count': count}, stream)
+            temporary.replace(path)
+        result['context_requests'] = count
+        save(root, result)
+        return result
+
+
+def _evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: list[str],
              choices: dict[str, str], scope: dict, state: dict, baseline: str | None = None,
              bypass: str | None = None, router_path: Path | None = None,
-             origin: str = 'explicit_decision', context_version: str = 'decision-context-1') -> dict:
+             origin: str = 'explicit_decision', context_version: str = 'decision-context-1',
+             agent_reason: str | None = None) -> dict:
     began = time.monotonic()
     settings = harness_config.load()['typesafe']
     mode = settings['mode']
+    minimum = max(0.70, settings.get('min_confidence', 0.70))
+    if agent_reason not in (None, 'context_request_limit'):
+        raise ValueError('Invalid agent escalation reason')
     import re
     if not isinstance(origin, str) or origin not in ORIGINS or not isinstance(context_version, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', context_version):
         raise ValueError('Invalid interaction origin or context version')
@@ -69,13 +115,13 @@ def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: l
     advice.text_field(goal, 'goal', 4000)
     advice.strings(facts, 'facts')
     context = {'version': 2, 'checkpoint': {'family': family, 'question_version': 'tool-decision-4' if origin == 'automatic_tool' else 'decision-1',
-        'policy_version': 'decision-2', 'bypass_reason': bypass or 'none',
+        'policy_version': 'decision-3', 'bypass_reason': bypass or 'none',
         'interaction_origin': origin, 'context_version': context_version},
         'context': {'goal': goal, 'facts': facts}, 'questions': {'recommendation': {
             'type': 'choice', 'instructions': 'Choose the best bounded next action using the supplied facts.',
             'criteria': choices}}}
     state_hash = digest(state)
-    cache_key = digest([str(project.resolve()), session_id, family, context, scope, state_hash, mode, settings['model'], settings.get('min_confidence', 0.70)])
+    cache_key = digest([str(project.resolve()), session_id, family, context, scope, state_hash, mode, settings['model'], minimum, agent_reason])
     root = directory(project)
     # Serialize identical evaluations, including outages, without a workflow DB transaction.
     with (root / ('.cache-' + cache_key + '.lock')).open('a') as lock:
@@ -101,14 +147,16 @@ def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: l
         row = {'id': str(uuid.uuid4()), 'parent_session_id': session_id, 'family': family, 'mode': mode,
             'interaction_origin': origin, 'context_version': context_version,
             'status': 'pending', 'action': 'normal_reasoning', 'scope': scope, 'choices': choices,
-            'confidence': None, 'min_confidence': settings.get('min_confidence', 0.70),
+            'confidence': None, 'min_confidence': minimum,
             'needs_reasoning': True, 'action_source': 'escalation', 'model': settings['model'],
             'state_hash': state_hash, 'state': state, 'cache_key': cache_key, 'cache_hit': False,
             'expires_at': time.time() + settings.get('decision_ttl_seconds', 300), 'call_id': None,
             'latency_ms': None, 'input_tokens': None, 'output_tokens': None, 'total_tokens': None,
             'state_build_ms': round((time.monotonic()-began)*1000)}
         save(root, row)  # A crash/provider outage leaves a durable pending attempt.
-        if bypass or mode == 'off':
+        if agent_reason:
+            row.update(status='fallback', fallback_reason=agent_reason)
+        elif bypass or mode == 'off':
             row.update(status='bypassed', fallback_reason=bypass or 'typesafe_disabled')
             if bypass and baseline in choices:
                 row.update(action=baseline, needs_reasoning=False, action_source='deterministic')
@@ -147,7 +195,7 @@ def evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: l
 def current_settings(row):
     settings = harness_config.load()['typesafe']
     return (row['mode'] == settings['mode'] and row.get('model') == settings['model']
-            and row.get('min_confidence') == settings.get('min_confidence', 0.70))
+            and row.get('min_confidence') == max(0.70, settings.get('min_confidence', 0.70)))
 
 
 def resolve(*, project: Path, identifier: str, session_id: str, action: str, reason: str,
