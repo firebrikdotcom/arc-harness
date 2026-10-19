@@ -1,0 +1,9 @@
+<link id="dashboard-favicon" rel="icon" href="/favicon.ico?v=arc">
+<script>
+(() => {
+  const icon = document.getElementById('dashboard-favicon');
+  const probe = new Image();
+  probe.onerror = () => { icon.href = '/public/omarchy-icon.png'; };
+  probe.src = icon.href;
+})();
+</script>

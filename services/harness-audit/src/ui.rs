@@ -21,11 +21,17 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use tera::Context;
 
+const ARC_ICON: &[u8] = include_bytes!("../public/arc-favicon.png");
+
 const OMARCHY_ICON: &[u8] = include_bytes!("../public/omarchy-icon.png");
 
 const STYLESHEET: &str = include_str!("../public/styles.css");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
+    TemplateDef {
+        name: TemplateName("components/favicon.html"),
+        source: include_str!("../resources/views/components/favicon.html"),
+    },
     TemplateDef {
         name: TemplateName("audit/orchestration.html"),
         source: include_str!("../resources/views/audit/orchestration.html"),
@@ -1662,11 +1668,11 @@ async fn workflow_items(
     }
 }
 
-// A runtime custom icon takes priority; the bundled fallback works without assets on disk.
+// A runtime custom icon takes priority; Arc branding is embedded for asset-free deployments.
 fn favicon_response(custom: &std::path::Path) -> HttpResponse {
     let (content_type, body) = match std::fs::read(custom) {
         Ok(bytes) if !bytes.is_empty() => ("image/x-icon", bytes),
-        _ => ("image/png", OMARCHY_ICON.to_vec()),
+        _ => ("image/png", ARC_ICON.to_vec()),
     };
     HttpResponse::Ok()
         .content_type(content_type)
@@ -1677,6 +1683,14 @@ fn favicon_response(custom: &std::path::Path) -> HttpResponse {
 #[get("/favicon.ico")]
 async fn favicon() -> impl Responder {
     favicon_response(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("public/favicon.ico"))
+}
+
+#[get("/public/omarchy-icon.png")]
+async fn omarchy_favicon() -> impl Responder {
+    HttpResponse::Ok()
+        .content_type("image/png")
+        .insert_header(("Cache-Control", "public, max-age=300"))
+        .body(OMARCHY_ICON)
 }
 
 #[get("/public/styles.css")]
@@ -1694,7 +1708,8 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(workflow_page)
         .service(workflow_items)
         .service(stylesheet)
-        .service(favicon);
+        .service(favicon)
+        .service(omarchy_favicon);
 }
 
 #[cfg(test)]
@@ -1702,7 +1717,7 @@ mod tests {
     use super::*;
 
     #[actix_web::test]
-    async fn favicon_uses_omarchy_until_a_custom_icon_is_available() {
+    async fn favicon_uses_arc_until_a_custom_icon_is_available() {
         use actix_web::{body::to_bytes, test, App};
         let directory =
             std::env::temp_dir().join(format!("audit-favicon-{}", uuid::Uuid::new_v4()));
@@ -1736,9 +1751,29 @@ mod tests {
                 }
             );
             let body = to_bytes(response.into_body()).await.unwrap();
-            assert_eq!(body.as_ref(), expected.as_deref().unwrap_or(OMARCHY_ICON));
+            assert_eq!(body.as_ref(), expected.as_deref().unwrap_or(ARC_ICON));
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[actix_web::test]
+    async fn favicon_routes_serve_arc_as_primary_and_omarchy_only_as_fallback() {
+        use actix_web::{body::to_bytes, test, App};
+        let app = test::init_service(App::new().configure(config)).await;
+        for (uri, expected) in [
+            ("/favicon.ico?v=arc", ARC_ICON),
+            ("/public/omarchy-icon.png", OMARCHY_ICON),
+        ] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+            assert_eq!(
+                to_bytes(response.into_body()).await.unwrap().as_ref(),
+                expected
+            );
+        }
+        assert_ne!(ARC_ICON, OMARCHY_ICON);
     }
 
     fn checkpoint(
@@ -1937,7 +1972,7 @@ mod tests {
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
-        assert!(html.contains("rel=\"icon\" href=\"/favicon.ico\""));
+        assert!(html.contains("rel=\"icon\" href=\"/favicon.ico?v=arc\""));
         assert!(html.contains("Harness audit"));
         assert!(
             html.contains(">0.33<"),

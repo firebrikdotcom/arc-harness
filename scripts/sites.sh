@@ -243,8 +243,8 @@ cmd_publish() {
     elif python3 -c 'import sys, zipfile; sys.exit(0 if zipfile.is_zipfile(sys.argv[1]) else 1)' "$source"; then
         kind=zip
     else
-        case ${source,,} in
-            *.html|*.htm) kind=html ;;
+        case $source in
+            *.[hH][tT][mM][lL]|*.[hH][tT][mM]) kind=html ;;
             *) info "FAIL: publish an .html file, a .zip, or a folder with index.html: $source" >&2; exit "$EXIT_USAGE" ;;
         esac
     fi

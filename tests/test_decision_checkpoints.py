@@ -17,7 +17,7 @@ import workflow_gate
 class Decisions(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.env = patch.dict(os.environ, HARNESS_DB_ROOT=str(self.root), HARNESS_WORKFLOW_STATE=str(self.root / 'workflow.sqlite'))
         self.env.start()
         self.config = {'typesafe': {'mode': 'active', 'model': 'jev-1.13.0', 'decision_ttl_seconds': 300,

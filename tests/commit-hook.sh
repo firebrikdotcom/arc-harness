@@ -4,6 +4,7 @@ set -eu
 ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/harness-commit-hook.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+TMP=$(CDPATH='' cd "$TMP" && pwd -P)
 
 mkdir -p "$TMP/repo/.githooks" "$TMP/repo/scripts"
 git -C "$TMP/repo" init -q

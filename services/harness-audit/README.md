@@ -23,7 +23,7 @@ Browser pages (Arc UI host, same read model as the API):
 
 - `GET /` — audit workbench: a daily Jev confidence line (mean recorded recommendation confidence by client calendar day), event and checkpoint totals, checkpoint families, task-entry routes, recent events; `?include_fixtures=true` shows regression-test fixtures
 - `GET /events[?type=jev.checkpoint&limit=200]` — newest-first event log with a type filter
-- `GET /favicon.ico` — custom `public/favicon.ico` when readable and nonempty, otherwise the bundled Omarchy icon (from `/usr/share/omarchy/icon.png`); the fallback is embedded and needs no runtime asset files. The custom path is relative to the service source directory at build time; changes appear within the five-minute browser cache window.
+- `GET /favicon.ico` — custom `public/favicon.ico` when readable and nonempty, otherwise the embedded Arc logo. The 128-pixel favicon is exported from the canonical `docs/imgs/arc-logo.png` in `lotharthesavior/arc` on a white background for tab contrast. Runtime asset files are unnecessary. A failed icon load uses `/public/omarchy-icon.png` as the fallback. The versioned icon URL refreshes the previous Omarchy icon; subsequent custom changes use a five-minute cache window.
 - `GET /public/styles.css` — the dashboard stylesheet, embedded at build time
 
 Endpoints:

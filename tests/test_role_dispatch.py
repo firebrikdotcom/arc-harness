@@ -17,7 +17,7 @@ import role_dispatch as d
 class DispatcherTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.project = self.root / 'project'
         self.project.mkdir()
         self.config = {'enabled': True, 'max_workers': 1, 'max_context_bytes': 12000, 'timeout_seconds': 1,
@@ -150,6 +150,7 @@ class DispatcherTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.integrate(run, 'one')
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_cancel_terminates_real_term_ignoring_group(self):
         self.config['timeout_seconds'] = 30
         self.config['profiles']['scan'] = {'provider': 'command', 'role': 'explorer', 'model': 'fixture', 'effort': 'low', 'command': [sys.executable, '-c', 'import signal,time,pathlib;signal.signal(signal.SIGTERM,signal.SIG_IGN);pathlib.Path(' + repr(str(self.root / 'child-ready')) + ').touch();time.sleep(30)']}
@@ -216,6 +217,7 @@ class DispatcherTest(unittest.TestCase):
                 run = self.create(self.worker(profiles=['scan', 'second']))
             self.assertEqual(d.status(run)['workers'][0]['profile_id'], expected, confidence)
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_concurrent_execute_acquires_one_atomic_launch_lease(self):
         report = {'status': 'completed', 'evidence': 'one real process', 'acceptance': [{'criterion': 'Evidence checked', 'passed': True, 'evidence': 'verified'}]}
         count = self.root / 'launch-count'
@@ -253,6 +255,7 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(count.read_text().splitlines(), ['launch'])
         self.assertEqual(d.status(run)['workers'][0]['status'], 'completed')
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_status_refresh_cannot_overwrite_concurrent_completion(self):
         self.config['profiles']['scan']['provider'] = 'command'
         run = self.create(self.worker())
@@ -283,6 +286,11 @@ class DispatcherTest(unittest.TestCase):
         worker = d.status(run)['workers'][0]
         self.assertEqual(worker['status'], 'completed')
         self.assertEqual(worker['result']['evidence'], 'Ran targeted checks')
+
+    def test_external_supervision_refuses_platforms_without_process_identity(self):
+        with patch.object(d.Path, 'exists', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'requires Linux /proc'):
+                d.external('unstarted', 'one')
 
     def test_default_adapters_reduce_optional_context_and_restrict_access(self):
         profile = {'provider': 'codex', 'model': 'fixture', 'effort': 'low'}
@@ -315,6 +323,7 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(d.parse_terminal_report('Verified result.\n```json\n' + json.dumps(report) + '\n```'), report)
         self.assertIsNone(d.parse_terminal_report('Result has no terminal report'))
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_external_stdout_reports_and_real_usage_shapes(self):
         report = {'status': 'completed', 'evidence': 'stdout acceptance', 'acceptance': [{'criterion': 'Evidence checked', 'passed': True, 'evidence': 'stdout verified'}]}
         for provider_shape in ('codex', 'claude', 'claude_structured'):
@@ -340,6 +349,7 @@ class DispatcherTest(unittest.TestCase):
             self.assertEqual(result['input_tokens'], 10 if provider_shape == 'codex' else 12)
             self.assertGreater(result['context_bytes'], len('Small context'))
 
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_external_process_terminal_report_and_timeout(self):
         self.config['profiles']['scan'] = {'provider': 'command', 'role': 'explorer', 'model': 'fixture', 'effort': 'low', 'command': [sys.executable, '-c', 'import json,sys;json.dump({"status":"completed","evidence":"real process","acceptance":[{"criterion":"Evidence checked","passed":True,"evidence":"checked"}]},open(sys.argv[1],"w"))', '{result}']}
         run = self.create(self.worker())
