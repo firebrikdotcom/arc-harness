@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import concurrent.futures
 import json
+import math
 import os
 import re
 import signal
@@ -37,15 +38,37 @@ def connection():
     path.chmod(0o600)
     if 'request_id' not in {row[1] for row in db.execute('PRAGMA table_info(runs)')}:
         db.execute('ALTER TABLE runs ADD COLUMN request_id TEXT')
+    for column in ('assessment', 'measurement'):
+        if column not in {row[1] for row in db.execute('PRAGMA table_info(runs)')}:
+            db.execute(f'ALTER TABLE runs ADD COLUMN {column} TEXT')
     return db
 
 
 def session_has_plan(project: Path, session_id: str, request_id: str | None = None) -> bool:
+    import workflow_audit
+    with workflow_audit.context_db() as workflow_db:
+        context = workflow_audit.load(workflow_db, session_id)
+    scope = required_scope(context)
     with connection() as db:
-        return db.execute('SELECT 1 FROM runs WHERE project=? AND session=? AND status IN ("active","completed") AND (? IS NULL OR request_id=?)', (str(project.resolve()), session_id, request_id, request_id)).fetchone() is not None
+        rows = db.execute('SELECT assessment FROM runs WHERE project=? AND session=? AND status IN ("active","completed") AND (? IS NULL OR request_id=?)', (str(project.resolve()), session_id, request_id, request_id)).fetchall()
+    for row in rows:
+        value = json.loads(row[0]) if row[0] else {}
+        if value.get('scope_hash') == scope['hash'] and (scope['count'] <= 1 or value.get('task_size') == 'substantial'):
+            return True
+        # Legacy plans remain usable only without a declared execution scope.
+        if not value and not scope['count']:
+            return True
+    return False
 
 
 plan_for_session = session_has_plan
+
+
+def required_scope(context):
+    items = [{k: item.get(k) for k in ('id', 'description', 'criterion')}
+             for item in context.get('todos', {}).values()
+             if item.get('required', True) and item.get('status') != 'removed']
+    return {'count': len(items), 'hash': hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()}
 
 
 def safe_path(project: Path, raw: str) -> str:
@@ -61,10 +84,34 @@ def overlap(a: str, b: str) -> bool:
     return a == b or a.startswith(b + '/') or b.startswith(a + '/')
 
 
+def assessment(plan: dict, required_steps: int = 0) -> dict:
+    """Classify observable scope; a lone step may still be declared substantial."""
+    value = plan.get('assessment')
+    substantial = bool(plan.get('workers')) or required_steps > 1
+    if value is None:
+        if substantial:
+            raise ValueError('substantial work requires assessment: task_size, strategy, reason, model_fit and latency_tradeoff; main_only remains allowed with justification')
+        return {'task_size': 'trivial', 'strategy': 'main_only'}
+    fields = {'task_size', 'strategy', 'reason', 'model_fit', 'latency_tradeoff'}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError('assessment requires exactly task_size, strategy, reason, model_fit and latency_tradeoff')
+    if value['task_size'] not in ('trivial', 'substantial') or value['strategy'] not in ('main_only', 'delegate'):
+        raise ValueError('invalid assessment task_size or strategy')
+    for key in ('reason', 'model_fit', 'latency_tradeoff'):
+        if not isinstance(value[key], str) or not value[key].strip() or len(value[key].encode()) > 1000:
+            raise ValueError('assessment text must be nonempty and at most 1000 bytes per field')
+    if substantial and value['task_size'] != 'substantial':
+        raise ValueError('workers or multiple required steps require a substantial assessment')
+    if (value['strategy'] == 'delegate') != bool(plan.get('workers')):
+        raise ValueError('assessment strategy must match the worker list')
+    return dict(value)
+
+
 def validate(plan: dict, project: Path, config: dict) -> list[dict]:
     workers = plan.get('workers')
-    if set(plan) - {'workers', 'rationale', 'acceptance', 'request_id'} or not isinstance(workers, list) or len(workers) > 32:
+    if set(plan) - {'workers', 'rationale', 'acceptance', 'request_id', 'assessment'} or not isinstance(workers, list) or len(workers) > 32:
         raise ValueError('plan requires 1..32 workers')
+    assessment(plan)
     if not workers and (not plan.get('rationale') or not plan.get('acceptance')):
         raise ValueError('main-only plans require rationale and acceptance')
     seen = {}
@@ -124,6 +171,10 @@ def emit(event, run, w=None):
     payload = {k: w.get(k) for k in ('queued_at', 'started_at', 'finished_at', 'duration_ms', 'queue_ms', 'context_bytes', 'input_tokens', 'cached_input_tokens', 'output_tokens', 'total_tokens', 'cost_usd', 'exit_code', 'decisions')}
     payload.update(run_id=run['id'], worker_id=w.get('id'), parent_session_id=run['session'], role=w.get('role'), status=w.get('status', run['status']))
     payload.update({k: profile.get(k) for k in ('provider', 'model', 'effort')})
+    if not w:
+        # Free-text assessment stays local; telemetry carries only compact facts.
+        payload.update({k: (run.get('assessment') or {}).get(k) for k in ('task_size', 'strategy')})
+        payload.update(run.get('measurement') or {})
     try:
         audit_transport.emit('orchestration.' + event, payload, flush_now=False)
     except (OSError, ValueError, sqlite3.Error):
@@ -138,7 +189,10 @@ def get_run(db, run_id):
     row = db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
     if row is None:
         raise ValueError('unknown run')
-    return dict(row)
+    run = dict(row)
+    for key in ('assessment', 'measurement'):
+        run[key] = json.loads(run[key]) if run.get(key) else None
+    return run
 
 
 def workers(db, run_id):
@@ -154,9 +208,12 @@ def create(plan: dict, project: Path, session_id: str) -> dict:
     import workflow_audit
     with workflow_audit.context_db() as workflow_db:
         workflow_context = workflow_audit.load(workflow_db, session_id)
+    scope = required_scope(workflow_context)
+    assessed = assessment(plan, scope['count'])
+    assessed['scope_hash'] = scope['hash']
     if not plan.get('request_id'):
         plan = {**plan, 'request_id': workflow_context.get('request_id')}
-    run = {'id': uuid.uuid4().hex, 'project': str(project), 'session': session_id, 'status': 'active', 'created': time.time(), 'request_id': plan.get('request_id')}
+    run = {'id': uuid.uuid4().hex, 'project': str(project), 'session': session_id, 'status': 'active', 'created': time.time(), 'request_id': plan.get('request_id'), 'assessment': assessed}
     # Selection uses only enum metadata, never task text or repository paths.
     for w in validated:
         candidates = w['profiles']
@@ -180,12 +237,44 @@ def create(plan: dict, project: Path, session_id: str) -> dict:
             outcome(project=project, identifier=receipt['id'], session_id=session_id, exit_code=0)
         w.update(profile=config['profiles'][choice], profile_id=choice, status='queued', queued_at=time.time(), context_bytes=len(json.dumps(w).encode()))
     with connection() as db:
-        db.execute('INSERT INTO runs (id,project,session,status,created,request_id) VALUES (:id,:project,:session,:status,:created,:request_id)', run)
+        db.execute('INSERT INTO runs (id,project,session,status,created,request_id,assessment) VALUES (?,?,?,?,?,?,?)',
+                   (*[run[k] for k in ('id', 'project', 'session', 'status', 'created', 'request_id')], json.dumps(assessed)))
         for w in validated:
             db.execute('INSERT INTO workers VALUES (?,?,?,?)', (run['id'], w['id'], w['status'], json.dumps(w)))
             emit('worker_planned', run, w)
     emit('run_created', run)
     return {'run_id': run['id'], 'status': 'active'}
+
+
+def measure(run_id, result):
+    """One whole-task observation, including parent/integration/review overhead."""
+    metrics = {'total_tokens', 'cost_usd', 'rework_count', 'quality_passed', 'comparison_key'}
+    if not isinstance(result, dict) or set(result) - metrics:
+        raise ValueError('measurement accepts total_tokens, cost_usd, rework_count, quality_passed and comparison_key only')
+    for key in ('total_tokens', 'rework_count'):
+        if result.get(key) is not None and (type(result[key]) is not int or result[key] < 0):
+            raise ValueError(key + ' must be a nonnegative integer or null')
+    cost = result.get('cost_usd')
+    if cost is not None and (type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0):
+        raise ValueError('cost_usd must be finite and nonnegative or null')
+    if result.get('quality_passed') is not None and type(result['quality_passed']) is not bool:
+        raise ValueError('quality_passed must be boolean or null')
+    if result.get('comparison_key') is not None and (not isinstance(result['comparison_key'], str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', result['comparison_key'])):
+        raise ValueError('comparison_key must be a compact non-sensitive cohort identifier')
+    with connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        run = get_run(db, run_id)
+        if run.get('measurement') is not None:
+            raise ValueError('whole-task measurement is already recorded')
+        if any(w['status'] not in TERMINAL for w in workers(db, run_id)):
+            raise ValueError('measure after all workers have terminated and parent verification is finished')
+        observation = {key: result.get(key) for key in metrics}
+        observation.update(measured_at=time.time())
+        observation['elapsed_ms'] = max(0, int((observation['measured_at'] - run['created']) * 1000))
+        run['measurement'] = observation
+        db.execute('UPDATE runs SET measurement=? WHERE id=?', (json.dumps(observation), run_id))
+        emit('run_measured', run)
+    return {'run_id': run_id, 'measurement': observation}
 
 
 def git(project, *args, **kwargs):
@@ -714,7 +803,7 @@ def run_workers(run_id):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('create', 'next', 'status', 'run', 'bind', 'complete', 'cancel', 'message', 'integrate', 'execute'))
+    parser.add_argument('action', choices=('create', 'next', 'status', 'run', 'bind', 'complete', 'cancel', 'message', 'integrate', 'execute', 'measure'))
     parser.add_argument('--project', type=Path, default=Path.cwd())
     parser.add_argument('--session-id', default=os.environ.get('HARNESS_SESSION_ID') or os.environ.get('CODEX_THREAD_ID') or os.environ.get('CLAUDE_SESSION_ID'))
     parser.add_argument('--plan', type=Path)
@@ -747,6 +836,10 @@ def main():
                 value = bind(args.run, args.worker, args.agent_id)
             elif args.action == 'complete':
                 value = finish(args.run, args.worker, json.loads(args.result.read_text()))
+            elif args.action == 'measure':
+                if not args.result:
+                    raise ValueError('measure requires --result with whole-task observations; unknown values may be null')
+                value = measure(args.run, json.loads(args.result.read_text()))
             elif args.action == 'integrate':
                 value = integrate(args.run, args.worker)
             elif args.action == 'cancel':

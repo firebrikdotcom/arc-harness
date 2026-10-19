@@ -16,7 +16,7 @@ small context packet. Never copy the conversation history into worker prompts.
    existing `harness advise` interface when appropriate.
 3. Submit a role plan with `harness dispatch create --plan PLAN.json --project PATH`.
    For a trivial task use `workers: []` with a rationale and acceptance criteria;
-   deciding whether delegation is useful does not require launching a worker.
+   substantial work requires the explicit assessment below, including justified main-only work.
 4. Use `harness dispatch next --run ID` and start its native and external tool
    handoffs concurrently. External handoffs call `dispatch execute`; native
    handoffs supply exact spawn arguments. `dispatch run` is a synchronous
@@ -54,6 +54,13 @@ a recorded worker failure, not permission to silently change providers.
 
 ```json
 {
+  "assessment": {
+    "task_size": "substantial",
+    "strategy": "delegate",
+    "reason": "One independent inspection can run while the parent implements.",
+    "model_fit": "A smaller native model can inspect this bounded concern; the parent verifies its evidence.",
+    "latency_tradeoff": "Parallel inspection offsets packet setup and verification overhead."
+  },
   "workers": [
     {
       "id": "inspect",
@@ -70,7 +77,33 @@ a recorded worker failure, not permission to silently change providers.
 }
 ```
 
-`schemas/dispatch.schema.json` describes the complete shape. Editing workers
+`schemas/dispatch.schema.json` describes the complete shape.
+
+### Required delegation assessment
+
+Before substantial work, explicitly consider bounded assignments, parallel work,
+smaller-model capability, native tool availability, startup/context overhead and
+parent verification/rework. Choose `delegate` only when the expected benefit
+justifies that overhead; otherwise choose `main_only` with concrete reasons.
+Prefer smaller native workers when their capabilities fit. Do not delegate tiny
+operations just to satisfy a quota, or repeat a worker's entire investigation.
+
+The dispatcher requires `assessment` whenever workers are present or the current
+Workflow plan has more than one required, non-removed step (completed steps still
+count). A single step can also be substantial: declare it explicitly. This is an
+observable scope rule, not a claim to infer semantic complexity. Trivial main-only
+plans retain the short `workers: []`, `rationale`, `acceptance` form. An explicit
+assessment has exactly the five fields in the example; `task_size` is `trivial`
+or `substantial`, and `strategy` is `main_only` or `delegate`, matching the worker
+list. Text fields are nonempty, at most 1000 UTF-8 bytes each; keep them redacted.
+Main-only plans still need their rationale and acceptance criteria.
+
+Assessments persist locally with the run. Telemetry sends only size and strategy,
+never the free-text reasons. Changing required todo scope invalidates an old role
+plan; changing a todo's status does not. Existing legacy plans remain usable only
+when no required execution steps are declared.
+
+Editing workers
 receive separate sibling Git worktrees based on the current parent workspace,
 including permitted dirty/untracked source changes. Sensitive files and private
 runtime state are excluded. Original work remains in the parent checkout.
@@ -167,6 +200,43 @@ measured baseline.
 Events contain compact facts, identifiers and measurements, not worker prompts,
 source, command output or diffs. Delivery uses the existing durable outbox; an
 unavailable dashboard queues events without changing execution decisions.
+
+### Whole-task observations
+
+After workers terminate and the parent finishes integration, verification and
+review, record one observation for the role plan (also for main-only work):
+
+```sh
+harness dispatch measure --run RUN --result /dev/stdin <<'JSON'
+{
+  "comparison_key": "bounded_bug_fix",
+  "total_tokens": null,
+  "cost_usd": null,
+  "rework_count": 0,
+  "quality_passed": true
+}
+JSON
+```
+
+Token and USD totals must include parent and workers, routing, failed attempts
+and review; omit them or use null unless the whole scope is measured. Do not
+substitute worker-only totals or infer cost from token count. `rework_count`
+counts corrective cycles after a candidate fails checks or review; unknown is
+null. `quality_passed` reports whether required checks and independent review
+passed, without replacing those gates. Zero is a known measurement, not a
+missing value. A non-sensitive `comparison_key` groups comparable work, using
+1–64 letters, digits, underscores or hyphens; it is not a task description.
+
+Elapsed milliseconds are measured from role-plan creation to this observation,
+including parent overhead and waiting. Record promptly after the checks, once
+per run; late observations include the delay. Plan setup before creation is not
+measured. A measurement does not complete a Workflow task or waive any gate.
+Measurements are explicit parent observations, not automatically recovered
+native-provider billing. The existing orchestration API exposes `task_measurements`
+by comparison key and strategy, with sample counts, unknown coverage, elapsed
+time, tokens, USD cost, rework and quality. Legacy runs retain unknown strategy
+and measurements. Compare matched task cohorts before requiring broader
+subagent use; no automatic policy promotion or claimed speedup is introduced.
 
 ## Enforcement boundary
 

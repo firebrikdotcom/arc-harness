@@ -30,6 +30,9 @@ class SessionRunsTests(unittest.TestCase):
                                "CLAUDECODE", "CODEX_SANDBOX")):
                 self.env.pop(key)
         self.env.update(HARNESS_ROOT=str(ROOT), HARNESS_DB_ROOT=str(self.base / "db"),
+                        # Exercise this exact checkout against the scratch database;
+                        # re-entering the managed launcher replaces those bindings.
+                        HARNESS_RUNTIME_ACTIVE="1",
                         HARNESS_JEV_CHECKPOINTS="0", HARNESS_AUDIT_ENABLED="0",
                         HARNESS_WORKFLOW_STATE=str(self.base / "workflow.sqlite"),
                         HARNESS_AUDIT_SETTINGS=str(self.base / "settings.json"),

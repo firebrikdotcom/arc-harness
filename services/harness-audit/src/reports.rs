@@ -74,9 +74,9 @@ impl ReportStore {
         // Change this version when reducer semantics or compact report fields change.
         // Only disposable derived state is rebuilt; events and the legacy view remain intact.
         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-            if cached(conn, "schema_version")? != Some(json!(4)) {
+            if cached(conn, "schema_version")? != Some(json!(5)) {
                 conn.batch_execute("DELETE FROM dashboard_events; DELETE FROM dashboard_reports; UPDATE dashboard_checkpoint SET position=0 WHERE singleton=1;")?;
-                save(conn,"schema_version",&json!(4))?;
+                save(conn,"schema_version",&json!(5))?;
             }
             Ok(())
         })?;

@@ -8,6 +8,17 @@
     "request_id": {"type": "string"},
     "rationale": {"type": "string", "minLength": 1},
     "acceptance": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "assessment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_size", "strategy", "reason", "model_fit", "latency_tradeoff"],
+      "properties": {
+        "task_size": {"enum": ["trivial", "substantial"]},
+        "strategy": {"enum": ["main_only", "delegate"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "model_fit": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "latency_tradeoff": {"type": "string", "minLength": 1, "maxLength": 1000}
+      }
+    },
     "workers": {
       "type": "array", "maxItems": 32,
       "items": {
@@ -27,5 +38,8 @@
       }
     }
   },
-  "allOf": [{"if": {"properties": {"workers": {"maxItems": 0}}}, "then": {"required": ["rationale", "acceptance"]}}]
+  "allOf": [
+    {"if": {"properties": {"workers": {"maxItems": 0}}}, "then": {"required": ["rationale", "acceptance"], "properties": {"assessment": {"properties": {"strategy": {"const": "main_only"}}}}}},
+    {"if": {"properties": {"workers": {"minItems": 1}}}, "then": {"required": ["assessment"], "properties": {"assessment": {"properties": {"task_size": {"const": "substantial"}, "strategy": {"const": "delegate"}}}}}}
+  ]
 }

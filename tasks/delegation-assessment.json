@@ -1,0 +1,7 @@
+{
+  "goal": "Require explicit delegation assessment for substantial work and measure whole-task outcomes.",
+  "deliverables": ["scripts/role_dispatch.py", "schemas/dispatch.schema.json", "services/harness-audit/src/orchestration.rs", "tests/test_role_dispatch.py", "docs/orchestration.md"],
+  "constraints": ["Preserve unrelated working changes and machine state.", "Do not force a worker when overhead or model fit justifies main-only execution.", "Unknown usage and cost remain unknown; measurements never replace required checks."],
+  "non_goals": [{"description": "No automatic model changes, secret changes, fleet rollout or unrelated edits."}],
+  "acceptance": [{"id":"dispatch", "criterion":"Substantial plans require a bounded assessment and task measurements validate and persist", "command":["sh","tests/role-dispatch.sh"]}, {"id":"suite", "criterion":"Full deterministic verification and independent review pass"}]
+}

@@ -142,6 +142,12 @@ pub fn summarize(rows: &[Value]) -> Value {
         "exit_code",
         "outcome",
         "quality_passed",
+        "task_size",
+        "strategy",
+        "measured_at",
+        "elapsed_ms",
+        "rework_count",
+        "comparison_key",
     ];
     let workers = collapse(&ordered, "orchestration.worker_", "worker_id", &fields);
     let runs = collapse(&ordered, "orchestration.run_", "run_id", &fields);
@@ -197,6 +203,24 @@ pub fn summarize(rows: &[Value]) -> Value {
             .push(worker.clone());
     }
     let grouped: Vec<Value> = keyed.into_iter().map(|(key, items)| json!({"role":key[0],"provider":key[1],"model":key[2],"effort":key[3],"count":items.len(),"statuses":statuses(&items),"duration_ms":metric(&items,"duration_ms"),"queue_ms":metric(&items,"queue_ms"),"context_bytes":metric(&items,"context_bytes"),"tokens":metric(&items,"total_tokens"),"cached_input_tokens":metric(&items,"cached_input_tokens"),"cost_usd":metric(&items,"cost_usd")})).collect();
+    let mut task_groups = BTreeMap::<(Option<String>, Option<String>), Vec<Value>>::new();
+    for run in &runs {
+        task_groups
+            .entry((
+                text(run, "comparison_key").map(str::to_owned),
+                text(run, "strategy").map(str::to_owned),
+            ))
+            .or_default()
+            .push(run.clone());
+    }
+    let task_measurements: Vec<Value> = task_groups.into_iter().map(|((key, strategy), items)| json!({
+        "comparison_key": key, "strategy": strategy, "count": items.len(),
+        "measured": items.iter().filter(|v| number(v, "measured_at").is_some()).count(),
+        "elapsed_ms": metric(&items, "elapsed_ms"), "total_tokens": metric(&items, "total_tokens"),
+        "cost_usd": metric(&items, "cost_usd"), "rework_count": metric(&items, "rework_count"),
+        "quality_samples": items.iter().filter(|v| v["quality_passed"].is_boolean()).count(),
+        "quality_passed": items.iter().filter(|v| v["quality_passed"] == true).count()
+    })).collect();
     let mut intervals: Vec<(i64, i32)> = workers
         .iter()
         .filter_map(|w| instant(&w["started_at"]).zip(instant(&w["finished_at"])))
@@ -209,7 +233,7 @@ pub fn summarize(rows: &[Value]) -> Value {
         active += delta;
         peak = peak.max(active);
     }
-    json!({"events":ordered.len(),"runs":runs,"workers":workers,"worker_groups":grouped,"worker_count":workers.len(),"statuses":statuses(&workers),"decisions":decisions,"decision_count":decisions.len(),"decision_tokens":metric(&decisions,"total_tokens"),"decision_cost_usd":metric(&decisions,"cost_usd"),"decision_latency_ms":metric(&decisions,"latency_ms"),"decision_duration_ms":metric(&decisions,"duration_ms"),"cache_hits":decisions.iter().filter(|d| d["cache_hit"] == true).count(),"cache_samples":decisions.iter().filter(|d| d["cache_hit"].is_boolean()).count(),"peak_concurrency":if intervals.is_empty(){None}else{Some(peak)},"concurrency_samples":intervals.len()/2})
+    json!({"events":ordered.len(),"runs":runs,"task_measurements":task_measurements,"workers":workers,"worker_groups":grouped,"worker_count":workers.len(),"statuses":statuses(&workers),"decisions":decisions,"decision_count":decisions.len(),"decision_tokens":metric(&decisions,"total_tokens"),"decision_cost_usd":metric(&decisions,"cost_usd"),"decision_latency_ms":metric(&decisions,"latency_ms"),"decision_duration_ms":metric(&decisions,"duration_ms"),"cache_hits":decisions.iter().filter(|d| d["cache_hit"] == true).count(),"cache_samples":decisions.iter().filter(|d| d["cache_hit"].is_boolean()).count(),"peak_concurrency":if intervals.is_empty(){None}else{Some(peak)},"concurrency_samples":intervals.len()/2})
 }
 fn statuses(items: &[Value]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
@@ -287,6 +311,34 @@ pub fn diagram(summary: &Value, directory: &[Value], selected: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn whole_task_measurements_keep_strategy_cohorts_and_unknown_coverage() {
+        let rows = vec![
+            json!({"event_type":"orchestration.run_created","payload":{"run_id":"a","task_size":"substantial","strategy":"main_only"}}),
+            json!({"event_type":"orchestration.run_measured","payload":{"run_id":"a","elapsed_ms":800,"rework_count":0,"quality_passed":true,"measured_at":10,"comparison_key":"fix"}}),
+            json!({"event_type":"orchestration.run_created","payload":{"run_id":"b","strategy":"delegate"}}),
+            json!({"event_type":"orchestration.run_measured","payload":{"run_id":"b","elapsed_ms":600,"rework_count":2,"quality_passed":false,"cost_usd":0.2,"measured_at":11,"comparison_key":"fix"}}),
+            json!({"event_type":"orchestration.run_created","payload":{"run_id":"legacy"}}),
+        ];
+        let summary = summarize(&rows);
+        let groups = summary["task_measurements"].as_array().unwrap();
+        let main = groups
+            .iter()
+            .find(|v| v["strategy"] == "main_only")
+            .unwrap();
+        assert_eq!(main["elapsed_ms"]["total"], 800.0);
+        assert_eq!(main["cost_usd"]["samples"], 0);
+        assert!(main["cost_usd"]["total"].is_null());
+        assert_eq!(main["quality_passed"], 1);
+        let delegated = groups.iter().find(|v| v["strategy"] == "delegate").unwrap();
+        assert_eq!(delegated["rework_count"]["total"], 2.0);
+        assert_eq!(delegated["quality_samples"], 1);
+        assert_eq!(delegated["quality_passed"], 0);
+        assert_eq!(
+            groups.iter().find(|v| v["strategy"].is_null()).unwrap()["measured"],
+            0
+        );
+    }
     #[test]
     fn diagram_joins_names_by_session_id_and_keeps_worker_run_scope() {
         let rows = vec![

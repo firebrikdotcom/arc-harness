@@ -22,7 +22,11 @@ class DispatcherTest(unittest.TestCase):
         self.project.mkdir()
         self.config = {'enabled': True, 'max_workers': 1, 'max_context_bytes': 12000, 'timeout_seconds': 1,
                        'profiles': {'scan': {'provider': 'native', 'model': 'test-model', 'effort': 'low', 'role': 'explorer', 'agent_type': 'explorer'}}}
-        self.env = patch.dict(os.environ, {'HARNESS_DISPATCH_DB': str(self.root / 'dispatch.sqlite'), 'HARNESS_AUDIT_ENABLED': '0'})
+        offline = copy.deepcopy(d.harness_config.DEFAULTS)
+        offline['typesafe']['mode'] = 'off'
+        config_path = self.root / 'config.json'
+        config_path.write_text(json.dumps(offline))
+        self.env = patch.dict(os.environ, {'HARNESS_CONFIG': str(config_path), 'HARNESS_DISPATCH_DB': str(self.root / 'dispatch.sqlite'), 'HARNESS_AUDIT_ENABLED': '0', 'HARNESS_WORKFLOW_STATE': str(self.root / 'workflow.sqlite')})
         self.env.start()
         self.loader = patch.object(d.harness_config, 'load', return_value={'dispatch': self.config})
         self.loader.start()
@@ -35,7 +39,9 @@ class DispatcherTest(unittest.TestCase):
         value.update(changes)
         return value
     def create(self, *workers):
-        return d.create({'workers': list(workers), 'request_id': 'request-a'}, self.project, 'session')['run_id']
+        return d.create({'workers': list(workers), 'assessment': self.assessment(), 'request_id': 'request-a'}, self.project, 'session')['run_id']
+    def assessment(self, strategy='delegate'):
+        return {'task_size': 'substantial', 'strategy': strategy, 'reason': 'Independent bounded inspection' if strategy == 'delegate' else 'Coupled change needs shared context', 'model_fit': 'Native smaller model fits inspection; parent verifies', 'latency_tradeoff': 'Run independent inspection concurrently to offset setup cost'}
     def complete(self, run, name='one'):
         return d.finish(run, name, {'status': 'completed', 'evidence': 'Ran targeted checks', 'acceptance': [{'criterion': 'Evidence checked', 'evidence': 'Targeted check passed', 'passed': True}]})
     def test_native_lifecycle_capacity_and_dependencies(self):
@@ -74,13 +80,86 @@ class DispatcherTest(unittest.TestCase):
         self.assertTrue(d.session_has_plan(self.project, 'session'))
         self.config['enabled'] = False
         self.assertEqual(d.next_workers(result['run_id'])['status'], 'disabled')
+    def test_assessment_required_and_scope_expansion_invalidates_plan(self):
+        import workflow_audit
+        trivial = {'workers': [], 'rationale': 'One small edit', 'acceptance': ['Check']}
+        d.create(trivial, self.project, 'session')
+        self.assertTrue(d.session_has_plan(self.project, 'session'))
+        with workflow_audit.context_db() as db:
+            context = workflow_audit.load(db, 'session')
+            context['todos'] = {key: {'id': key, 'required': True, 'status': 'pending', 'criterion': 'Pass'} for key in ('build', 'check')}
+            workflow_audit.save(db, 'session', context)
+        self.assertFalse(d.session_has_plan(self.project, 'session'))
+
+        with self.assertRaisesRegex(ValueError, 'substantial work requires assessment'):
+            d.create(trivial, self.project, 'session')
+        plan = {**trivial, 'assessment': self.assessment('main_only')}
+        result = d.create(plan, self.project, 'session')
+        self.assertTrue(d.session_has_plan(self.project, 'session'))
+        self.assertEqual(d.status(result['run_id'])['run']['assessment']['strategy'], 'main_only')
+        with workflow_audit.context_db() as db:
+            context = workflow_audit.load(db, 'session')
+            context['todos']['build']['status'] = 'completed'
+            workflow_audit.save(db, 'session', context)
+        self.assertTrue(d.session_has_plan(self.project, 'session'))
+        with workflow_audit.context_db() as db:
+            context['todos']['build']['criterion'] = 'New acceptance scope'
+            workflow_audit.save(db, 'session', context)
+        self.assertFalse(d.session_has_plan(self.project, 'session'))
+
+    def test_existing_dispatch_database_migrates_without_rewriting_history(self):
+        with d.sqlite3.connect(d.db_path()) as db:
+            db.execute('CREATE TABLE runs (id TEXT PRIMARY KEY, project TEXT, session TEXT, status TEXT, created REAL, request_id TEXT)')
+            db.execute('INSERT INTO runs VALUES (?,?,?,?,?,?)', ('old', str(self.project), 'session', 'completed', 10, None))
+        with d.connection() as db:
+            run = d.get_run(db, 'old')
+            self.assertIsNone(run['assessment'])
+            self.assertIsNone(run['measurement'])
+            self.assertEqual(run['created'], 10)
+
+    def test_assessment_rejects_missing_text_and_inconsistent_strategy(self):
+        for changes in ({'reason': ''}, {'model_fit': ' '}, {'latency_tradeoff': 'x' * 1001}, {'strategy': 'main_only'}, {'task_size': 'trivial'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                d.validate({'workers': [self.worker()], 'assessment': {**self.assessment(), **changes}}, self.project, self.config)
+        with self.assertRaisesRegex(ValueError, 'requires assessment'):
+            d.create({'workers': [self.worker()]}, self.project, 'session')
+
+    def test_whole_task_measurement_preserves_unknowns_and_counts_parent_time(self):
+        plan = {'workers': [], 'rationale': 'Coupled work', 'acceptance': ['Check'], 'assessment': self.assessment('main_only')}
+        run = d.create(plan, self.project, 'session')['run_id']
+        created = d.status(run)['run']['created']
+        with patch.object(d.time, 'time', return_value=created + 10), patch.object(d.audit_transport, 'emit') as emit:
+            value = d.measure(run, {'rework_count': 2, 'quality_passed': True, 'comparison_key': 'bounded_fix'})['measurement']
+        self.assertEqual(value['elapsed_ms'], 10000)
+        self.assertIsNone(value['cost_usd'])
+        self.assertIsNone(value['total_tokens'])
+        self.assertEqual(d.status(run)['run']['measurement'], value)
+        self.assertEqual(emit.call_args.args[0], 'orchestration.run_measured')
+        self.assertEqual(emit.call_args.args[1]['strategy'], 'main_only')
+        self.assertNotIn('model_fit', emit.call_args.args[1])
+        with self.assertRaisesRegex(ValueError, 'already recorded'):
+            d.measure(run, {})
+
+    def test_measurement_requires_terminal_workers_and_valid_numbers(self):
+        run = self.create(self.worker())
+        with self.assertRaisesRegex(ValueError, 'all workers'):
+            d.measure(run, {})
+        d.next_workers(run)
+        d.bind(run, 'one', 'native-1')
+        self.complete(run)
+        for report in ({'cost_usd': float('nan')}, {'total_tokens': True}, {'rework_count': -1}, {'quality_passed': 'yes'}, {'comparison_key': 'private data'}, {'elapsed_ms': 0}):
+            with self.subTest(report=report), self.assertRaises(ValueError):
+                d.measure(run, report)
+        value = d.measure(run, {'cost_usd': 0, 'total_tokens': 400, 'rework_count': 0, 'quality_passed': False})['measurement']
+        self.assertEqual(value['total_tokens'], 400)
+        self.assertEqual(value['cost_usd'], 0)
     def test_contract_rejects_cycles_overlap_and_symlink_escape(self):
         cases = [[self.worker(dependencies=['one'])], [self.worker(access='edit', owned_paths=['src']), self.worker('two', access='edit', owned_paths=['src/file'])], [self.worker(owned_paths=['../secret'])]]
         (self.project / 'escape').symlink_to(self.root)
         cases.append([self.worker(owned_paths=['escape/file'])])
         for workers in cases:
             with self.assertRaises(ValueError):
-                d.validate({'workers': workers}, self.project, self.config)
+                d.validate({'workers': workers, 'assessment': self.assessment()}, self.project, self.config)
     def test_editing_snapshot_and_patch_excludes_parent_changes(self):
         d.git(self.project, 'init')
         (self.project / 'source.txt').write_text('base\n')
@@ -219,6 +298,7 @@ class DispatcherTest(unittest.TestCase):
 
     @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_concurrent_execute_acquires_one_atomic_launch_lease(self):
+        self.config['timeout_seconds'] = 5
         report = {'status': 'completed', 'evidence': 'one real process', 'acceptance': [{'criterion': 'Evidence checked', 'passed': True, 'evidence': 'verified'}]}
         count = self.root / 'launch-count'
         code = 'import pathlib; p=pathlib.Path(' + repr(str(count)) + ');p.open("a").write("launch\\n");print(' + repr(json.dumps(report)) + ')'
@@ -325,6 +405,7 @@ class DispatcherTest(unittest.TestCase):
 
     @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_external_stdout_reports_and_real_usage_shapes(self):
+        self.config['timeout_seconds'] = 5
         report = {'status': 'completed', 'evidence': 'stdout acceptance', 'acceptance': [{'criterion': 'Evidence checked', 'passed': True, 'evidence': 'stdout verified'}]}
         for provider_shape in ('codex', 'claude', 'claude_structured'):
             event = {'type': 'item.completed', 'item': {'type': 'agent_message', 'text': json.dumps(report)}} if provider_shape == 'codex' else {'type': 'result', 'result': json.dumps(report), 'usage': {'input_tokens': 5, 'output_tokens': 2, 'cache_creation_input_tokens': 3, 'cache_read_input_tokens': 4}, 'total_cost_usd': .012}
@@ -351,12 +432,14 @@ class DispatcherTest(unittest.TestCase):
 
     @unittest.skipUnless(Path("/proc/self/stat").exists(), "External process supervision requires Linux /proc")
     def test_external_process_terminal_report_and_timeout(self):
+        self.config['timeout_seconds'] = 5
         self.config['profiles']['scan'] = {'provider': 'command', 'role': 'explorer', 'model': 'fixture', 'effort': 'low', 'command': [sys.executable, '-c', 'import json,sys;json.dump({"status":"completed","evidence":"real process","acceptance":[{"criterion":"Evidence checked","passed":True,"evidence":"checked"}]},open(sys.argv[1],"w"))', '{result}']}
         run = self.create(self.worker())
         result = d.run_workers(run)
         self.assertEqual(result['run']['status'], 'completed')
         self.assertEqual(result['workers'][0]['exit_code'], 0)
         self.assertIsNone(result['workers'][0]['total_tokens'])
+        self.config['timeout_seconds'] = 1
         self.config['profiles']['scan']['command'] = [sys.executable, '-c', 'import time;time.sleep(30)']
         run = self.create(self.worker())
         result = d.run_workers(run)
