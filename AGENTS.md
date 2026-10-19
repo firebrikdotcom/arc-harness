@@ -8,6 +8,7 @@ This repository is a harness: the environment that makes an AI agent's work boun
 | --- | --- |
 | `scripts/harness` | The CLI: phases, contract, budgets, pauses, brief, retention. `scripts/harness --help` lists every command. |
 | `scripts/verify.sh`, `scripts/review.sh` | The sensors: checks with evidence, and the independent review packet. |
+| `.githooks/pre-commit`, `scripts/install-commit-hook.sh` | Optional local commit gate: installs a pre-commit hook that runs the deterministic verification suite; no CI configuration. |
 | `scripts/hooks/require-phase.sh`, `scripts/permit.py` | The guard: phase rules and the denylist, judged on the files a command would write. |
 | `scripts/failure_budget.py`, `scripts/workflow_gate.py` | The repeated-failure stop and the todo gate. |
 | `schemas/` | Task contract, review findings, action proposals, the default denylist. |

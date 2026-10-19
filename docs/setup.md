@@ -193,6 +193,16 @@ for t in tests/*.sh; do sh "$t"; done
 
 `scripts/verify.sh` runs the same set under its `harness:tests` check.
 
+### Local commit-time behavior check
+
+This checkout can run the full deterministic harness verification suite before each local commit. Install the repository's Git hook once with:
+
+```sh
+scripts/install-commit-hook.sh
+```
+
+The installer sets this checkout's local `core.hooksPath` to `.githooks`. The pre-commit hook runs `HARNESS_VERIFY_SCOPE=full scripts/verify.sh --project <repository-root>` and blocks the commit if any verification fails, including on documentation-only commits. It does not change a workflow or run in CI. The hook path is local Git configuration; remove it with `git config --local --unset core.hooksPath` when it still points to this checkout's `.githooks` directory. The check is deterministic and does not launch an AI model or need provider credentials.
+
 ## Denylist
 
 `scripts/permit.sh` holds the allow-unless-denied rules; with `python3` it runs `scripts/permit.py`. `schemas/denylist.default` is the harness default; a project replaces it entirely by adding `.harness-denylist` at its root. Each line is one of:

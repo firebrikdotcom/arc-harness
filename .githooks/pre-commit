@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  printf '%s\n' 'Harness pre-commit: run this hook from a Git worktree.' >&2
+  exit 2
+}
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR
+VERIFY="$REPO_ROOT/scripts/verify.sh"
+if [ ! -x "$VERIFY" ]; then
+  printf 'Harness pre-commit: verification script is missing or not executable: %s\n' "$VERIFY" >&2
+  exit 2
+fi
+
+printf '%s\n' 'Running the harness behavior and regression checks before commit.'
+export HARNESS_VERIFY_SCOPE=full
+exec "$VERIFY" --project "$REPO_ROOT"

@@ -113,6 +113,8 @@ scripts/permit.sh           Denylist check for commands and write paths
 scripts/knowledge-trust.sh  Human approval gate for a project's knowledge/ folder
 schemas/denylist.default    Default denylist; a project replaces it with .harness-denylist
 scripts/verify.sh           Local verification sensor (check-only, never rewrites)
+scripts/install-commit-hook.sh  Installs the local pre-commit verification hook
+.githooks/pre-commit        Runs the deterministic verification suite before local commits
 scripts/with-timeout.sh     Runs one bootstrap or verification command under a time limit, stopping its whole process group
 scripts/review.sh           Review helper: full patch, continues after a failing verify
 tasks/task-template.md      Reusable task template
@@ -165,6 +167,8 @@ For scripted starts, `scripts/harness route --state TASK.json --project PATH` ac
 Open `tools/auditability-planning-wizard.html` directly in a browser to plan the first Arc/JEV auditability slice. It stores answers in that browser, warns against raw prompts and secrets, and exports a Markdown brief plus structured JSON without network requests or a build step.
 
 The implemented Arc audit service lives in `services/harness-audit/`. Start it with `scripts/audit-service.sh setup` once, install its per-user supervisor with `scripts/audit-service.sh install`, and source `scripts/jev-enable.sh` in agent-launching shells to enable the explicit full-rollout operator acknowledgement and best-effort telemetry.
+
+To run the deterministic harness verification suite before local commits, run `scripts/install-commit-hook.sh`; this uses local Git configuration and does not change CI. See `docs/setup.md` for details.
 
 ## CI
 
