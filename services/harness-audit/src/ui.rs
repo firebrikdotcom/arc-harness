@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use tera::Context;
 
+const OMARCHY_ICON: &[u8] = include_bytes!("../public/omarchy-icon.png");
+
 const STYLESHEET: &str = include_str!("../public/styles.css");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
@@ -1660,6 +1662,23 @@ async fn workflow_items(
     }
 }
 
+// A runtime custom icon takes priority; the bundled fallback works without assets on disk.
+fn favicon_response(custom: &std::path::Path) -> HttpResponse {
+    let (content_type, body) = match std::fs::read(custom) {
+        Ok(bytes) if !bytes.is_empty() => ("image/x-icon", bytes),
+        _ => ("image/png", OMARCHY_ICON.to_vec()),
+    };
+    HttpResponse::Ok()
+        .content_type(content_type)
+        .insert_header(("Cache-Control", "public, max-age=300"))
+        .body(body)
+}
+
+#[get("/favicon.ico")]
+async fn favicon() -> impl Responder {
+    favicon_response(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("public/favicon.ico"))
+}
+
 #[get("/public/styles.css")]
 async fn stylesheet() -> impl Responder {
     HttpResponse::Ok()
@@ -1674,12 +1693,53 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(event_log)
         .service(workflow_page)
         .service(workflow_items)
-        .service(stylesheet);
+        .service(stylesheet)
+        .service(favicon);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[actix_web::test]
+    async fn favicon_uses_omarchy_until_a_custom_icon_is_available() {
+        use actix_web::{body::to_bytes, test, App};
+        let directory =
+            std::env::temp_dir().join(format!("audit-favicon-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let custom = directory.join("favicon.ico");
+        let app = test::init_service(App::new().route(
+            "/favicon.ico",
+            web::get().to(move || {
+                let path = custom.clone();
+                async move { favicon_response(&path) }
+            }),
+        ))
+        .await;
+        for bytes in [None, Some(Vec::new()), Some(vec![0, 0, 1, 0, 1, 0])] {
+            let expected = bytes.clone().filter(|value| !value.is_empty());
+            if let Some(bytes) = bytes {
+                std::fs::write(directory.join("favicon.ico"), bytes).unwrap();
+            }
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get().uri("/favicon.ico").to_request(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get("content-type").unwrap(),
+                if expected.is_some() {
+                    "image/x-icon"
+                } else {
+                    "image/png"
+                }
+            );
+            let body = to_bytes(response.into_body()).await.unwrap();
+            assert_eq!(body.as_ref(), expected.as_deref().unwrap_or(OMARCHY_ICON));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn checkpoint(
         call: &str,
@@ -1877,6 +1937,7 @@ mod tests {
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
+        assert!(html.contains("rel=\"icon\" href=\"/favicon.ico\""));
         assert!(html.contains("Harness audit"));
         assert!(
             html.contains(">0.33<"),
