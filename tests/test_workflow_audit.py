@@ -453,6 +453,14 @@ class WorkflowTests(unittest.TestCase):
         result=subprocess.run([sys.executable,str(ROOT/"scripts/workflow_gate.py")],input="{invalid",env=self.env,text=True,capture_output=True)
         self.assertEqual(result.returncode,2)
 
+    def test_exempt_prompt_block_points_to_a_plan_not_another_exemption(self):
+        self.gate("UserPromptSubmit",prompt="Is the commit pushed?")
+        self.policy("exempt","--reason","Read-only check")
+        blocked=self.gate("PreToolUse",2,tool_name="Bash",tool_input={"command":"gh run view 1"})
+        self.assertIn("already exempt",blocked.stderr)
+        self.assertIn("todo plan",blocked.stderr)
+        self.assertNotIn("todo exempt",blocked.stderr)
+
     def test_resumed_session_emits_a_new_start_without_replacing_its_task(self):
         self.run_cli("hook", payload={"hook_event_name":"SessionStart", "session_id":"s"})
         self.run_cli("hook", payload={"hook_event_name":"SessionEnd", "session_id":"s"})

@@ -33,12 +33,17 @@ def unresolved(context):
     return [item for item in context.get("todos", {}).values() if item["required"] and item["status"] not in TERMINAL]
 
 def assert_plan(context, active=False):
+    plan = """harness workflow todo plan --items '[{"id":"fix","description":"What to do","criterion":"How done is shown"}]' --reason SUMMARY"""
+    if context.get("plan_mode") == "question" and context.get("confirmed_request") == context.get("request_seq", 0):
+        # Exempting again changes nothing, so offering it would loop the agent.
+        raise TodoValidationError("Register or confirm a todo plan: this prompt is already exempt, which allows only commands on the read list. "
+                                  "To do more, set a plan: " + plan + " (with the --session-id from the prompt notice)")
     if context.get("confirmed_request") != context.get("request_seq", 0) or context.get("plan_mode") != "execution" or not context.get("todos"):
         # Name every way forward with a runnable command, so an agent does not guess.
         steps = []
         if context.get("todos") and context.get("plan_mode") == "execution":
             steps.append("keep the current plan: harness workflow todo confirm --reason SUMMARY")
-        steps.append("""set a plan: harness workflow todo plan --items '[{"id":"fix","description":"What to do","criterion":"How done is shown"}]' --reason SUMMARY""")
+        steps.append("set a plan: " + plan)
         steps.append("only reading or answering: harness workflow todo exempt --reason SUMMARY")
         raise TodoValidationError("Register or confirm a complete todo plan for the current prompt. " + "; ".join(steps)
                                   + " (each with the --session-id from the prompt notice)")
