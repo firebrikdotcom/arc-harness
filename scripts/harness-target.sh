@@ -21,6 +21,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
+CONTROL_SOURCE=${HARNESS_DEVELOPER_ROOT:-$HARNESS_ROOT}
 DB_ROOT=${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}
 TARGETS_DIR=$DB_ROOT/targets
 BOOTSTRAP_INPUTS="Makefile package.json package-lock.json pnpm-lock.yaml yarn.lock composer.json composer.lock go.mod go.sum Cargo.toml Cargo.lock npm-shrinkwrap.json bun.lock bun.lockb"
@@ -91,7 +92,7 @@ target_id() {
 # registrable ROOT  Refuses the home directory, the filesystem root, and the harness root.
 registrable() {
   case "$1" in
-    /|"${HOME:-/nonexistent}"|"$HARNESS_ROOT") return 1 ;;
+    /|"${HOME:-/nonexistent}"|"$HARNESS_ROOT"|"$CONTROL_SOURCE") return 1 ;;
   esac
   return 0
 }
@@ -136,7 +137,7 @@ cmd_lookup() {
   while :; do
     # The control-plane checkout owns its base database. Never inherit a
     # registered ancestor (for example a user's workspace directory).
-    [ "$_dir" != "$HARNESS_ROOT" ] || return 1
+    [ "$_dir" != "$HARNESS_ROOT" ] && [ "$_dir" != "$CONTROL_SOURCE" ] || return 1
     _candidate=$TARGETS_DIR/$(target_id "$_dir")
     if [ -f "$_candidate/target.state" ] && [ "$(state_value "$_candidate/target.state" TARGET_ROOT)" = "$_dir" ]; then
       printf '%s\n' "$_candidate"

@@ -223,3 +223,10 @@ This harness is licensed under either of the MIT license ([LICENSE-MIT](LICENSE-
 Runtime toggles share `~/.config/harness/config.json` with brief `_doc` reminders. Run `scripts/harness config init` to preserve and migrate current choices; see [unified runtime configuration](docs/setup.md#unified-runtime-configuration).
 
 Role-scoped native/external workers, decision receipts and the orchestration dashboard are described in [orchestration](docs/orchestration.md). Use `scripts/harness dispatch --help` and `scripts/harness decision --help`.
+
+## Automatic published-version activation
+
+The optional [Rust updater](docs/updater.md) keeps each computer on a CI-passing
+published version without pulling into its editable checkout. It provides
+operation-safe activation, status, rollback and a development override. Install
+with `python3 scripts/install-updater.py` after publishing and verifying CI.

@@ -31,6 +31,20 @@ done
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$SCRIPT_PATH")" && pwd -P)
 SCRIPT_HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 
+# Managed CLI symlinks still resolve to this script for existing bookkeeping
+# recognition. Enter the stable launcher before doing any runtime work.
+if [ "${HARNESS_RUNTIME_ACTIVE:-}" != "1" ] && [ -x "${HOME}/.local/bin/harness-runtime" ]; then
+  for managed_pointer in current override; do
+    managed_path="${HOME}/.local/share/harness-updater/$managed_pointer"
+    if [ -d "$managed_path" ]; then
+      managed_root=$(CDPATH='' cd "$managed_path" && pwd -P)
+      if [ "$SCRIPT_HARNESS_ROOT" = "$managed_root" ]; then
+        exec "${HOME}/.local/bin/harness-runtime" exec scripts/harness "$@"
+      fi
+    fi
+  done
+fi
+
 EXIT_USAGE=2
 EXIT_BUDGET=3
 EXIT_PHASE=4

@@ -10,10 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def db_root(project: Path) -> Path:
     project = Path(project).resolve()
-    if os.environ.get("HARNESS_DB_ROOT"):
-        return Path(os.environ["HARNESS_DB_ROOT"]).resolve()
-    if project == ROOT:
-        return ROOT / ".harness-db"
+    explicit = os.environ.get("HARNESS_DB_ROOT")
+    control = os.environ.get("HARNESS_CONTROL_DB_ROOT")
+    # A managed launcher supplies the base registry, not a target override.
+    if explicit and explicit != control:
+        return Path(explicit).resolve()
+    developer = os.environ.get("HARNESS_DEVELOPER_ROOT")
+    if project == ROOT or developer and project == Path(developer).resolve():
+        return Path(control).resolve() if control else ROOT / ".harness-db"
     command = [str(ROOT / "scripts/harness-target.sh")]
     result = subprocess.run([*command, "db-root", str(project)], capture_output=True,
                             text=True, timeout=10, check=False)

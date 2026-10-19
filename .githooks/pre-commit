@@ -13,5 +13,13 @@ if [ ! -x "$VERIFY" ]; then
 fi
 
 printf '%s\n' 'Running the harness behavior and regression checks before commit.'
+if [ -f "$REPO_ROOT/services/harness-updater/Cargo.toml" ]; then
+  cargo fmt --manifest-path "$REPO_ROOT/services/harness-updater/Cargo.toml" -- --check
+  cargo clippy --locked --manifest-path "$REPO_ROOT/services/harness-updater/Cargo.toml" --all-targets -- -D warnings
+  cargo test --locked --manifest-path "$REPO_ROOT/services/harness-updater/Cargo.toml"
+  python3 "$REPO_ROOT/services/harness-updater/tests/test_updater.py"
+  python3 "$REPO_ROOT/services/harness-updater/tests/test_hooks.py"
+  python3 "$REPO_ROOT/services/harness-updater/tests/test_installer.py"
+fi
 export HARNESS_VERIFY_SCOPE=full
 exec "$VERIFY" --project "$REPO_ROOT"
