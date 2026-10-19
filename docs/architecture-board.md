@@ -2,7 +2,7 @@
 
 Status: built 19 October 2026 (`scripts/board.py`, `tools/architecture-board/`, the `SessionStart` trigger in `scripts/hooks/auto-init.sh`, and the dashboard's Architecture pages). `board export` is not built yet. Operating notes: [setup.md](setup.md#architecture-boards).
 
-Goal: for any software project you work on, the harness dashboard shows a whiteboard of that project's components. The board has fixed cards in labelled frames, typed connection lines, pan and zoom, and a details panel listing responsibilities, connections, source files and tests. The harness makes and refreshes the board by itself, in the background, and **never adds or changes anything in the project's repository**. The reference look and behaviour is the board built by hand for Firebrik Terminal (`/home/savior/Code/android-terminal/docs/architecture-explorer.html`).
+Goal: for any software project you work on, the harness dashboard shows a whiteboard of that project's components. The board has fixed cards in labelled frames, typed connection lines, pan and zoom, and a details panel listing responsibilities, connections, source files and tests. The harness makes and refreshes the board by itself, in the background, and **never adds or changes anything in the project's repository**. The reference look and behaviour is the board built by hand for Firebrik Terminal (`docs/architecture-explorer.html` in that app's repository; its data is the fixture `tools/architecture-board/fixtures/firebrik-terminal.board.json`).
 
 ---
 

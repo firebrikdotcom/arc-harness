@@ -3,7 +3,7 @@
  "title": "Firebrik Terminal",
  "repo_url": "https://github.com/firebrikdotcom/firebrik-terminal",
  "default_branch": "main",
- "source": "imported from /home/savior/Code/android-terminal/docs/architecture-explorer.html",
+ "source": "imported from Firebrik Terminal docs/architecture-explorer.html",
  "overview": {
   "heading": "The app at a glance",
   "text": "The phone talks directly to your own machine over SSH. Herdr runs there and owns workspaces, panes and agents; the app mirrors it and forwards your input."

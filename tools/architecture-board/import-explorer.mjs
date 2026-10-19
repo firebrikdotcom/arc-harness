@@ -3,6 +3,7 @@
 //   node import-explorer.mjs SOURCE.html OUT.json
 import {readFileSync, writeFileSync} from "node:fs";
 import vm from "node:vm";
+import {basename} from "node:path";
 
 const [src, out] = process.argv.slice(2);
 if (!src || !out) { console.error("usage: import-explorer.mjs SOURCE.html OUT.json"); process.exit(2); }
@@ -25,7 +26,7 @@ const board = {
   title,
   repo_url: repo,
   default_branch: branch,
-  source: "imported from " + src,
+  source: "imported from " + basename(src),  // never an absolute path: tracked files stay free of personal paths
   overview: {heading: "The app at a glance", text: "The phone talks directly to your own machine over SSH. Herdr runs there and owns workspaces, panes and agents; the app mirrors it and forwards your input."},
   edge_kinds: Object.fromEntries(Object.entries(ctx.KINDS).map(([k, v]) => [k, {label: v.label, tone: KTONE[k]?.[0] || "slate", style: KTONE[k]?.[1] || "solid"}])),
   frames: ctx.FRAMES.map(f => ({id: f.id, title: f.title, tag: f.tag, tone: TONE[f.c] || "slate", col: f.col, row: f.row, cols: f.cols, rows: f.rows, external: !!f.dashed})),
