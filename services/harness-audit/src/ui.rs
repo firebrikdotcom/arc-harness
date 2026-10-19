@@ -4,6 +4,7 @@
 //! event and selected-session lookups. Templates and the stylesheet are embedded at compile
 //! time, so the service needs no working directory or asset build to serve them.
 
+use crate::boards::{Boards, Outcome, Query, TargetId};
 use crate::reports::{EventFilter, ReportStore};
 use crate::routes::read_report;
 use crate::summary as grouped;
@@ -26,6 +27,15 @@ const ARC_ICON: &[u8] = include_bytes!("../public/arc-favicon.png");
 const OMARCHY_ICON: &[u8] = include_bytes!("../public/omarchy-icon.png");
 
 const STYLESHEET: &str = include_str!("../public/styles.css");
+
+/// The architecture board renderer is shared with `harness board export`, so it
+/// lives with the board tooling and is embedded from there.
+const BOARD_SCRIPT: &str = include_str!("../../../tools/architecture-board/board.js");
+
+const BOARD_STYLESHEET: &str = include_str!("../../../tools/architecture-board/board.css");
+
+/// The board page's own loader and poller.
+const BOARD_PAGE_SCRIPT: &str = include_str!("../public/board-page.js");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
@@ -67,6 +77,14 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
         name: TemplateName("audit/events.html"),
         source: include_str!("../resources/views/audit/events.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/projects.html"),
+        source: include_str!("../resources/views/audit/projects.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/board.html"),
+        source: include_str!("../resources/views/audit/board.html"),
     },
     TemplateDef {
         name: TemplateName("audit/partials/prompt-items.html"),
@@ -177,7 +195,7 @@ pub struct EventsQuery {
     limit: Option<usize>,
 }
 
-fn render(
+async fn render(
     registry: &UiRegistry,
     request: &HttpRequest,
     session: &Session,
@@ -187,6 +205,9 @@ fn render(
     breadcrumbs: Vec<Breadcrumb>,
 ) -> HttpResponse {
     decorate(&mut context, title);
+    // The sidebar lists architecture boards on every page; a failing CLI leaves it empty.
+    let projects = Boards::for_request(request).list().await;
+    context.insert("architecture_projects", projects.as_slice());
     context.insert("client_timezone", &client_timezone(request).name());
     registry.render(
         UiPage {
@@ -210,6 +231,9 @@ fn decorate(context: &mut Context, title: &str) {
     // crate's name when APP_NAME is unset, so the layout shows this instead.
     context.insert("service_name", "Harness audit");
     context.insert("local_navigation", NAVIGATION);
+    if !context.contains_key("architecture_projects") {
+        context.insert("architecture_projects", &Vec::<Value>::new());
+    }
     context.insert("app_version", env!("CARGO_PKG_VERSION"));
 }
 
@@ -485,6 +509,7 @@ async fn workbench(
         context,
         vec![Breadcrumb::current("Workbench")],
     )
+    .await
 }
 
 #[get("/orchestration")]
@@ -518,6 +543,7 @@ async fn orchestration_page(
         context,
         vec![Breadcrumb::current("Orchestration")],
     )
+    .await
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -575,6 +601,7 @@ async fn event_log(
             Breadcrumb::current("Events"),
         ],
     )
+    .await
 }
 
 #[derive(Default, Deserialize, Serialize, Clone)]
@@ -1116,7 +1143,8 @@ async fn workflow_page(
                 Breadcrumb::link("Workbench", "/"),
                 Breadcrumb::current("Workflow"),
             ],
-        );
+        )
+        .await;
     }
     let mut context = Context::new();
     context.insert("sessions", &!sessions.is_empty());
@@ -1137,6 +1165,7 @@ async fn workflow_page(
             Breadcrumb::current("Session details"),
         ],
     )
+    .await
 }
 
 fn trimmed(value: &Option<String>) -> String {
@@ -1701,13 +1730,183 @@ async fn stylesheet() -> impl Responder {
         .body(STYLESHEET)
 }
 
+#[get("/public/board.js")]
+async fn board_script() -> impl Responder {
+    asset("text/javascript; charset=utf-8", BOARD_SCRIPT)
+}
+
+#[get("/public/board.css")]
+async fn board_stylesheet() -> impl Responder {
+    asset("text/css; charset=utf-8", BOARD_STYLESHEET)
+}
+
+#[get("/public/board-page.js")]
+async fn board_page_script() -> impl Responder {
+    asset("text/javascript; charset=utf-8", BOARD_PAGE_SCRIPT)
+}
+
+fn asset(content_type: &'static str, body: &'static str) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type(content_type)
+        .insert_header(("Cache-Control", "public, max-age=300"))
+        .body(body)
+}
+
+fn project_not_found() -> HttpResponse {
+    HttpResponse::NotFound()
+        .content_type("text/plain; charset=utf-8")
+        .body("No registered harness project has this id.")
+}
+
+fn no_store_json(status: StatusCode, body: &Value) -> HttpResponse {
+    HttpResponse::build(status)
+        .insert_header(("Cache-Control", "no-store"))
+        .json(body)
+}
+
+/// `GET /projects`: every project the board CLI lists, with its board state.
+#[get("/projects")]
+async fn projects_page(
+    request: HttpRequest,
+    session: Session,
+    registry: web::Data<UiRegistry>,
+) -> impl Responder {
+    let projects = Boards::for_request(&request).list().await;
+    let mut context = Context::new();
+    context.insert("projects", projects.as_slice());
+    render(
+        &registry,
+        &request,
+        &session,
+        "audit/projects.html",
+        "Projects",
+        context,
+        vec![
+            Breadcrumb::link("Workbench", "/"),
+            Breadcrumb::current("Projects"),
+        ],
+    )
+    .await
+}
+
+/// The cached sidebar rows, for live updates from the board page.
+#[get("/projects/sidebar.json")]
+async fn projects_sidebar(request: HttpRequest) -> impl Responder {
+    let projects = Boards::for_request(&request).list().await;
+    no_store_json(StatusCode::OK, &json!(projects.as_slice()))
+}
+
+/// `GET /projects/{id}/board`: the page shell; `board-page.js` loads the data.
+#[get("/projects/{id}/board")]
+async fn board_page(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    registry: web::Data<UiRegistry>,
+) -> impl Responder {
+    let Some(id) = TargetId::parse(&path) else {
+        return project_not_found();
+    };
+    let boards = Boards::for_request(&request);
+    let listed = boards
+        .clone()
+        .list()
+        .await
+        .iter()
+        .find(|row| row["id"] == id.as_str())
+        .cloned();
+    // The list holds recent projects only; any other registered target still has a page.
+    let project = match listed {
+        Some(row) => row,
+        None => match boards.query(Query::Show, id.clone()).await {
+            Outcome::UnknownTarget => return project_not_found(),
+            Outcome::Json(_) => {
+                json!({"id": id.as_str(), "name": display_name(id.as_str()), "state": "ready", "label": "ready"})
+            }
+            _ => {
+                json!({"id": id.as_str(), "name": display_name(id.as_str()), "state": "none", "label": "not mapped"})
+            }
+        },
+    };
+    let name = project["name"].as_str().unwrap_or(id.as_str()).to_owned();
+    let mut context = Context::new();
+    context.insert("project", &project);
+    context.insert("workspace_class", "workspace--board");
+    render(
+        &registry,
+        &request,
+        &session,
+        "audit/board.html",
+        &format!("{name} · Architecture"),
+        context,
+        Vec::new(),
+    )
+    .await
+}
+
+#[get("/projects/{id}/board.json")]
+async fn board_json(request: HttpRequest, path: web::Path<String>) -> impl Responder {
+    board_query(&request, &path, Query::Show).await
+}
+
+#[get("/projects/{id}/state.json")]
+async fn board_state_json(request: HttpRequest, path: web::Path<String>) -> impl Responder {
+    board_query(&request, &path, Query::State).await
+}
+
+#[get("/projects/{id}/overlay.json")]
+async fn board_overlay_json(request: HttpRequest, path: web::Path<String>) -> impl Responder {
+    board_query(&request, &path, Query::Overlay).await
+}
+
+/// `android-terminal` from `android-terminal-dfd9fce7b1a1`: target ids end in a 12-hex hash.
+fn display_name(id: &str) -> &str {
+    match id.rsplit_once('-') {
+        Some((name, hash))
+            if !name.is_empty()
+                && hash.len() == 12
+                && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            name
+        }
+        _ => id,
+    }
+}
+
+/// Pass one CLI document through unchanged. Invalid ids never reach the CLI.
+async fn board_query(request: &HttpRequest, raw_id: &str, query: Query) -> HttpResponse {
+    let Some(id) = TargetId::parse(raw_id) else {
+        return no_store_json(StatusCode::NOT_FOUND, &json!({"error": "unknown project"}));
+    };
+    match Boards::for_request(request).query(query, id).await {
+        Outcome::Json(document) => no_store_json(StatusCode::OK, &document),
+        Outcome::NotMapped => no_store_json(StatusCode::NOT_FOUND, &json!({"error": "not mapped"})),
+        Outcome::UnknownTarget => {
+            no_store_json(StatusCode::NOT_FOUND, &json!({"error": "unknown project"}))
+        }
+        Outcome::Failed(error) => {
+            tracing::warn!(%error, ?query, "board CLI query failed");
+            no_store_json(StatusCode::BAD_GATEWAY, &json!({"error": error}))
+        }
+    }
+}
+
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(orchestration_page);
     cfg.service(workbench)
         .service(event_log)
         .service(workflow_page)
         .service(workflow_items)
+        .service(projects_page)
+        .service(projects_sidebar)
+        .service(board_page)
+        .service(board_json)
+        .service(board_state_json)
+        .service(board_overlay_json)
         .service(stylesheet)
+        .service(board_script)
+        .service(board_stylesheet)
+        .service(board_page_script)
         .service(favicon)
         .service(omarchy_favicon);
 }
@@ -3056,6 +3255,276 @@ mod tests {
         assert!(html.contains("Worker ID"));
         assert!(!html.contains("Session <script>"));
         assert!(!html.contains("model <img>"));
+    }
+
+    /// A temporary harness DB root with one mapped and one unmapped target,
+    /// read through the real `scripts/board.py`.
+    struct BoardFixture {
+        directory: std::path::PathBuf,
+        boards: std::sync::Arc<Boards>,
+    }
+
+    impl BoardFixture {
+        fn new() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("audit-boards-{}", uuid::Uuid::new_v4()));
+            let db = directory.join("db");
+            for (id, mapped) in [("demo-1", true), ("demo-2", false)] {
+                let root = directory.join(format!("project-{id}"));
+                std::fs::create_dir_all(root.join("src")).unwrap();
+                for file in ["src/app.py", "src/models.py", "src/views.py"] {
+                    std::fs::write(root.join(file), "print('demo')\n").unwrap();
+                }
+                std::fs::write(root.join("Makefile"), "test:\n\ttrue\n").unwrap();
+                let target = db.join("targets").join(id);
+                std::fs::create_dir_all(&target).unwrap();
+                std::fs::write(
+                    target.join("target.state"),
+                    format!(
+                        "TARGET_ID={id}\nTARGET_ROOT={}\nTARGET_KIND=repo\nLAST_SEEN_AT=2026-10-19T10:00:00Z\n",
+                        root.display()
+                    ),
+                )
+                .unwrap();
+                if mapped {
+                    std::fs::create_dir_all(target.join("board")).unwrap();
+                    std::fs::write(
+                        target.join("board/board.json"),
+                        include_str!("../../../tools/architecture-board/fixtures/firebrik-terminal.board.json"),
+                    )
+                    .unwrap();
+                }
+            }
+            let boards = std::sync::Arc::new(Boards::new(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/board.py"),
+                &db,
+            ));
+            Self { directory, boards }
+        }
+    }
+
+    impl Drop for BoardFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    fn page_registry() -> web::Data<UiRegistry> {
+        web::Data::new(
+            UiRegistry::build(Some(&host()), &[contribution()])
+                .unwrap()
+                .unwrap(),
+        )
+    }
+
+    /// `(status, content type, body)` for a GET through a test service.
+    macro_rules! get_body {
+        ($app:expr, $uri:expr) => {{
+            let response = actix_web::test::call_service(
+                $app,
+                actix_web::test::TestRequest::get().uri($uri).to_request(),
+            )
+            .await;
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let body = actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap();
+            (
+                status,
+                content_type,
+                String::from_utf8_lossy(&body).into_owned(),
+            )
+        }};
+    }
+
+    #[actix_web::test]
+    async fn architecture_pages_list_and_serve_boards_from_the_cli() {
+        use actix_web::{test, App};
+        let fixture = BoardFixture::new();
+        let database = fixture.directory.join("audit.sqlite");
+        let store = ReportStore::open(database.to_str().unwrap()).unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(page_registry())
+                .app_data(web::Data::from(fixture.boards.clone()))
+                .app_data(web::Data::new(store))
+                .configure(config),
+        )
+        .await;
+
+        // The sidebar on the workbench links the project to its board.
+        let (status, _, html) = get_body!(&app, "/");
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains(">Architecture</a>"));
+        assert!(html.contains("href=\"/projects/demo-1/board\""));
+        assert!(html.contains("rail-projects__name\">project-demo-1<"));
+        assert!(html.contains("state-dot--ready"));
+
+        let (status, _, html) = get_body!(&app, "/projects");
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("<h1>Projects</h1>"));
+        assert!(html.contains("project-demo-1"));
+        assert!(html.contains("project-demo-2"));
+        assert!(html.contains("not mapped"));
+        assert!(html.contains("data-client-relative=\"2026-10-19T10:00:00Z\""));
+
+        let (status, _, html) = get_body!(&app, "/projects/demo-1/board");
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("<script src=\"/public/board.js\"></script>"));
+        assert!(html.contains("<script src=\"/public/board-page.js\"></script>"));
+        assert!(html.contains("href=\"/public/board.css\""));
+        assert!(html.contains("data-target=\"demo-1\""));
+        assert!(html.contains("class=\"workspace workspace--board\""));
+        // The current project is highlighted in the sidebar.
+        assert!(html.contains("href=\"/projects/demo-1/board\" title=\"project-demo-1 · ready\" aria-current=\"page\""));
+
+        let (status, content_type, body) = get_body!(&app, "/projects/demo-1/board.json");
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("application/json"));
+        let board: Value = serde_json::from_str(&body).unwrap();
+        assert!(!board["nodes"].as_array().unwrap().is_empty());
+
+        let (status, _, body) = get_body!(&app, "/projects/demo-2/board.json");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["error"],
+            "not mapped"
+        );
+
+        let (status, _, body) = get_body!(&app, "/projects/demo-1/overlay.json");
+        assert_eq!(status, StatusCode::OK);
+        let overlay: Value = serde_json::from_str(&body).unwrap();
+        assert!(overlay["edited"].is_object());
+
+        let (status, _, body) = get_body!(&app, "/projects/demo-2/state.json");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["target"],
+            "demo-2"
+        );
+
+        // A well-formed id that is not registered is a 404, page and data alike.
+        for uri in [
+            "/projects/nope-9/board",
+            "/projects/nope-9/board.json",
+            "/projects/nope-9/state.json",
+        ] {
+            assert_eq!(get_body!(&app, uri).0, StatusCode::NOT_FOUND, "{uri}");
+        }
+
+        let (status, content_type, body) = get_body!(&app, "/projects/sidebar.json");
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("application/json"));
+        let rows: Value = serde_json::from_str(&body).unwrap();
+        assert!(rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "demo-1"));
+    }
+
+    #[actix_web::test]
+    async fn invalid_project_ids_are_rejected_before_the_cli_runs() {
+        use actix_web::{test, App};
+        let directory =
+            std::env::temp_dir().join(format!("audit-board-ids-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let marker = directory.join("called");
+        let script = directory.join("record.py");
+        std::fs::write(
+            &script,
+            format!("open({:?}, 'a').write('x')\n", marker.display().to_string()),
+        )
+        .unwrap();
+        let boards = std::sync::Arc::new(Boards::new(&script, &directory));
+        let app = test::init_service(
+            App::new()
+                .app_data(page_registry())
+                .app_data(web::Data::from(boards))
+                .configure(config),
+        )
+        .await;
+        for uri in [
+            "/projects/..%2Fx/board.json",
+            "/projects/..%2Fx/state.json",
+            "/projects/..%2Fx/overlay.json",
+            "/projects/..%2Fx/board",
+            "/projects/../board.json",
+            "/projects/.hidden/board.json",
+            "/projects/-rf/board.json",
+            "/projects/a%20b/board.json",
+        ] {
+            assert_eq!(get_body!(&app, uri).0, StatusCode::NOT_FOUND, "{uri}");
+        }
+        assert!(!marker.exists(), "an invalid id reached the board CLI");
+        // The recorder works: a valid id does run it (and its empty output is a gateway error).
+        assert_eq!(
+            get_body!(&app, "/projects/demo-1/board.json").0,
+            StatusCode::BAD_GATEWAY
+        );
+        assert!(marker.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[actix_web::test]
+    async fn pages_render_with_an_empty_architecture_section_when_the_cli_fails() {
+        use actix_web::{test, App};
+        let boards = std::sync::Arc::new(Boards::new("/nonexistent/board.py", "/nonexistent/db"));
+        let app = test::init_service(
+            App::new()
+                .app_data(page_registry())
+                .app_data(web::Data::from(boards))
+                .configure(config),
+        )
+        .await;
+        let (status, _, html) = get_body!(&app, "/projects");
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(">Architecture</a>"));
+        assert!(html.contains("No projects yet"));
+        let (status, _, body) = get_body!(&app, "/projects/sidebar.json");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "[]");
+        assert_eq!(
+            get_body!(&app, "/projects/demo-1/board.json").0,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn unlisted_projects_are_named_without_their_hash() {
+        assert_eq!(display_name("android-difit-40a227165dc1"), "android-difit");
+        assert_eq!(display_name("demo-1"), "demo-1");
+        assert_eq!(display_name("-40a227165dc1"), "-40a227165dc1");
+    }
+
+    #[actix_web::test]
+    async fn board_assets_are_embedded() {
+        use actix_web::{test, App};
+        let app = test::init_service(App::new().configure(config)).await;
+        for (uri, kind, needle) in [
+            (
+                "/public/board.js",
+                "text/javascript",
+                "window.ArchitectureBoard",
+            ),
+            (
+                "/public/board-page.js",
+                "text/javascript",
+                "/projects/sidebar.json",
+            ),
+            ("/public/board.css", "text/css", ".ab{"),
+        ] {
+            let (status, content_type, body) = get_body!(&app, uri);
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(content_type.starts_with(kind), "{uri}: {content_type}");
+            assert!(body.contains(needle), "{uri}");
+        }
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly

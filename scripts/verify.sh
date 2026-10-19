@@ -438,13 +438,14 @@ run_harness_tests() {
   status=0
   for test_file in tests/*.sh; do
     info "--> $test_file"
-    # Nested harness runs inside tests must not emit real Jev checkpoints, and
+    # Nested harness runs inside tests must not emit real Jev checkpoints or start
+    # a real architecture-board mapper (HARNESS_BOARD=0), and
     # they model a human at a terminal, not the agent that may be running verify.
     # Each fixture declares its own required checks: the outer override applies
     # to this target (already read into REQUIRED_CHECKS), not to the fixtures.
     # Each file has its own time limit, so a hung test is named and the rest still run.
     if ! (unset HARNESS_REQUIRED_CHECKS
-      bounded "$test_file" env HARNESS_CONFIG_HOME="$test_config" HARNESS_JEV_CHECKPOINTS=0 HARNESS_JEV_DELEGATION=off HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
+      bounded "$test_file" env HARNESS_CONFIG_HOME="$test_config" HARNESS_JEV_CHECKPOINTS=0 HARNESS_JEV_DELEGATION=off HARNESS_BOARD=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
         CLAUDECODE='' CODEX_SANDBOX='' sh "$test_file"); then
       status=1
     fi

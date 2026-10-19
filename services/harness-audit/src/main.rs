@@ -10,6 +10,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::domain::audit_event::aggregate::AuditEventAggregate;
 
+mod boards;
 mod domain;
 mod orchestration;
 mod reports;
@@ -45,6 +46,7 @@ fn builder(reports: reports::ReportStore) -> ArcAppBuilder {
     ArcApp::builder()
         .register_aggregate::<AuditEventAggregate>()
         .register_data(Arc::new(reports))
+        .register_data(boards::Boards::shared())
         .register_ui_host(ui::host())
         .register_ui(ui::contribution())
         .register_routes(routes::config)

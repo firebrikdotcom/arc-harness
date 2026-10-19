@@ -25,6 +25,11 @@ Browser pages (Arc UI host, same read model as the API):
 - `GET /events[?type=jev.checkpoint&limit=200]` — newest-first event log with a type filter
 - `GET /favicon.ico` — custom `public/favicon.ico` when readable and nonempty, otherwise the embedded Arc logo. The 128-pixel favicon is exported from the canonical `docs/imgs/arc-logo.png` in `lotharthesavior/arc` on a white background for tab contrast. Runtime asset files are unnecessary. A failed icon load uses `/public/omarchy-icon.png` as the fallback. The versioned icon URL refreshes the previous Omarchy icon; subsequent custom changes use a five-minute cache window.
 - `GET /public/styles.css` — the dashboard stylesheet, embedded at build time
+- `GET /projects` — architecture boards: one row per project from `harness board list` with its board state, root and last session
+- `GET /projects/{id}/board` — a project's architecture board: a status strip (mapping, refreshing, failed, drifted or ready) above a full-height board that pans and zooms; an unmapped project shows the `harness board map --target ID` command instead. The page polls state, overlay and the sidebar every 5 s while the tab is visible
+- `GET /public/board.js`, `GET /public/board.css` — the board renderer, embedded from `tools/architecture-board/`; `GET /public/board-page.js` — the board page's loader and poller
+
+Every page's sidebar lists the same projects under **Architecture**, each with a state dot and label.
 
 Endpoints:
 
@@ -34,6 +39,16 @@ Endpoints:
 - `GET /api/audit/summary`
 - `GET /api/audit/summary/checkpoints[?include_fixtures=true]`
 - `GET /api/audit/summary/routes[?include_fixtures=true]`
+- `GET /projects/sidebar.json` — the cached project list (about 10 s)
+- `GET /projects/{id}/board.json`, `GET /projects/{id}/state.json`, `GET /projects/{id}/overlay.json` — `board.py show`, `state --json` and `overlay --json` passed through with `Cache-Control: no-store`; 404 for an invalid id, an unregistered target or (board only) an unmapped one, 502 when the CLI fails
+
+The board routes hold no board data or logic: `src/boards.rs` runs
+`python3 HARNESS_BOARD_SCRIPT --db-root HARNESS_DB_ROOT <command>` (defaults
+`../../scripts/board.py` and `../../.harness-db` from this directory) on the
+blocking pool with a 20-second timeout. Only a target id matching
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` is passed, as its own argument; anything
+else is a 404 before the CLI runs. If Python or the script fails, pages still
+render with an empty Architecture section. See `docs/architecture-board.md`.
 
 ## Grouped summaries
 

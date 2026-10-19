@@ -1,0 +1,7 @@
+{% extends "layouts/admin.html" %}{% block head %}<link rel="stylesheet" href="/public/board.css">{% endblock head %}{% block content %}
+<div class="board-page" data-board-page data-target="{{ project.id }}">
+<div class="board-strip"><nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/projects">Projects</a></li><li><span aria-current="page">{{ project.name }}</span></li></ol></nav><p class="board-strip__status" role="status" aria-live="polite"><span class="state-dot state-dot--{{ project.state }}" data-board-dot aria-hidden="true"></span><span data-board-status>{{ project.label }}</span></p></div>
+<div class="board-host" data-board-root><div class="board-message"><p class="muted">Loading the board…</p></div></div>
+</div>
+<script src="/public/board.js"></script><script src="/public/board-page.js"></script>
+{% endblock content %}

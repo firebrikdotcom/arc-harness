@@ -91,6 +91,8 @@ usage() {
   info "  config show|init|update  Shared documented runtime toggles (config.json)."
   info "  sites doctor|publish PATH ROUTE [NAME]|list"
   info "                       Publish or update a Firebrik Sites page with proof; doctor names what is missing."
+  info "  board check|map|status|list|show|state|overlay|import --target ID|PATH"
+  info "                       Architecture board in the harness DB; session start maps it in the background."
   info "  jev on|off|status    The persisted delegation switch: off compares Jev with the agent's"
   info "                       baseline (shadow); on follows Jev where the harness has a lever."
   info "  budget --thread ID --tokens N [--watch]"
@@ -1639,6 +1641,9 @@ case "$COMMAND" in
     ;;
   sites)
     exec bash "$SCRIPT_DIR/sites.sh" "$@"
+    ;;
+  board)
+    exec python3 "$SCRIPT_DIR/board.py" --db-root "${HARNESS_DB_ROOT:-$ROOT/.harness-db}" "$@"
     ;;
   jev)
     if ! has_cmd python3; then

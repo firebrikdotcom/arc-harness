@@ -494,3 +494,46 @@ details[open] > .row-summary::after { content:"\2212"; }
   .orch-children > li { padding-left:1.25rem; }
   .orch-children > li::before { width:1.25rem; }
 }
+/* Architecture boards: rail entries, project list and the full-height board page */
+.rail-projects { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #ffffff2e; }
+.rail-projects__title { margin: 0 0 .4rem; font: 700 .62rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.rail-projects__title a { display: block; padding: .35rem .7rem; color: #ffffffa3; text-decoration: none; border: 1px solid transparent; }
+.rail-projects__title a:hover,.rail-projects__title a[aria-current="page"] { color: var(--primary); border-color: var(--primary); }
+.rail-projects__list { display: grid; gap: .15rem; margin: 0; padding: 0; list-style: none; }
+.rail-projects__list a { display: grid; grid-template-columns: .55rem minmax(0, 1fr) auto; align-items: center; gap: .55rem; padding: .55rem .7rem; border: 1px solid transparent; color: var(--panel); font: 700 .68rem var(--mono); text-decoration: none; text-transform: uppercase; }
+.rail-projects__list a:hover,.rail-projects__list a[aria-current="page"] { border-color: var(--primary); color: var(--primary); }
+.rail-projects__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-projects__label { color: #ffffff8c; font-size: .58rem; font-weight: 500; text-transform: lowercase; white-space: nowrap; }
+.rail-projects__empty { padding: .45rem .7rem; color: #ffffff8c; font: .66rem var(--mono); }
+.state-dot { display: inline-block; flex: none; width: .55rem; aspect-ratio: 1; border-radius: 50%; background: var(--border-subtle); vertical-align: middle; }
+.state-dot--ready { background: #3fae74; }
+.state-dot--drifted { background: var(--primary); }
+.state-dot--failed { background: #e0644b; }
+.state-dot--none { background: transparent; border: 1px solid currentColor; opacity: .65; }
+.state-dot--mapping,.state-dot--refreshing { background: transparent; border: 2px solid var(--primary); border-right-color: transparent; animation: state-dot-spin .9s linear infinite; }
+@keyframes state-dot-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .state-dot--mapping,.state-dot--refreshing { animation: none; border-right-color: var(--primary); } }
+.project-table__state { white-space: nowrap; }
+.project-table__root { font-size: .72rem; overflow-wrap: anywhere; }
+.workspace--board { display: flex; flex-direction: column; height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); min-height: 0; padding: 0; overflow: hidden; }
+.board-page { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.board-strip { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.25rem; padding: .55rem 1rem; border-bottom: 2px solid var(--border); background: var(--panel); }
+.board-strip .breadcrumbs { margin: 0; }
+.board-strip__status { display: flex; align-items: center; gap: .5rem; min-width: 0; margin: 0; color: var(--ink-muted); font: 600 .7rem/1.4 var(--mono); overflow-wrap: anywhere; }
+.board-host { position: relative; flex: 1; min-height: 0; overflow: auto; }
+.board-canvas { position: absolute; inset: 0; }
+.board-message { max-width: 46rem; margin: 0 auto; padding: clamp(1.5rem, 5vw, 3rem) 1.25rem; }
+.board-message h2 { margin: 0 0 .75rem; }
+.board-message p { line-height: 1.6; }
+.board-command { display: flex; gap: .5rem; margin: 1rem 0; }
+.board-command code { flex: 1; min-width: 0; overflow-x: auto; padding: .72rem .8rem; border: 2px solid var(--border); background: var(--raised); font: .8rem var(--mono); white-space: nowrap; }
+.board-log { max-height: 18rem; overflow: auto; margin: 1rem 0 0; padding: .8rem 1rem; background: var(--ink); color: var(--panel); font: .72rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (min-width: 851px) { .rail { overflow-y: auto; } }
+@media (max-width: 850px) {
+  .rail-projects { margin-top: 1rem; }
+  .rail-projects__list { display: flex; gap: .5rem; overflow-x: auto; padding-bottom: .25rem; }
+  .rail-projects__list li { flex: none; }
+  .rail-projects__list a { border-color: #ffffff2e; }
+  .workspace--board { height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); min-height: 26rem; }
+}
+@media (max-width: 520px) { .board-command { flex-direction: column; } .board-strip { padding: .5rem .75rem; } }

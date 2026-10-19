@@ -92,7 +92,9 @@ scripts/phase_checkpoint.py Session-start route and verify history; phase gates 
 scripts/install-hooks.sh    Installs the auto-init and Jev hooks into Claude Code and Codex user settings
 scripts/harness-target.sh   Machine-local target registry: project root, register, lookup, per-target database, bootstrap fingerprint
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
-scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, then runs the session route
+scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, starts the background architecture-board check, then runs the session route
+scripts/board.py            `harness board`: architecture-board drift check, read-only background mapper, validation, and dashboard JSON (state in the harness DB only)
+tools/architecture-board/   Board renderer (board.js, board.css) embedded by the dashboard, mapper prompt, Firebrik fixture and explorer importer
 scripts/hooks/session-route.sh  SessionStart hook: one task-entry route per interactive session in a harness target (shadow, or delegated when the switch is on)
 scripts/observe_commands.py    Session-scoped PreToolUse command-repeat observer; never blocks
 scripts/session_hook.py        Native SessionStart identity binding before bootstrap/routing
@@ -209,6 +211,10 @@ Consider Jev at meaningful decision points using the [checkpoint workflow](docs/
 ## Semantic retrieval
 
 `scripts/jg.sh [--project PATH] [--root SUBDIR] "question"` asks [jevgrep](https://github.com/dzhng/jevgrep) for the files and excerpts relevant to a question about a target, which is the recommended first discovery step in an unfamiliar project. Because `jg` uploads eligible source to its configured provider, the wrapper refuses `--include-sensitive`, `--no-ignore`, and any target carrying a `.harness-no-upload` marker, and records only a question hash, timing, and exit status under the target database. `scripts/jg.sh --report` summarises past retrievals. Setup and limits are in `docs/setup.md`.
+
+## Architecture boards
+
+Open the dashboard's **Architecture** section to see any software project you work in as a whiteboard of its components, with connections, files, tests and what you are editing right now. The harness makes the board itself: at session start a detached check starts a read-only background mapper when the project has no board or anything changed since the last mapping, and it stores everything in the harness database, never in the project. `scripts/harness board status --target PATH` shows where a board stands. See [docs/setup.md](docs/setup.md#architecture-boards) and [docs/architecture-board.md](docs/architecture-board.md).
 
 ## Publishing to Firebrik Sites
 

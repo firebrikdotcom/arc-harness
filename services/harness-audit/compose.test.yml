@@ -6,6 +6,8 @@ services:
     volumes:
       - .:/app:ro
       - ../../scripts:/scripts:ro
+      # The board renderer and fixture are embedded from here (src/ui.rs include_str!).
+      - ../../tools/architecture-board:/tools/architecture-board:ro
       - ${HOME}/.cargo/registry:/usr/local/cargo/registry:ro
       - target:/target
     environment:

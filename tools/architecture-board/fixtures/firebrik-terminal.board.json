@@ -1,0 +1,1258 @@
+{
+ "version": 1,
+ "title": "Firebrik Terminal",
+ "repo_url": "https://github.com/firebrikdotcom/firebrik-terminal",
+ "default_branch": "main",
+ "source": "imported from /home/savior/Code/android-terminal/docs/architecture-explorer.html",
+ "overview": {
+  "heading": "The app at a glance",
+  "text": "The phone talks directly to your own machine over SSH. Herdr runs there and owns workspaces, panes and agents; the app mirrors it and forwards your input."
+ },
+ "edge_kinds": {
+  "call": {
+   "label": "In-app call",
+   "tone": "slate",
+   "style": "solid"
+  },
+  "remote": {
+   "label": "Over SSH to your host",
+   "tone": "red",
+   "style": "dashed"
+  },
+  "platform": {
+   "label": "OS or Google service",
+   "tone": "purple",
+   "style": "dotted"
+  },
+  "build": {
+   "label": "Build / test dependency",
+   "tone": "gray",
+   "style": "faint"
+  }
+ },
+ "frames": [
+  {
+   "id": "phone",
+   "title": "Phone interface",
+   "tag": "what you see",
+   "tone": "orange",
+   "col": 0,
+   "row": 0,
+   "cols": 1,
+   "rows": 2,
+   "external": false
+  },
+  {
+   "id": "app",
+   "title": "App module",
+   "tag": ":app · Android services",
+   "tone": "blue",
+   "col": 1,
+   "row": 0,
+   "cols": 2,
+   "rows": 3,
+   "external": false
+  },
+  {
+   "id": "term",
+   "title": "Terminal engine",
+   "tag": ":terminal · vendored Termux",
+   "tone": "teal",
+   "col": 3,
+   "row": 1,
+   "cols": 1,
+   "rows": 1,
+   "external": false
+  },
+  {
+   "id": "remote",
+   "title": "Your SSH host",
+   "tag": "remote machine",
+   "tone": "red",
+   "col": 4,
+   "row": 0,
+   "cols": 1,
+   "rows": 2,
+   "external": true
+  },
+  {
+   "id": "google",
+   "title": "Google",
+   "tag": "optional",
+   "tone": "gray",
+   "col": 3,
+   "row": 2,
+   "cols": 1,
+   "rows": 1,
+   "external": true
+  },
+  {
+   "id": "platform",
+   "title": "Android platform",
+   "tag": "OS-owned",
+   "tone": "purple",
+   "col": 0,
+   "row": 2,
+   "cols": 1,
+   "rows": 2,
+   "external": false
+  },
+  {
+   "id": "core",
+   "title": "Shared core",
+   "tag": ":core · plain Kotlin/JVM, no Android imports",
+   "tone": "green",
+   "col": 1,
+   "row": 3,
+   "cols": 4,
+   "rows": 1,
+   "external": false
+  },
+  {
+   "id": "build",
+   "title": "Build & verification",
+   "tag": "Gradle · make",
+   "tone": "slate",
+   "col": 0,
+   "row": 4,
+   "cols": 2,
+   "rows": 1,
+   "external": false
+  }
+ ],
+ "nodes": [
+  {
+   "id": "user",
+   "frame": "phone",
+   "col": 0,
+   "row": 0,
+   "icon": "person",
+   "title": "You",
+   "sub": "touch · keyboard · voice",
+   "summary": "There is no Firebrik server. You pick one of your own machines and the phone connects straight to it over SSH.",
+   "responsibility": "Chooses the server, approves the device key on the host once, types into terminals and answers agents.",
+   "external": true,
+   "files": [],
+   "tests": [],
+   "owns": []
+  },
+  {
+   "id": "compose",
+   "frame": "phone",
+   "col": 0,
+   "row": 1,
+   "icon": "screen",
+   "title": "Compose screens",
+   "sub": "setup · servers · workspace · chat",
+   "summary": "Jetpack Compose draws first-run setup, the saved servers list, the workspace (tabs and panes), the native conversation view and the full terminal.",
+   "responsibility": "Collects user actions and renders state from AppViewModel. Navigation decisions come from the shared core.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MainActivity.kt",
+     "note": "Activity; chooses what covers the main screen"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MainScreen.kt",
+     "note": "Connected screen and connection-failure states"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/SetupScreen.kt",
+     "note": "First run and one server's settings, including key install"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/ServersScreen.kt",
+     "note": "Saved servers: connect, edit, reorder"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MobileWorkspaceScreen.kt",
+     "note": "Workspaces, tabs and panes; browse locally, focus on choose"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/ConversationScreen.kt",
+     "note": "Native conversation view of an agent pane"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/PaneViewRouter.kt",
+     "note": "Switches a pane between conversation and terminal"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MobileNavigationComponents.kt",
+     "note": "Server header and breadcrumb"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MobileSceneTransition.kt",
+     "note": "Overlapping scene transitions"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/LineFireBreadcrumb.kt",
+     "note": "Burning breadcrumb navigation effect"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MobileTerminalKeyBar.kt",
+     "note": "Accessory key bar above the keyboard"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/components/Sheets.kt",
+     "note": "Prompt composer sheet (type, dictate, template)"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/theme/Theme.kt",
+     "note": "Every colour the app uses"
+    }
+   ],
+   "tests": [
+    "app/src/androidTest/java/com/firebrik/terminal/MobileWorkspaceTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/ServersFlowTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/ConversationFlowTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileNavigationMotionTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/SetupFeedbackTest.kt",
+    "app/src/test/java/com/firebrik/terminal/ConsistencyDesignContractTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/ui/MainActivity.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MainScreen.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/SetupScreen.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/ServersScreen.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MobileWorkspaceScreen.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/ConversationScreen.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/PaneViewRouter.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MobileNavigationComponents.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MobileSceneTransition.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/LineFireBreadcrumb.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MobileTerminalKeyBar.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/components/Sheets.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/theme/Theme.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileWorkspaceTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/ServersFlowTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/ConversationFlowTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileNavigationMotionTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/SetupFeedbackTest.kt",
+    "app/src/test/java/com/firebrik/terminal/ConsistencyDesignContractTest.kt"
+   ]
+  },
+  {
+   "id": "stores",
+   "frame": "app",
+   "col": 1,
+   "row": 0,
+   "icon": "db",
+   "title": "Local stores",
+   "sub": "servers · bookmarks · chat journal",
+   "summary": "Device-local storage for saved server profiles, pane bookmarks and a bounded conversation history.",
+   "responsibility": "Never holds secrets: the private key lives in the Android Keystore. Writes are atomic; a failed read never overwrites history.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/data/ProfileStore.kt",
+     "note": "Saved Herdr hosts (no secrets)"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/data/PaneBookmarkStore.kt",
+     "note": "Bookmarks to one pane on one server"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/data/ConversationStore.kt",
+     "note": "Private, bounded, local-only chat journal"
+    }
+   ],
+   "tests": [
+    "app/src/test/java/com/firebrik/terminal/ConversationStoreTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileBookmarksNavigationTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/data/ProfileStore.kt",
+    "app/src/main/java/com/firebrik/terminal/data/PaneBookmarkStore.kt",
+    "app/src/main/java/com/firebrik/terminal/data/ConversationStore.kt",
+    "app/src/test/java/com/firebrik/terminal/ConversationStoreTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileBookmarksNavigationTest.kt"
+   ]
+  },
+  {
+   "id": "app",
+   "frame": "app",
+   "col": 1,
+   "row": 1,
+   "icon": "hub",
+   "title": "App coordinator",
+   "sub": "FirebrikApp · AppViewModel",
+   "summary": "Application-scoped objects keep the SSH/Herdr session alive across Activity changes and connect UI actions to the services around them.",
+   "responsibility": "Wires stores, keys, SSH, the session, terminal, notifications and optional sync. A foreground service keeps the process alive in the background.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/FirebrikApp.kt",
+     "note": "App-wide objects; the session outlives activities"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/AppViewModel.kt",
+     "note": "Focused workspace, tab and pane; UI state"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/service/ConnectionService.kt",
+     "note": "Foreground service that keeps SSH alive"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MobileMutationPolicy.kt",
+     "note": "Postconditions for create/close actions"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/MobileResourceClosure.kt",
+     "note": "Destructive confirmations that survive recreation"
+    }
+   ],
+   "tests": [
+    "app/src/test/java/com/firebrik/terminal/AppLogicTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileCreationTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/FirebrikApp.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/AppViewModel.kt",
+    "app/src/main/java/com/firebrik/terminal/service/ConnectionService.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MobileMutationPolicy.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/MobileResourceClosure.kt",
+    "app/src/test/java/com/firebrik/terminal/AppLogicTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileCreationTest.kt"
+   ]
+  },
+  {
+   "id": "notify",
+   "frame": "app",
+   "col": 1,
+   "row": 2,
+   "icon": "bell",
+   "title": "Agent notifications",
+   "sub": "waiting · done · Approve / Deny",
+   "summary": "Turns Herdr agent states into Android notifications. Approve, Deny and Cancel go back to Herdr without opening the app; tapping opens the pane.",
+   "responsibility": "Channels and the action receiver are app-owned; what to show is decided by the core's NotificationPlan; delivery is Android's.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/notify/AgentNotifier.kt",
+     "note": "One notification per blocked agent"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/notify/AgentActionReceiver.kt",
+     "note": "Handles Approve / Deny / Cancel taps"
+    }
+   ],
+   "tests": [
+    "app/src/androidTest/java/com/firebrik/terminal/NotificationPlatformTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/notify/AgentNotifier.kt",
+    "app/src/main/java/com/firebrik/terminal/notify/AgentActionReceiver.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/NotificationPlatformTest.kt"
+   ]
+  },
+  {
+   "id": "session",
+   "frame": "app",
+   "col": 2,
+   "row": 0,
+   "icon": "plug",
+   "title": "Session + SSH",
+   "sub": "connect · host key · PTY · SFTP",
+   "summary": "JSch opens the SSH connection, checks the pinned host key, signs in with the device key, forwards Herdr's Unix socket and opens a remote PTY.",
+   "responsibility": "Connection lifecycle, keepalives and reconnects, first-time key install and file uploads into an app-owned folder.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/herdr/HerdrSession.kt",
+     "note": "Connection lifecycle as the UI shows it"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ssh/SshConnection.kt",
+     "note": "JSch connection, exec channels, socket forwarding"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ssh/TofuHostKeys.kt",
+     "note": "Trust-on-first-use host key pins"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ssh/KeyInstaller.kt",
+     "note": "One-time key authorisation helpers"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ssh/KeystoreKeys.kt",
+     "note": "Device key handle (private half never exported)"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ssh/FileUploads.kt",
+     "note": "SFTP uploads into an app-owned subtree"
+    }
+   ],
+   "tests": [
+    "app/src/test/java/com/firebrik/terminal/HerdrSessionEndToEndTest.kt",
+    "app/src/test/java/com/firebrik/terminal/FileUploadsTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/herdr/HerdrSession.kt",
+    "app/src/main/java/com/firebrik/terminal/ssh/SshConnection.kt",
+    "app/src/main/java/com/firebrik/terminal/ssh/TofuHostKeys.kt",
+    "app/src/main/java/com/firebrik/terminal/ssh/KeyInstaller.kt",
+    "app/src/main/java/com/firebrik/terminal/ssh/KeystoreKeys.kt",
+    "app/src/main/java/com/firebrik/terminal/ssh/FileUploads.kt",
+    "app/src/test/java/com/firebrik/terminal/HerdrSessionEndToEndTest.kt",
+    "app/src/test/java/com/firebrik/terminal/FileUploadsTest.kt"
+   ]
+  },
+  {
+   "id": "terminal",
+   "frame": "app",
+   "col": 2,
+   "row": 1,
+   "icon": "term",
+   "title": "Terminal bridge",
+   "sub": "input · viewport · links",
+   "summary": "Connects the terminal view and the soft keyboard to the remote PTY, keeping selection, colours, resize and pane guards intact.",
+   "responsibility": "The Android-facing glue between Compose, the Termux view and the SSH streams.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/terminal/TerminalBridge.kt",
+     "note": "Bridge between the view and SSH streams"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/terminal/TerminalHost.kt",
+     "note": "Hosts TerminalView; two-finger swipe"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/terminal/HiddenTerminalInput.kt",
+     "note": "Real editable for the IME, nothing drawn"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/terminal/HerdrViewport.kt",
+     "note": "Recognises Herdr's mobile navigation frame"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/terminal/TerminalLinks.kt",
+     "note": "Opens visible web links only"
+    }
+   ],
+   "tests": [
+    "app/src/test/java/com/firebrik/terminal/HerdrViewportTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/HiddenTerminalInputTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileTerminalSelectionTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileTerminalKeysTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/terminal/TerminalBridge.kt",
+    "app/src/main/java/com/firebrik/terminal/terminal/TerminalHost.kt",
+    "app/src/main/java/com/firebrik/terminal/terminal/HiddenTerminalInput.kt",
+    "app/src/main/java/com/firebrik/terminal/terminal/HerdrViewport.kt",
+    "app/src/main/java/com/firebrik/terminal/terminal/TerminalLinks.kt",
+    "app/src/test/java/com/firebrik/terminal/HerdrViewportTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/HiddenTerminalInputTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileTerminalSelectionTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/MobileTerminalKeysTest.kt"
+   ]
+  },
+  {
+   "id": "sync",
+   "frame": "app",
+   "col": 2,
+   "row": 2,
+   "icon": "cloud",
+   "title": "Server sync",
+   "sub": "optional · Drive app data",
+   "summary": "If you sign in with Google, saved servers and host-key pins are merged through a file in the app's own Drive app-data folder.",
+   "responsibility": "Optional. Google never sees SSH or terminal traffic, and the private key never syncs.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/sync/ServerSync.kt",
+     "note": "Sign-in state and sync runs"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/sync/ServerMerge.kt",
+     "note": "Merging servers across devices"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/sync/DriveAppDataBackend.kt",
+     "note": "Drive app-data file read/write"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/sync/GoogleAccount.kt",
+     "note": "Signed-in account and tokens"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/sync/GoogleUserInfo.kt",
+     "note": "Account identity and picture"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/sync/AvatarCache.kt",
+     "note": "Offline profile picture"
+    },
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ui/AccountCard.kt",
+     "note": "Sign-in / sync status card"
+    }
+   ],
+   "tests": [
+    "app/src/test/java/com/firebrik/terminal/DriveAppDataBackendTest.kt",
+    "app/src/test/java/com/firebrik/terminal/AvatarCacheTest.kt",
+    "app/src/test/java/com/firebrik/terminal/GoogleSignInTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/SyncFlowTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/sync/ServerSync.kt",
+    "app/src/main/java/com/firebrik/terminal/sync/ServerMerge.kt",
+    "app/src/main/java/com/firebrik/terminal/sync/DriveAppDataBackend.kt",
+    "app/src/main/java/com/firebrik/terminal/sync/GoogleAccount.kt",
+    "app/src/main/java/com/firebrik/terminal/sync/GoogleUserInfo.kt",
+    "app/src/main/java/com/firebrik/terminal/sync/AvatarCache.kt",
+    "app/src/main/java/com/firebrik/terminal/ui/AccountCard.kt",
+    "app/src/test/java/com/firebrik/terminal/DriveAppDataBackendTest.kt",
+    "app/src/test/java/com/firebrik/terminal/AvatarCacheTest.kt",
+    "app/src/test/java/com/firebrik/terminal/GoogleSignInTest.kt",
+    "app/src/androidTest/java/com/firebrik/terminal/SyncFlowTest.kt"
+   ]
+  },
+  {
+   "id": "engine",
+   "frame": "term",
+   "col": 3,
+   "row": 1,
+   "icon": "grid",
+   "title": "Terminal emulator",
+   "sub": "Termux emulator + view",
+   "summary": "The embedded Termux terminal-emulator and terminal-view libraries interpret ANSI output and draw rows. TerminalSession reads remote PTY streams instead of a local process.",
+   "responsibility": "No native code; adapted for a remote session. Treated as vendored code.",
+   "external": false,
+   "files": [
+    {
+     "path": "terminal/src/main/java/com/termux/terminal/TerminalEmulator.java",
+     "note": "ANSI/VT parser and screen state"
+    },
+    {
+     "path": "terminal/src/main/java/com/termux/terminal/TerminalSession.java",
+     "note": "Session fed by remote streams"
+    },
+    {
+     "path": "terminal/src/main/java/com/termux/terminal/TerminalBuffer.java",
+     "note": "Scrollback buffer"
+    },
+    {
+     "path": "terminal/src/main/java/com/termux/view/TerminalView.java",
+     "note": "Android view that draws the terminal"
+    },
+    {
+     "path": "terminal/src/main/java/com/termux/view/TerminalRenderer.java",
+     "note": "Row and glyph rendering"
+    }
+   ],
+   "tests": [],
+   "owns": [
+    "terminal/src/main/java/com/termux/terminal/TerminalEmulator.java",
+    "terminal/src/main/java/com/termux/terminal/TerminalSession.java",
+    "terminal/src/main/java/com/termux/terminal/TerminalBuffer.java",
+    "terminal/src/main/java/com/termux/view/TerminalView.java",
+    "terminal/src/main/java/com/termux/view/TerminalRenderer.java"
+   ]
+  },
+  {
+   "id": "shell",
+   "frame": "remote",
+   "col": 4,
+   "row": 0,
+   "icon": "server",
+   "title": "Remote shell + PTY",
+   "sub": "login shell · startup command",
+   "summary": "An SSH exec channel starts the configured command (herdr by default) in a login shell with an xterm-256color PTY.",
+   "responsibility": "Terminal bytes and resize events travel through this SSH channel.",
+   "external": true,
+   "files": [
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/ssh/RemoteCommands.kt",
+     "note": "The shell commands the app runs on the host"
+    }
+   ],
+   "tests": [],
+   "owns": [
+    "core/src/main/kotlin/com/firebrik/terminal/core/ssh/RemoteCommands.kt"
+   ]
+  },
+  {
+   "id": "herdr",
+   "frame": "remote",
+   "col": 4,
+   "row": 1,
+   "icon": "layers",
+   "title": "Herdr",
+   "sub": "workspaces · panes · agents",
+   "summary": "Herdr runs on your machine and owns workspaces, tabs, panes, agent state and approval requests. The app reaches its Unix socket through SSH stream-local forwarding.",
+   "responsibility": "Source of truth for everything the workspace screen shows. Socket: ~/.config/herdr/herdr.sock.",
+   "external": true,
+   "files": [
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/ssh/RemoteCommands.kt",
+     "note": "herdrSocketPath: where the socket is expected"
+    }
+   ],
+   "tests": [
+    "core/src/test/kotlin/com/firebrik/terminal/core/LocalHerdrE2ETest.kt"
+   ],
+   "owns": [
+    "core/src/main/kotlin/com/firebrik/terminal/core/ssh/RemoteCommands.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/LocalHerdrE2ETest.kt"
+   ]
+  },
+  {
+   "id": "google",
+   "frame": "google",
+   "col": 3,
+   "row": 2,
+   "icon": "cloud",
+   "title": "Google Drive",
+   "sub": "app-data folder · Play services",
+   "summary": "Google Play services authorises access to the app's private Drive app-data folder. Nothing else in Drive is visible to the app.",
+   "responsibility": "Not in the SSH or terminal data path.",
+   "external": true,
+   "files": [],
+   "tests": [],
+   "owns": []
+  },
+  {
+   "id": "android",
+   "frame": "platform",
+   "col": 0,
+   "row": 2,
+   "icon": "android",
+   "title": "Android system",
+   "sub": "lifecycle · services · notifications",
+   "summary": "The OS provides process lifetime, the foreground service, notification delivery, the document picker and browser intents.",
+   "responsibility": "OS-owned behaviour the app relies on but does not implement.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/AndroidManifest.xml",
+     "note": "Permissions, service and receiver declarations"
+    }
+   ],
+   "tests": [],
+   "owns": [
+    "app/src/main/AndroidManifest.xml"
+   ]
+  },
+  {
+   "id": "keystore",
+   "frame": "platform",
+   "col": 0,
+   "row": 3,
+   "icon": "key",
+   "title": "Android Keystore",
+   "sub": "device SSH identity",
+   "summary": "The SSH private key is generated inside the Android Keystore and signs authentication challenges there.",
+   "responsibility": "Key material never leaves the device and is not synced.",
+   "external": false,
+   "files": [
+    {
+     "path": "app/src/main/java/com/firebrik/terminal/ssh/KeystoreKeys.kt",
+     "note": "Key generation and signing"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/ssh/OpenSsh.kt",
+     "note": "Key algorithms and OpenSSH encoding"
+    }
+   ],
+   "tests": [
+    "core/src/test/kotlin/com/firebrik/terminal/core/OpenSshTest.kt"
+   ],
+   "owns": [
+    "app/src/main/java/com/firebrik/terminal/ssh/KeystoreKeys.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/ssh/OpenSsh.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/OpenSshTest.kt"
+   ]
+  },
+  {
+   "id": "state",
+   "frame": "core",
+   "col": 1,
+   "row": 3,
+   "icon": "flow",
+   "title": "State + navigation",
+   "sub": "reducer · models · routes",
+   "summary": "Folds Herdr events into a snapshot of workspaces, tabs, panes and agents, and decides mobile routes and scenes.",
+   "responsibility": "Pure logic shared by the app and JVM tests.",
+   "external": false,
+   "files": [
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/state/SessionReducer.kt",
+     "note": "Snapshot after each event; when to refetch"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/model/HerdrModels.kt",
+     "note": "Workspaces, panes, agent lifecycle"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/state/MobileNavigation.kt",
+     "note": "Route decisions"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/state/MobileScene.kt",
+     "note": "Immutable scene routes"
+    }
+   ],
+   "tests": [
+    "core/src/test/kotlin/com/firebrik/terminal/core/StateTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/MobileNavigationTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/MobileSceneTest.kt"
+   ],
+   "owns": [
+    "core/src/main/kotlin/com/firebrik/terminal/core/state/SessionReducer.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/model/HerdrModels.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/state/MobileNavigation.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/state/MobileScene.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/StateTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/MobileNavigationTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/MobileSceneTest.kt"
+   ]
+  },
+  {
+   "id": "agent",
+   "frame": "core",
+   "col": 2,
+   "row": 3,
+   "icon": "chat",
+   "title": "Agents + chat",
+   "sub": "notification plan · conversations",
+   "summary": "Decides which notifications to show, remembers answered waits, and builds conversations from prompts Herdr accepted plus the latest terminal output.",
+   "responsibility": "No Android services or remote I/O; effects are returned as plans.",
+   "external": false,
+   "files": [
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/agent/NotificationPlan.kt",
+     "note": "Notification effects as data"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/agent/AgentActions.kt",
+     "note": "One-tap answers for blocked agents"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/agent/AnsweredWaits.kt",
+     "note": "Waits already answered from the app"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/chat/Conversations.kt",
+     "note": "Conversation records"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/chat/AnsiText.kt",
+     "note": "ANSI text and colours"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/chat/TerminalTargetGuard.kt",
+     "note": "Guards which pane receives input"
+    }
+   ],
+   "tests": [
+    "core/src/test/kotlin/com/firebrik/terminal/core/NotificationPlanTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/AnsweredWaitsTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/ConversationsTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/AnsiTextTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/TerminalTargetGuardTest.kt"
+   ],
+   "owns": [
+    "core/src/main/kotlin/com/firebrik/terminal/core/agent/NotificationPlan.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/agent/AgentActions.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/agent/AnsweredWaits.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/chat/Conversations.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/chat/AnsiText.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/chat/TerminalTargetGuard.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/NotificationPlanTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/AnsweredWaitsTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/ConversationsTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/AnsiTextTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/TerminalTargetGuardTest.kt"
+   ]
+  },
+  {
+   "id": "keys",
+   "frame": "core",
+   "col": 3,
+   "row": 3,
+   "icon": "kbd",
+   "title": "Keys + commands",
+   "sub": "accessory keys · IME · SSH helpers",
+   "summary": "Accessory-bar keys and modifiers, press-and-hold repeat, IME edit tracking, and the remote commands the app runs.",
+   "responsibility": "Keeps keyboard behaviour and shell strings testable on the JVM.",
+   "external": false,
+   "files": [
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/keys/TerminalKeys.kt",
+     "note": "Accessory-bar keys"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/keys/MobileTerminalKeys.kt",
+     "note": "Pane-scoped modifiers"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/keys/HeldKey.kt",
+     "note": "Tap vs. hold repeat"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/keys/TerminalImeEdits.kt",
+     "note": "IME edits since the last command"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/ssh/RemoteCommands.kt",
+     "note": "Remote shell commands"
+    }
+   ],
+   "tests": [
+    "core/src/test/kotlin/com/firebrik/terminal/core/MobileTerminalKeysTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/HeldKeyTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/TerminalImeEditsTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/HelpersTest.kt"
+   ],
+   "owns": [
+    "core/src/main/kotlin/com/firebrik/terminal/core/keys/TerminalKeys.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/keys/MobileTerminalKeys.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/keys/HeldKey.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/keys/TerminalImeEdits.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/ssh/RemoteCommands.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/MobileTerminalKeysTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/HeldKeyTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/TerminalImeEditsTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/HelpersTest.kt"
+   ]
+  },
+  {
+   "id": "protocol",
+   "frame": "core",
+   "col": 4,
+   "row": 3,
+   "icon": "rpc",
+   "title": "Herdr client",
+   "sub": "JSON-RPC · pushed events",
+   "summary": "Sends JSON-RPC requests to Herdr over the forwarded socket and decodes pushed events.",
+   "responsibility": "Typed errors carry Herdr's machine-readable codes (e.g. pane_not_found).",
+   "external": false,
+   "files": [
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/protocol/HerdrClient.kt",
+     "note": "Requests, responses, errors"
+    },
+    {
+     "path": "core/src/main/kotlin/com/firebrik/terminal/core/protocol/HerdrEvent.kt",
+     "note": "Pushed event decoding"
+    }
+   ],
+   "tests": [
+    "core/src/test/kotlin/com/firebrik/terminal/core/ProtocolTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/LocalHerdrE2ETest.kt"
+   ],
+   "owns": [
+    "core/src/main/kotlin/com/firebrik/terminal/core/protocol/HerdrClient.kt",
+    "core/src/main/kotlin/com/firebrik/terminal/core/protocol/HerdrEvent.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/ProtocolTest.kt",
+    "core/src/test/kotlin/com/firebrik/terminal/core/LocalHerdrE2ETest.kt"
+   ]
+  },
+  {
+   "id": "modules",
+   "frame": "build",
+   "col": 0,
+   "row": 4,
+   "icon": "box",
+   "title": "Gradle modules",
+   "sub": ":app · :core · :terminal",
+   "summary": "The Android app depends on the plain Kotlin/JVM core and the Android terminal library; a version catalog pins dependencies.",
+   "responsibility": "Module boundaries mirror the app, protocol logic and terminal rendering.",
+   "external": false,
+   "files": [
+    {
+     "path": "settings.gradle.kts",
+     "note": "Module list"
+    },
+    {
+     "path": "app/build.gradle.kts",
+     "note": "App module"
+    },
+    {
+     "path": "core/build.gradle.kts",
+     "note": "Core module"
+    },
+    {
+     "path": "terminal/build.gradle.kts",
+     "note": "Terminal module"
+    },
+    {
+     "path": "gradle/libs.versions.toml",
+     "note": "Dependency versions"
+    }
+   ],
+   "tests": [],
+   "owns": [
+    "settings.gradle.kts",
+    "app/build.gradle.kts",
+    "core/build.gradle.kts",
+    "terminal/build.gradle.kts",
+    "gradle/libs.versions.toml"
+   ]
+  },
+  {
+   "id": "tests",
+   "frame": "build",
+   "col": 1,
+   "row": 4,
+   "icon": "check",
+   "title": "Verification",
+   "sub": "JVM · emulator · device",
+   "summary": "Core and app policy tests run on the JVM. UI tests run on an emulator only; device acceptance covers real networking.",
+   "responsibility": "Never run connectedAndroidTest on a phone in use: it uninstalls the app and wipes its key and servers.",
+   "external": false,
+   "files": [
+    {
+     "path": "Makefile",
+     "note": "make verify · make e2e-emulator"
+    },
+    {
+     "path": "docs/testing/acceptance-criteria.json",
+     "note": "Acceptance criteria"
+    },
+    {
+     "path": "core/src/test/",
+     "note": "JVM core tests"
+    },
+    {
+     "path": "app/src/test/",
+     "note": "JVM app tests"
+    },
+    {
+     "path": "app/src/androidTest/",
+     "note": "Emulator UI tests"
+    }
+   ],
+   "tests": [],
+   "owns": [
+    "Makefile",
+    "docs/testing/acceptance-criteria.json",
+    "core/src/test/",
+    "app/src/test/",
+    "app/src/androidTest/"
+   ]
+  }
+ ],
+ "edges": [
+  {
+   "from": "user",
+   "to": "compose",
+   "label": "touch, keys, voice",
+   "kind": "call"
+  },
+  {
+   "from": "compose",
+   "to": "app",
+   "label": "actions → state",
+   "kind": "call"
+  },
+  {
+   "from": "compose",
+   "to": "terminal",
+   "label": "hosts terminal view",
+   "kind": "call"
+  },
+  {
+   "from": "compose",
+   "to": "state",
+   "label": "routes",
+   "kind": "call"
+  },
+  {
+   "from": "app",
+   "to": "stores",
+   "label": "read / write",
+   "kind": "call"
+  },
+  {
+   "from": "app",
+   "to": "session",
+   "label": "connect · reconnect",
+   "kind": "call"
+  },
+  {
+   "from": "app",
+   "to": "terminal",
+   "label": "attach pane",
+   "kind": "call"
+  },
+  {
+   "from": "app",
+   "to": "notify",
+   "label": "agent snapshots",
+   "kind": "call"
+  },
+  {
+   "from": "app",
+   "to": "sync",
+   "label": "optional sync",
+   "kind": "call"
+  },
+  {
+   "from": "app",
+   "to": "android",
+   "label": "foreground service",
+   "kind": "platform"
+  },
+  {
+   "from": "app",
+   "to": "state",
+   "label": "apply events",
+   "kind": "call"
+  },
+  {
+   "from": "session",
+   "to": "keystore",
+   "label": "sign challenge",
+   "kind": "platform"
+  },
+  {
+   "from": "session",
+   "to": "shell",
+   "label": "SSH exec + PTY",
+   "kind": "remote"
+  },
+  {
+   "from": "session",
+   "to": "protocol",
+   "label": "forwarded socket",
+   "kind": "call"
+  },
+  {
+   "from": "protocol",
+   "to": "herdr",
+   "label": "JSON-RPC",
+   "kind": "remote"
+  },
+  {
+   "from": "protocol",
+   "to": "state",
+   "label": "events",
+   "kind": "call"
+  },
+  {
+   "from": "shell",
+   "to": "herdr",
+   "label": "starts herdr",
+   "kind": "remote"
+  },
+  {
+   "from": "terminal",
+   "to": "engine",
+   "label": "bytes · keys",
+   "kind": "call"
+  },
+  {
+   "from": "terminal",
+   "to": "keys",
+   "label": "key mapping",
+   "kind": "call"
+  },
+  {
+   "from": "engine",
+   "to": "shell",
+   "label": "terminal bytes",
+   "kind": "remote"
+  },
+  {
+   "from": "notify",
+   "to": "agent",
+   "label": "notification plan",
+   "kind": "call"
+  },
+  {
+   "from": "notify",
+   "to": "android",
+   "label": "post",
+   "kind": "platform"
+  },
+  {
+   "from": "sync",
+   "to": "google",
+   "label": "app-data file",
+   "kind": "platform"
+  },
+  {
+   "from": "sync",
+   "to": "stores",
+   "label": "merge servers",
+   "kind": "call"
+  },
+  {
+   "from": "modules",
+   "to": "app",
+   "label": "builds",
+   "kind": "build"
+  },
+  {
+   "from": "modules",
+   "to": "state",
+   "label": "builds :core",
+   "kind": "build"
+  },
+  {
+   "from": "tests",
+   "to": "state",
+   "label": "JVM tests",
+   "kind": "build"
+  },
+  {
+   "from": "tests",
+   "to": "compose",
+   "label": "emulator UI tests",
+   "kind": "build"
+  }
+ ],
+ "flows": [
+  {
+   "id": "connect",
+   "title": "Connect to a server",
+   "sub": "from tap to a live Herdr session",
+   "steps": [
+    [
+     "user",
+     "compose"
+    ],
+    [
+     "compose",
+     "app"
+    ],
+    [
+     "app",
+     "session"
+    ],
+    [
+     "session",
+     "keystore"
+    ],
+    [
+     "session",
+     "shell"
+    ],
+    [
+     "shell",
+     "herdr"
+    ],
+    [
+     "session",
+     "protocol"
+    ],
+    [
+     "protocol",
+     "herdr"
+    ],
+    [
+     "protocol",
+     "state"
+    ]
+   ],
+   "text": [
+    "You tap a saved server.",
+    "AppViewModel asks the session to connect.",
+    "JSch checks the pinned host key and signs with the Keystore key.",
+    "An exec channel starts herdr in a login shell with a PTY.",
+    "Herdr's Unix socket is forwarded; the client speaks JSON-RPC.",
+    "Events fold into the snapshot the workspace screen draws."
+   ]
+  },
+  {
+   "id": "type",
+   "title": "Type in a terminal",
+   "sub": "keyboard to remote PTY and back",
+   "steps": [
+    [
+     "user",
+     "compose"
+    ],
+    [
+     "compose",
+     "terminal"
+    ],
+    [
+     "terminal",
+     "keys"
+    ],
+    [
+     "terminal",
+     "engine"
+    ],
+    [
+     "engine",
+     "shell"
+    ]
+   ],
+   "text": [
+    "The hidden editable receives IME input and accessory keys.",
+    "Keys are mapped in the core (modifiers, hold repeat).",
+    "Bytes go out over the SSH channel; output returns to the Termux emulator, which draws rows."
+   ]
+  },
+  {
+   "id": "approve",
+   "title": "Approve an agent",
+   "sub": "from a notification, app closed",
+   "steps": [
+    [
+     "herdr",
+     "protocol"
+    ],
+    [
+     "protocol",
+     "state"
+    ],
+    [
+     "app",
+     "notify"
+    ],
+    [
+     "notify",
+     "agent"
+    ],
+    [
+     "notify",
+     "android"
+    ],
+    [
+     "app",
+     "android"
+    ],
+    [
+     "protocol",
+     "herdr"
+    ]
+   ],
+   "text": [
+    "Herdr pushes an agent-blocked event.",
+    "The reducer updates the snapshot; the notification plan decides what to post.",
+    "Android shows it; the foreground service keeps the session alive.",
+    "Approve sends the answer back to Herdr over the same session."
+   ]
+  },
+  {
+   "id": "sync",
+   "title": "Sync servers",
+   "sub": "optional, via Google Drive",
+   "steps": [
+    [
+     "app",
+     "sync"
+    ],
+    [
+     "sync",
+     "google"
+    ],
+    [
+     "sync",
+     "stores"
+    ]
+   ],
+   "text": [
+    "After sign-in, the app reads its Drive app-data file.",
+    "Servers and host-key pins merge into local stores.",
+    "The private key never leaves the device."
+   ]
+  }
+ ]
+}

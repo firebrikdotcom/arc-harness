@@ -59,6 +59,16 @@ Or:
 HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 ```
 
+### Architecture boards
+
+Every software project the harness touches gets a whiteboard of its components in the dashboard (sidebar **Architecture**, pages `/projects/{target}/board`): fixed cards in labelled frames, typed connections, pan and zoom, and a details panel with responsibilities, connections, source files and tests. Design and data contract: [architecture-board.md](architecture-board.md).
+
+- **Nothing is written to the project.** The board, its file manifest (paths and content hashes only), state, last check and mapper log live under `HARNESS_DB_ROOT/targets/<id>/board/`.
+- **Trigger.** The `SessionStart` hook runs `scripts/board.py check --spawn` detached. A project with no build manifest and fewer than five source files, a project carrying `.harness-no-upload`, or `HARNESS_BOARD=0` is skipped. Otherwise a missing board starts a full mapping and any difference from the last mapping's manifest (changed, new or deleted file) starts an incremental refresh of the affected cards. One lock per project keeps a second mapper from starting.
+- **Mapper.** `claude -p --model sonnet --tools Read,Grep,Glob --setting-sources "" --strict-mcp-config --no-session-persistence --output-format json`, run in the project with `HARNESS_AUTO_INIT=0` and `HARNESS_BOARD_MAPPER=1`, so it has read-only tools, loads no user or project settings or hooks, and can never start another mapper. It answers with the board JSON; the harness validates it (unique ids, cards inside their frames, no shared cells, no overlapping frames, real paths inside the project) and asks once for a repair before recording `failed`. A full mapping of a 200-file project took about two minutes and $0.28.
+- **Commands.** `harness board check|map|status|list|show|state|overlay|import --target ID|PATH`. `map --full` remaps from scratch; `import --board FILE` installs a hand-made board (`tools/architecture-board/import-explorer.mjs` converts an explorer page into one).
+- **Live highlights** are computed per request and never stored: cards owning uncommitted files are marked *edited*, cards owning the active run's contract deliverables *in scope*, and cards being re-described *refreshing*.
+
 ### Automatic initialisation at session start
 
 `scripts/install-hooks.sh` registers `scripts/hooks/auto-init.sh` as a Claude Code and Codex `SessionStart` hook (`startup`, `resume`, and `clear`). Every session then initialises the project it starts in, whether that is a linked git worktree, a main checkout, or a plain directory:
@@ -66,6 +76,7 @@ HARNESS_TARGET_ROOT=/path/to/project scripts/init.sh
 1. The project root (the git toplevel when inside a repository, otherwise the directory itself) is registered as a harness target with `scripts/harness-target.sh register`. Registration lives under `HARNESS_DB_ROOT/targets/<name>-<hash>/` and never writes inside the project, so tracked files stay clean. The home directory, `/`, and the harness root are never registered.
 2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, the Node lockfiles listed below, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
 3. The same payload is handed to `scripts/hooks/session-route.sh`, so a task-entry route is recorded for the registered target: observed in shadow mode, or, when `harness jev` is on, the route to follow when Jev's confidence meets the threshold (otherwise the main agent decides).
+4. A detached `scripts/board.py check --spawn` decides whether the project's architecture board needs mapping: a software project with no board, or with any file changed since the last mapping, gets a background mapper. The session never waits for it. See [Architecture boards](#architecture-boards).
 
 The hook prints one `Harness auto-init:` context line naming the target, its registry directory, and the bootstrap outcome. When it says the bootstrap is running, wait for the log to finish before running project commands that need dependencies. `HARNESS_AUTO_INIT=0` disables the hook; `HARNESS_AUTO_INIT_SYNC=1` runs the bootstrap in the foreground (the regression test uses this).
 
@@ -93,6 +104,10 @@ Optional harness variables:
 - `HARNESS_INIT_YES`: set to `1` to let `scripts/init.sh` run its previewed project-owned setup commands non-interactively.
 - `HARNESS_AUTO_INIT`: set to `0` to make the `SessionStart` auto-init hook exit without registering or bootstrapping; default on.
 - `HARNESS_AUTO_INIT_SYNC`: set to `1` to run the automatic bootstrap in the foreground instead of the background; used by tests.
+- `HARNESS_BOARD`: set to `0` to stop the `SessionStart` hook from checking and mapping architecture boards; default on. `scripts/verify.sh` sets it to `0` for nested test runs.
+- `HARNESS_BOARD_MODEL`: model for the default board mapper (`claude -p --model ...`); default `sonnet`.
+- `HARNESS_BOARD_MAPPER_CMD`: JSON argv that replaces the default mapper command; it reads the prompt on stdin and prints a Claude-style JSON envelope (or plain text) holding the board JSON. The tests use a fake agent this way.
+- `HARNESS_BOARD_TIMEOUT`: seconds one mapper run may take; default `1200`.
 - `HARNESS_BOOTSTRAP_TIMEOUT`: seconds each `scripts/init.sh` setup command may run; default `1800`. Must be a whole number above `0`; anything else fails with exit `2`. Safe locally; raise it for a slow first install.
 - `HARNESS_VERIFY_TIMEOUT`: seconds each `scripts/verify.sh` check, and each harness test file, may run; default `1800`. Same validation. Safe locally.
 - `HARNESS_TIMEOUT_GRACE`: seconds between the `TERM` and the `KILL` sent to a timed-out command's process group; default `5`. The regression test sets `1`.
