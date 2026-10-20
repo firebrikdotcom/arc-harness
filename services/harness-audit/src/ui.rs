@@ -37,6 +37,9 @@ const BOARD_STYLESHEET: &str = include_str!("../../../tools/architecture-board/b
 /// The board page's own loader and poller.
 const BOARD_PAGE_SCRIPT: &str = include_str!("../public/board-page.js");
 
+/// The layout's collapsible navigation rail, from the Arc workbench scaffold.
+const WORKBENCH_SCRIPT: &str = include_str!("../public/workbench.js");
+
 const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
         name: TemplateName("components/favicon.html"),
@@ -1745,6 +1748,11 @@ async fn board_page_script() -> impl Responder {
     asset("text/javascript; charset=utf-8", BOARD_PAGE_SCRIPT)
 }
 
+#[get("/public/workbench.js")]
+async fn workbench_script() -> impl Responder {
+    asset("text/javascript; charset=utf-8", WORKBENCH_SCRIPT)
+}
+
 fn asset(content_type: &'static str, body: &'static str) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(content_type)
@@ -1907,6 +1915,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(board_script)
         .service(board_stylesheet)
         .service(board_page_script)
+        .service(workbench_script)
         .service(favicon)
         .service(omarchy_favicon);
 }
@@ -2179,6 +2188,8 @@ mod tests {
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
+        assert!(html.contains("<script src=\"/public/workbench.js\"></script>"));
+        assert!(html.contains("data-rail-toggle"));
         assert!(html.contains("rel=\"icon\" href=\"/favicon.ico?v=arc2\""));
         assert!(html.contains("Harness audit"));
         assert!(
@@ -3527,6 +3538,7 @@ mod tests {
                 "/projects/sidebar.json",
             ),
             ("/public/board.css", "text/css", ".ab{"),
+            ("/public/workbench.js", "text/javascript", "rail-collapsed"),
         ] {
             let (status, content_type, body) = get_body!(&app, uri);
             assert_eq!(status, StatusCode::OK, "{uri}");
