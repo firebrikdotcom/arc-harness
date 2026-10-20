@@ -1960,7 +1960,7 @@ mod tests {
         use actix_web::{body::to_bytes, test, App};
         let app = test::init_service(App::new().configure(config)).await;
         for (uri, expected) in [
-            ("/favicon.ico?v=arc", ARC_ICON),
+            ("/favicon.ico?v=arc2", ARC_ICON),
             ("/public/omarchy-icon.png", OMARCHY_ICON),
         ] {
             let response =
@@ -1973,6 +1973,14 @@ mod tests {
             );
         }
         assert_ne!(ARC_ICON, OMARCHY_ICON);
+    }
+
+    #[test]
+    fn arc_favicon_has_an_alpha_channel_instead_of_a_background() {
+        // IHDR colour type sits at byte 25 of a PNG; 6 is RGBA.
+        assert_eq!(&ARC_ICON[1..4], b"PNG");
+        assert_eq!(&ARC_ICON[12..16], b"IHDR");
+        assert_eq!(ARC_ICON[25], 6);
     }
 
     fn checkpoint(
@@ -2171,7 +2179,7 @@ mod tests {
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
-        assert!(html.contains("rel=\"icon\" href=\"/favicon.ico?v=arc\""));
+        assert!(html.contains("rel=\"icon\" href=\"/favicon.ico?v=arc2\""));
         assert!(html.contains("Harness audit"));
         assert!(
             html.contains(">0.33<"),

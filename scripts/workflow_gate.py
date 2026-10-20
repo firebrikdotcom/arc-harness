@@ -10,9 +10,10 @@ import shlex
 import sys
 import traceback
 import uuid
+import hook_input
 import permit
 import workflow_audit as audit
-from workflow_todos import assert_plan
+from workflow_todos import assert_plan, waiver_active, gate_mode
 
 READ_TOOLS = {"StructuredOutput", "Read", "Grep", "Glob", "read_file", "list_dir", "update_plan", "request_user_input", "request_user_input_async", "webrun", "web.run", "web__run"}
 GRAPH_READS = {"search_graph", "trace_path", "get_code_snippet", "check_index_coverage", "query_graph", "get_architecture", "list_projects", "index_status"}
@@ -84,8 +85,33 @@ def management_segment(words, cwd, sid=None, *, decision_bookkeeping=False):
     # The evidence sensors may always run: completion depends on them.
     return matches(words[0], "scripts/verify.sh", cwd) or matches(words[0], "scripts/review.sh", cwd)
 
+def configured_read_only(words):
+    """A command the machine's config declares read-only, matched as a word prefix on the
+    program's base name (so 'career-scheduler phone text' also matches an absolute path)."""
+    try:
+        import harness_config
+        prefixes = harness_config.load()["typesafe"].get("read_only_commands", [])
+    except Exception:
+        return False
+    head = [Path(words[0]).name, *words[1:]]
+    for prefix in prefixes:
+        parts = prefix.split()
+        if parts and head[:len(parts)] == parts:
+            return True
+    return False
+
+def configured_read_tool(tool):
+    try:
+        import harness_config
+        names = harness_config.load()["typesafe"].get("read_only_tools", [])
+    except Exception:
+        return False
+    return any(tool == name or tool.endswith("__" + name) for name in names if isinstance(name, str))
+
 def read_only_segment(words):
     name = Path(words[0]).name
+    if configured_read_only(words):
+        return True
     if name == "adb":
         # Inventory only: never allow arbitrary adb shell, connect, or server actions.
         return words[1:] in (["devices"], ["devices", "-l"], ["mdns", "services"])
@@ -147,6 +173,71 @@ def management_command(payload, *, decision_bookkeeping=False, reads_only=False)
             return False
     return True
 
+# Answers that grant the agent's pending waiver request; "go ahead" alone starts work, it waives nothing.
+APPROVALS = {"approved", "approve", "yes", "ok", "okay", "go ahead", "waive", "waived", "waive it"}
+# Sentences that grant a waiver on their own.
+DIRECT_WAIVERS = {"skip planning", "plan off", "waive for this session", "waive this session", "waive planning"}
+WAIVER_END = {"plan on", "planning on", "waiver off"}
+
+def waiver_words(prompt):
+    return prompt.strip().lower().rstrip(".!") if isinstance(prompt, str) else ""
+
+def waiver_prompt(prompt, context, sid):
+    """The person decides, in their own words, which the agent cannot write: an approval
+    right after the agent's request grants a waiver for this session and UTC day, any
+    other prompt cancels the request, a direct sentence grants one without a request,
+    and 'plan on' ends it. Nothing here is machine-wide."""
+    words = waiver_words(prompt)
+    request = context.pop("waiver_request", None)
+    if words in WAIVER_END and context.get("waiver"):
+        context.pop("waiver")
+        audit.record("waiver_ended", sid, context, description="Ended by the person")
+        return False
+    if words in DIRECT_WAIVERS or (words in APPROVALS and request):
+        reason = request["reason"] if request else "Person asked to skip planning"
+        context["waiver"] = {"reason": reason, "day": audit.now()[:10], "granted_at": audit.now(), "prompt": words}
+        audit.record("waiver_granted", sid, context, description=reason, status="waived")
+    elif request:
+        audit.record("waiver_cancelled", sid, context, description=request["reason"])
+    return waiver_active(context)
+
+def codex_prompt(sid, context):
+    """Codex has no prompt hook, so the person's latest message is read from the session's
+    rollout file, which the agent does not write. Returns a message not seen before."""
+    base = Path(os.environ.get("HARNESS_CODEX_SESSIONS") or Path.home() / ".codex/sessions")
+    try:
+        files = sorted(base.glob(f"*/*/*/rollout-*-{sid}.jsonl"))
+    except OSError:
+        return None
+    if not files:
+        return None
+    path = files[-1]
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            handle.seek(max(0, size - 262144))
+            tail = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        payload = item.get("payload") if isinstance(item, dict) else None
+        if not isinstance(payload, dict) or payload.get("type") != "message" or payload.get("role") != "user":
+            continue
+        texts = [part.get("text") for part in payload.get("content") or [] if isinstance(part, dict) and part.get("type") == "input_text"]
+        text = "\n".join(t for t in texts if isinstance(t, str)).strip()
+        if not text or text.startswith(("<", "#")):
+            continue  # injected instructions and environment context, not the person
+        stamp = item.get("timestamp") or ""
+        if stamp and stamp == context.get("codex_prompt_at"):
+            return None
+        context["codex_prompt_at"] = stamp
+        return text
+    return None
+
 NOTICE_BLOCK = re.compile(r"<(task-notification|system-reminder)>.*?</\1>", re.S)
 
 def runtime_notice(payload):
@@ -169,6 +260,9 @@ def authorize(payload):
         db.execute("BEGIN IMMEDIATE")
         context = audit.load(db, sid)
         audit.ensure_session(sid, context)
+        if not context.get("orchestration_project") and payload.get("cwd"):
+            context["orchestration_project"] = str(Path(payload["cwd"]).resolve())
+        mode = gate_mode(payload.get("cwd") or context.get("orchestration_project"))
         if event == "UserPromptSubmit" and context.get("request_id") and runtime_notice(payload):
             # A background task finishing is not a new request from the person:
             # the current prompt, its confirmed plan, and its role plan carry on.
@@ -178,12 +272,29 @@ def authorize(payload):
             context["request_id"] = str(uuid.uuid4())
             context["orchestration_project"] = str(Path(payload.get("cwd") or ".").resolve())
             context.pop("confirmed_request", None)
+            if mode == "audit":
+                context["confirmed_request"] = context["request_seq"]
+                context.pop("waiver_request", None)
+                audit.record("plan_optional", sid, context, description="Audit mode: plans optional, every call recorded", status="audit")
+                print("Todo gate: audit mode; plans are optional and every call is recorded. A .harness-enforce file at the project root enforces planning.")
+                audit.save(db, sid, context)
+                return 0
+            if waiver_prompt(payload.get("prompt"), context, sid):
+                context["confirmed_request"] = context["request_seq"]
+                audit.record("plan_waived", sid, context, description="Planning waived by the person for today", status="waived")
+                print("Todo gate: planning waived by the person for today; tool calls are audited, not gated. Say 'plan on' to end it.")
+                audit.save(db, sid, context)
+                return 0
             audit.record("plan_required", sid, context, description="Confirm or revise the complete todo plan for this prompt", status="required")
             print(f"Todo gate: confirm (todo confirm), revise (todo plan), or exempt (todo exempt, for a question) the plan for this prompt "
                   f"via {audit.ROOT}/scripts/harness workflow todo ... --session-id {sid} --reason TEXT; reads need no todo.")
         elif event == "PreToolUse":
+            if mode == "enforce" and "prompt" not in payload:
+                latest = codex_prompt(sid, context)
+                if latest is not None:
+                    waiver_prompt(latest, context, sid)
             tool = payload.get("tool_name", "")
-            readonly = tool in READ_TOOLS or any(tool.endswith("__"+name) for name in GRAPH_READS)
+            readonly = tool in READ_TOOLS or any(tool.endswith("__"+name) for name in GRAPH_READS) or configured_read_tool(tool)
             if (readonly and tool != "StructuredOutput") or management_command(payload, reads_only=True):
                 context["evidence_revision"] = context.get("evidence_revision", 0) + 1
             if not readonly and not management_command(payload):
@@ -242,6 +353,8 @@ def decision_seam(payload, context):
     dispatch = config['dispatch']['enabled']
     if not enforcement and not dispatch:
         return
+    if gate_mode(payload.get('cwd') or context.get('orchestration_project')) == 'audit':
+        return
     event = payload.get('hook_event_name')
     if event == 'UserPromptSubmit':
         if runtime_notice(payload):
@@ -252,11 +365,11 @@ def decision_seam(payload, context):
             print('Dispatch policy: record a role plan for this prompt with harness dispatch create --plan PATH before execution, including main-only for trivial work.')
         return
     tool = payload.get('tool_name', '')
-    if tool in READ_TOOLS or any(tool.endswith('__' + name) for name in GRAPH_READS) or management_command(payload, decision_bookkeeping=True) or plan_bootstrap(payload, config):
+    if tool in READ_TOOLS or any(tool.endswith('__' + name) for name in GRAPH_READS) or configured_read_tool(tool) or management_command(payload, decision_bookkeeping=True) or plan_bootstrap(payload, config):
         return
     project = Path(context.get('orchestration_project') or context.get('cwd') or payload.get('cwd') or '.').resolve()
     sid = payload['session_id']
-    if dispatch:
+    if dispatch and not waiver_active(context):
         from role_dispatch import session_has_plan
         if not session_has_plan(project, sid, context.get('request_id')):
             raise ValueError('Dispatch plan required for this prompt: use harness dispatch create --plan PATH, including main-only for trivial work. '
@@ -291,7 +404,8 @@ def decision_seam(payload, context):
         receipt = resolve(project=project, identifier=receipt['id'], session_id=sid, action='execute',
                           reason='main agent proposed this tool call after ' + (receipt.get('escalation_reason') or 'Jev escalation'), scope=scope, state=state)
     requests = receipt.get('context_requests', 0)
-    progress = f' (context request {requests}/2; then the main agent decides)' if requests else ''
+    from decision_checkpoint import context_request_limit
+    progress = f' (context request {requests}/{context_request_limit()}; then the main agent decides)' if requests else ''
     if receipt['action'] == 'insufficient_information':
         raise ValueError('Decision checkpoint selected insufficient_information' + progress + '; supply current action context with harness workflow todo context --action-summary SUMMARY --finding FINDING --gap GAP --reason SUMMARY')
     if receipt['action'] != 'execute':
@@ -326,8 +440,7 @@ def decision_posttool(payload):
 
 
 def main():
-    raw = sys.stdin.read(1_000_001)
-    if len(raw)>1_000_000: raise ValueError("Hook payload exceeds policy limit")
+    raw = hook_input.read()
     payload=json.loads(raw)
     if not isinstance(payload,dict): raise ValueError("Invalid hook payload")
     if payload.get("hook_event_name") in CURSOR_EVENTS or "cursor_version" in payload:

@@ -329,6 +329,19 @@ Findings follow `schemas/review-findings.schema.json`: `tree_hash`, `reviewer`, 
 
 `scripts/failure_budget.py` runs on every shell call's result (PostToolUse, and PostToolUseFailure in Claude Code; installed by `scripts/install-hooks.sh`). It keys a failure by the command and signs it by the normalized error (numbers, hashes, and temporary paths removed) and reports it to `harness failure`. The same command failing with the same error twice in a row (`HARNESS_BUDGET_REPEAT_FAILURES`, default 2; 0 disables) pauses the run on the `repeat_failure` budget, and the notice goes back to the agent. A different error restarts the count; a success clears it. Resuming needs the user and a `harness continue` note that states the new approach, which clears the count. Only digests and the error's first line are stored. The guard refuses `harness failure` from a tool call, so the agent cannot reset it.
 
+### Hook payload size
+
+The todo gate, the Workflow audit hook and the repeated-failure stop read their hook payload through `scripts/hook_input.py`. Prompts and tool inputs keep a 1 MB limit, and a larger one is refused. A post-tool payload carries whatever the tool returned, such as a generated image as 2-3 MB of base64, and the hooks only read its status fields. So when a PostToolUse or PostToolUseFailure payload is over 1 MB (up to 64 MB), its `tool_response` is reduced to the status fields, the last 64 KB of `stdout`, `stderr` and `output`, and `omitted_bytes`. The call is then audited and checked as usual instead of being reported to the agent as blocked.
+
+### Images in session logs
+
+Codex and Claude Code write every image the model saw or made into their own session logs as base64 (`~/.codex/sessions`, `~/.claude/projects`). `scripts/install-hooks.sh` adds `scripts/slim_session_logs.py --spawn` to SessionStart and SessionEnd for both agents, which starts a detached sweep. The sweep replaces each image with a one-line note naming its type and size; a Codex generated image keeps `savedPath`, where the file stays. It only rewrites logs that have been unchanged for 30 minutes and that no process holds open, by an atomic replace that is abandoned if the file changed meanwhile, and it never touches thinking signatures or text that merely contains a data URI. Logs last written before the first sweep (recorded in `.harness-db/session-slim.json`) are left alone. A resumed session sees the note, not the picture.
+
+```sh
+scripts/slim_session_logs.py --dry-run --all   # what the older logs would free, changing nothing
+scripts/slim_session_logs.py --all             # slim the older logs too
+```
+
 ### Sessions, stale runs, and the guard version
 
 The guard binds to the session in each hook payload, so every session uses its own run and a new session must open its own phase. `CLAUDE_CODE_SESSION_ID` is recognised alongside `HARNESS_SESSION_ID`, `CODEX_THREAD_ID`, and `CLAUDE_SESSION_ID`. A run idle longer than `HARNESS_RUN_IDLE_HOURS` (default 24; 0 disables) is stale: `status` shows it, the guard refuses it, and `plan start` marks it expired and opens a new run.
@@ -761,6 +774,12 @@ scripts/harness workflow outcome --status completed --description "Navigation re
 
 Add `--session-id ACTUAL_SESSION_ID` to Workflow commands outside a native session. `todo show` displays IDs, criteria, state and confirmation. For a new prompt, use `todo confirm --reason SUMMARY` or submit the complete revised list with `todo plan`. Keep IDs for retained items; omissions are audited removals with a reason. Changed criteria reset the item and require fresh checks. Completion requires evidence on each completed item, all required items resolved, and passing verify/review records made after the latest scope revision whose tree hash still matches the project's files (records without one fall back to the latest execution). Switching to a new task cannot silently discard unfinished required todos. Questions that require no execution use `todo exempt --reason SUMMARY`; unfinished execution plans must first be resolved or explicitly reported blocked.
 
+### Gate modes and waivers
+
+`workflow.todo_gate` in `~/.config/harness/config.json` is `enforce` (plans, active todos, dispatch plans and decision checkpoints are required) or `audit` (every hook still records prompts, plans, tool calls and checks for the dashboard, and denies nothing). The mode applies to every agent's hooks on the machine. In audit mode a `.harness-enforce` file at or above a project directory enforces that project. Set it with `harness config update --section workflow --values '{"todo_gate":"audit"}'`.
+
+Under enforce, the person can waive planning for one session and UTC day, and only the person: the agent runs `harness workflow todo waive --reason TEXT`, which records a request, and the person's next message decides. `go ahead`, `approved`, `yes`, `ok` or `waive` as the whole message grants it; any other message cancels the request. `waive for this session`, `plan off` or `skip planning` grant one without a request; `plan on` ends it; `todo waive --off` ends it from the agent side. Claude Code and Cursor hand the hook the person's prompt; for Codex, which has no prompt hook, the gate reads the person's latest message from the session's rollout file under `~/.codex/sessions` (`HARNESS_CODEX_SESSIONS` overrides the root). Requests, grants, cancellations and endings are recorded as `waiver_*` events. Nothing here is machine-wide.
+
 `todo plan --help` describes the JSON schema and includes a working example. Each item requires `description` and `criterion`; `id` and the boolean `required` are optional. Fields such as `text`, `title`, and `status` are not accepted in a plan. Register the plan successfully before calling `todo update`. Invalid plans leave the existing plan unchanged and return `WORKFLOW TODO:` with safe correction guidance; infrastructure failures remain separate errors.
 
 Read-only questions may use `adb devices`, `adb devices -l`, `adb mdns services`, and the native web research tool without an execution plan. A question exemption allows turn completion, not writes or arbitrary ADB commands. Connecting devices, running an ADB shell, redirecting inventory to a file, or chaining a write still requires an active todo. Shell bookkeeping resolves relative paths against the tool's explicit working directory when supplied.
@@ -794,6 +813,13 @@ scripts/harness config update --section telemetry --values '{"enabled":true}'
   `harness jev off` retains its existing meaning of **shadow**, not disabled calls.
 - `typesafe.min_confidence`: the confidence (0 to 1, default 0.70) a Jev choice needs before
   it is followed; below it the main agent decides.
+- `typesafe.context_request_limit`: how many automatic `gather_context` or
+  `insufficient_information` results (0 to 2, default 2) may block a tool call per prompt and
+  active todo before the main agent decides; `0` never blocks.
+- `workflow.todo_gate`: `enforce` or `audit`; see [Gate modes and waivers](#gate-modes-and-waivers).
+- `typesafe.read_only_commands`, `typesafe.read_only_tools`: extra read-only shell command
+  prefixes and tool names (or `__suffixes`) that count as evidence reads and skip the decision
+  checkpoint; see [Jev decision checkpoints](jev-checkpoints.md#two-context-requests-then-the-agent-decides).
 - `typesafe.model`: exact model pin. `typesafe.checkpoints`: allow the session-start route and
   the verify history when the installed hooks also opt in with `HARNESS_JEV_CHECKPOINTS=1`
   (normally sourced from `scripts/jev-enable.sh`); unset or `0` remains disabled.

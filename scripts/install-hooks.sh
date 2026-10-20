@@ -1,8 +1,10 @@
 #!/usr/bin/env sh
 # Register the harness hooks in the user's Claude Code settings and Codex
 # hooks file: automatic target initialisation plus the shadow Jev route at
-# SessionStart, the repeated-command observer at PreToolUse, and (Claude Code
-# only, which has Grep and Glob tools) the retrieval reminder. Idempotent:
+# SessionStart, a detached sweep that removes base64 images from idle session
+# logs at SessionStart and SessionEnd, the repeated-command observer at
+# PreToolUse, and (Claude Code only, which has Grep and Glob tools) the
+# retrieval reminder. Idempotent:
 # existing harness entries are replaced, other hooks are preserved, and each
 # file is backed up before it is rewritten.
 #
@@ -53,13 +55,18 @@ REMIND = str(Path(root) / "scripts/retrieval-reminder.sh")
 WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
 TODO_GATE = str(Path(root) / "scripts/workflow_gate.py")
 FAILURES = str(Path(root) / "scripts/failure_budget.py")
+SLIM = str(Path(root) / "scripts/slim_session_logs.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
            "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py",
-           "scripts/session_hook.py", "scripts/observe_commands.py", "scripts/failure_budget.py")
+           "scripts/session_hook.py", "scripts/observe_commands.py", "scripts/failure_budget.py",
+           "scripts/slim_session_logs.py")
 # The repeated-failure stop reads each shell call's outcome.
 FAILURE_HOOK = {"matcher": "Bash|shell|exec_command", "hooks": [{"type": "command", "command": f'python3 "{FAILURES}"', "timeout": 30}]}
+# A detached sweep replaces base64 images in idle session logs with a short note.
+SLIM_HOOK = {"hooks": [{"type": "command", "command": f'python3 "{SLIM}" --spawn', "timeout": 5}]}
 SHARED = {
-    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}],
+    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}, SLIM_HOOK],
+    "SessionEnd": [SLIM_HOOK],
     "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}],
     "PostToolUse": [FAILURE_HOOK],
 }

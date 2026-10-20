@@ -48,6 +48,12 @@ CONTEXT_REQUEST_LIMIT = 2
 CONTEXT_ACTIONS = {'gather_context', 'insufficient_information'}
 
 
+def context_request_limit():
+    """Configured cap on blocking context requests, never above the fixed maximum."""
+    value = harness_config.load()['typesafe'].get('context_request_limit', CONTEXT_REQUEST_LIMIT)
+    return value if type(value) is int and 0 <= value <= CONTEXT_REQUEST_LIMIT else CONTEXT_REQUEST_LIMIT
+
+
 def evaluate(**kwargs) -> dict:
     """Persist a two-request budget per prompt and active step, across processes.
 
@@ -70,10 +76,11 @@ def evaluate(**kwargs) -> dict:
     # Workflow DB transaction is held during a provider call.
     with (budgets / (key + '.lock')).open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        limit = context_request_limit()
         count = json.loads(path.read_text())['count'] if path.exists() else 0
         if type(count) is not int or not 0 <= count <= CONTEXT_REQUEST_LIMIT:
             raise ValueError('Invalid Jev context request budget')
-        result = _evaluate(**kwargs, agent_reason='context_request_limit' if count >= CONTEXT_REQUEST_LIMIT else None)
+        result = _evaluate(**kwargs, agent_reason='context_request_limit' if count >= limit else None)
         if not result.get('needs_reasoning') and result.get('action_source') == 'jev' and result['action'] in CONTEXT_ACTIONS:
             count += 1
             temporary = budgets / ('.' + str(uuid.uuid4()))

@@ -11,6 +11,7 @@ This repository is a harness: the environment that makes an AI agent's work boun
 | `.githooks/pre-commit`, `scripts/install-commit-hook.sh` | Optional local commit gate: installs a pre-commit hook that runs the deterministic verification suite; no CI configuration. |
 | `scripts/hooks/require-phase.sh`, `scripts/permit.py` | The guard: phase rules and the denylist, judged on the files a command would write. |
 | `scripts/failure_budget.py`, `scripts/workflow_gate.py` | The repeated-failure stop and the todo gate. |
+| `scripts/hook_input.py`, `scripts/slim_session_logs.py` | Bounded hook payloads; images removed from idle session logs. |
 | `schemas/` | Task contract, review findings, action proposals, the default denylist. |
 | `tasks/task.example.json` | A filled-in task contract to copy. |
 | `docs/setup.md` | Every command and environment variable in detail. |

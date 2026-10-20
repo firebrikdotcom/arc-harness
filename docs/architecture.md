@@ -75,6 +75,8 @@ Until application code exists, use these boundaries:
 - `scripts/task_contract.py` and `schemas/task.schema.json`: the run's bounded contract. `plan done` requires it, `build done` runs its acceptance commands through the denylist, `review done` checks non-goal paths.
 - `scripts/review_findings.py` and `schemas/review-findings.schema.json`: the independent reviewer's verdict, bound to the tree hash it reviewed; `review done` requires an approval with no open blocker or major finding.
 - `scripts/failure_budget.py`: post-tool hook that reports each shell outcome to `harness failure`; the same command failing the same way twice pauses the run.
+- `scripts/hook_input.py`: the bounded hook stdin reader; an oversized post-tool result is reduced to its status fields instead of blocking.
+- `scripts/slim_session_logs.py`: detached SessionStart/SessionEnd sweep that replaces base64 images in idle Codex and Claude Code session logs with a short note.
 - `scripts/tree-hash.sh`: a git tree of the project's files on disk, used to void verify and review records once project files change.
 - `scripts/guard-version`: the guard's version stamp; a checkout older than the installed harness refuses work.
 

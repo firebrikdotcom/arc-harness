@@ -32,7 +32,35 @@ def reset_task(context):
 def unresolved(context):
     return [item for item in context.get("todos", {}).values() if item["required"] and item["status"] not in TERMINAL]
 
+ENFORCE_MARKER = ".harness-enforce"
+
+def gate_mode(project=None):
+    """audit: hooks record everything and deny nothing. enforce: plans, active todos and
+    decision checkpoints are required. The machine config decides; a .harness-enforce file
+    at or above the project directory enforces that project even in audit mode. A broken
+    config enforces (fail closed)."""
+    try:
+        import harness_config
+        mode = harness_config.load()["workflow"].get("todo_gate", "enforce")
+    except Exception:
+        return "enforce"
+    if mode == "audit" and project:
+        try:
+            here = Path(project).resolve()
+            if any((parent / ENFORCE_MARKER).exists() for parent in (here, *here.parents)):
+                return "enforce"
+        except OSError:
+            return "enforce"
+    return mode
+
+def waiver_active(context):
+    """A planning waiver the person granted in their own prompt, for the UTC day it was granted."""
+    waiver = context.get("waiver")
+    return bool(waiver) and waiver.get("day") == timestamp()[:10]
+
 def assert_plan(context, active=False):
+    if waiver_active(context) or gate_mode(context.get("orchestration_project")) == "audit":
+        return
     plan = """harness workflow todo plan --items '[{"id":"fix","description":"What to do","criterion":"How done is shown"}]' --reason SUMMARY"""
     if context.get("plan_mode") == "question" and context.get("confirmed_request") == context.get("request_seq", 0):
         # Exempting again changes nothing, so offering it would loop the agent.
@@ -91,6 +119,20 @@ def handle(args, sid, context, record):
         return
     reason = text(args.reason, "reason")
     todos = context.setdefault("todos", {})
+    if action == "waive":
+        # The agent may only ask. The grant is read from the person's next prompt by the gate.
+        if getattr(args, "off", False):
+            context.pop("waiver", None)
+            context.pop("waiver_request", None)
+            record("waiver_ended", sid, context, description=reason)
+            return
+        if waiver_active(context):
+            raise TodoValidationError("A planning waiver is already active for this session today")
+        context["waiver_request"] = {"reason": reason, "request_seq": context.get("request_seq", 0), "at": timestamp()}
+        record("waiver_requested", sid, context, description=reason, status="pending")
+        print("Ask the person now, in one line: 'go ahead' or 'approved' as the next message waives todo and dispatch planning "
+              "in this session for the rest of today; any other message cancels the request. 'plan on' ends a waiver.")
+        return
     if action == "exempt":
         if unresolved(context):
             raise TodoValidationError("An unresolved execution plan cannot be exempted; record a blocked outcome or revise the plan")

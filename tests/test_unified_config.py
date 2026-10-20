@@ -91,6 +91,26 @@ class ConfigTests(unittest.TestCase):
                 config.update("sites", changes)
         self.assertEqual(config.load()["sites"]["url"], "http://localhost:3030")
 
+    def test_checkpoint_read_lists_and_context_limit_are_validated(self):
+        config.update("typesafe", {"context_request_limit": 0, "read_only_commands": ["career-scheduler phone text", "gog gmail search"],
+                                   "read_only_tools": ["search_threads"]})
+        value = config.load()["typesafe"]
+        self.assertEqual((value["context_request_limit"], value["read_only_tools"]), (0, ["search_threads"]))
+        for bad in ({"context_request_limit": 3}, {"context_request_limit": "2"}, {"read_only_commands": "cat"},
+                    {"read_only_commands": ["rm -rf /"]}, {"read_only_commands": ["a; b"]}, {"read_only_commands": ["x " * 5]},
+                    {"read_only_tools": ["mcp__a b"]}, {"read_only_tools": [1]}):
+            with self.assertRaises(config.ConfigError, msg=bad):
+                config.update("typesafe", bad)
+        self.assertEqual(config.load()["typesafe"]["context_request_limit"], 0, "a rejected update changes nothing")
+
+    def test_todo_gate_mode_is_audit_or_enforce(self):
+        self.assertEqual(config.load()["workflow"]["todo_gate"], "enforce")
+        config.update("workflow", {"todo_gate": "audit"})
+        self.assertEqual(config.load()["workflow"]["todo_gate"], "audit")
+        for bad in ({"todo_gate": "off"}, {"todo_gate": True}, {"gate": "audit"}):
+            with self.assertRaises(config.ConfigError, msg=bad):
+                config.update("workflow", bad)
+
     def test_collection_master_switch_and_invalid_config(self):
         config.update("telemetry", {"workflow_prompts": True})
         self.assertTrue(audit_transport.enabled("workflow.prompt_recorded"))

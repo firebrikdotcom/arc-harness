@@ -140,6 +140,21 @@ plan revisions and hook-process restarts do not refill the budget. A different
 prompt, task or active todo gets its own budget; returning to an earlier todo
 within the same prompt retains that todo's count.
 
+`typesafe.context_request_limit` (0 to 2, default 2) lowers that budget. At `0`
+no automatic `gather_context` or `insufficient_information` result blocks a
+call: the main agent decides on the first attempt and the receipt still records
+`context_request_limit`. Use it when the checkpoint has been blocking the very
+reads that would supply its context, such as a connector search whose result is
+the missing evidence.
+
+Reads never reach the checkpoint. Besides the built-in read tools and read-only
+shell commands, `typesafe.read_only_commands` lists extra read-only shell
+commands as word prefixes (for example `career-scheduler phone text` or
+`gog gmail search`) and `typesafe.read_only_tools` lists extra read-only tool
+names or `__suffixes` (for example `search_threads`). Both count as evidence
+reads and skip the decision seam. Never list a command or tool that submits,
+writes, sends or deletes: the lists are trusted as declared.
+
 Below **70%**, with missing/invalid confidence, or when Jev is unavailable, the
 agent decides immediately without consuming a context request. A configured
 confidence threshold may be stricter than 70%, but cannot lower that floor.

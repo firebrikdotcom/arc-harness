@@ -48,6 +48,21 @@ class WorkflowTests(unittest.TestCase):
             "HARNESS_SESSION_ID":"test-session", "CLAUDE_ENV_FILE":""}
         for key in [k for k in self.env if k.startswith("HERDR_")]:
             del self.env[key]
+    def gate_mode(self, mode):
+        import copy, harness_config
+        value = copy.deepcopy(harness_config.DEFAULTS)
+        value["workflow"]["todo_gate"] = mode
+        (self.base / "settings.json").write_text(json.dumps(value))
+
+    def rollout(self, text):
+        import datetime
+        folder = self.base / "codex/2026/10/20"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with (folder / "rollout-2026-10-20T10-00-00-policy-session.jsonl").open("a") as handle:
+            handle.write(json.dumps({"timestamp": stamp, "type": "response_item", "payload": {"type": "message", "role": "user",
+                                     "content": [{"type": "input_text", "text": text}]}}) + "\n")
+
     def config(self, jev, workflow, prompts=False):
         (self.base / "settings.json").write_text(json.dumps({"jev":jev,"workflow":workflow,"workflow_prompts":prompts}))
     def run_cli(self, *args, payload=None):
@@ -311,6 +326,39 @@ class WorkflowTests(unittest.TestCase):
         self.gate("PreToolUse",tool_name="Bash",tool_input={"command":"PRIVATE COMMAND"})
         self.assertNotIn("PRIVATE PROMPT",json.dumps(self.queued()))
         self.completion(1)
+
+    def test_oversized_tool_result_is_audited_without_its_body_and_never_blocks(self):
+        # A Codex image generation returns the PNG as ~2.7 MB of base64 in tool_response.
+        image = "iVBORw0KGgo" + "A" * 2_700_000
+        self.gate("UserPromptSubmit", prompt="Work")
+        self.policy("plan","--items",json.dumps([{"id":"a","description":"Draw","criterion":"Image saved"}]),"--reason","Initial plan")
+        self.policy("update","--id","a","--status","in_progress","--reason","Drawing")
+        self.gate("PreToolUse", tool_name="image_gen", tool_use_id="call-img", tool_input={"prompt":"PRIVATE PROMPT"})
+        result = self.gate("PostToolUse", tool_name="image_gen", tool_use_id="call-img",
+                           tool_input={"prompt":"PRIVATE PROMPT"}, tool_response={"result":image,"savedPath":"/x.png"})
+        self.assertNotIn("TODO GATE", result.stderr)
+        rows = [e["payload"] for e in self.queued() if e["event_type"] == "workflow.tool_completed"]
+        self.assertEqual([(r["tool_call_id"], r["outcome"]) for r in rows], [("call-img", "returned")])
+        self.assertNotIn("AAAAAAAA", json.dumps(self.queued()))
+        # Prompts and tool inputs keep the limit: an oversized one is still refused.
+        refused = self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command":"echo " + image})
+        self.assertIn("Hook payload exceeds policy limit", refused.stderr)
+        failure = subprocess.run([sys.executable, str(ROOT / "scripts/failure_budget.py")],
+            input=json.dumps({"hook_event_name":"PostToolUse","tool_name":"image_gen","tool_response":{"result":image}}),
+            env=self.env, text=True, capture_output=True)
+        self.assertEqual(failure.returncode, 0, failure.stderr)
+
+    def test_oversized_shell_output_keeps_its_tail_for_the_failure_budget(self):
+        import io, hook_input
+        payload = {"hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"make"},
+                   "tool_response":{"exit_code":2,"stdout":"x" * 2_000_000 + "LAST ERROR LINE","blob":"y" * 500_000}}
+        slim = json.loads(hook_input.read(io.StringIO(json.dumps(payload))))
+        self.assertEqual(slim["tool_input"], {"command":"make"})
+        self.assertEqual(slim["tool_response"]["exit_code"], 2)
+        self.assertTrue(slim["tool_response"]["stdout"].endswith("LAST ERROR LINE"))
+        self.assertLessEqual(len(slim["tool_response"]["stdout"]), hook_input.TEXT_TAIL)
+        self.assertNotIn("blob", slim["tool_response"])
+        self.assertGreater(slim["tool_response"]["omitted_bytes"], 2_000_000)
 
     def test_plan_revisions_remove_items_with_reasons_and_completion_needs_fresh_checks(self):
         self.gate("UserPromptSubmit",prompt="Work")
@@ -599,5 +647,72 @@ class WorkflowTests(unittest.TestCase):
         (self.base / "settings.json").write_text('{}')
         with patch.dict(os.environ, self.env):
             with self.assertRaises(ValueError): audit_transport.enabled()
+
+
+class GateModeTests(WorkflowTests):
+    def test_waiver_is_granted_only_by_the_persons_next_message(self):
+        self.gate("UserPromptSubmit", prompt="fill the forms")
+        self.gate("UserPromptSubmit", prompt="go ahead")  # without a request this is an instruction
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        asked = self.policy("waive", "--reason", "forms today")
+        self.assertIn("go ahead", asked.stdout)
+        self.gate("UserPromptSubmit", prompt="do the other thing first")  # cancels the request
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.policy("waive", "--reason", "forms today")
+        granted = self.gate("UserPromptSubmit", prompt="Go ahead.")
+        self.assertIn("waived", granted.stdout)
+        self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.gate("UserPromptSubmit", prompt="next form")  # the waiver outlives the prompt
+        self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.gate("UserPromptSubmit", prompt="plan on")
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        events = Handler.events + self.queued()
+        kinds = [e["event_type"] for e in events]
+        for kind in ("workflow.waiver_requested", "workflow.waiver_cancelled", "workflow.waiver_granted", "workflow.waiver_ended"):
+            self.assertIn(kind, kinds)
+        self.assertNotIn("forms today", json.dumps([e for e in events if e["event_type"] == "workflow.prompt_recorded"]))
+
+    def test_direct_waiver_sentence_needs_no_request_and_stays_in_its_session(self):
+        granted = self.gate("UserPromptSubmit", prompt="waive for this session")
+        self.assertIn("waived", granted.stdout)
+        self.gate("PreToolUse", tool_name="Write", tool_input={"file_path": "PRIVATE_PATH"})
+        other = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py"), "codex"],
+                               input=json.dumps({"session_id": "other-session", "hook_event_name": "PreToolUse", "cwd": str(ROOT),
+                                                 "tool_name": "Bash", "tool_input": {"command": "touch PRIVATE_PATH"}}),
+                               env=self.env, text=True, capture_output=True)
+        self.assertEqual(other.returncode, 2, "another session is still gated")
+
+    def test_codex_reads_the_persons_answer_from_the_rollout(self):
+        self.env["HARNESS_CODEX_SESSIONS"] = str(self.base / "codex")
+        self.rollout("fill the forms")
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.policy("waive", "--reason", "forms today")
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})  # no answer yet
+        self.rollout("approved")
+        self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.rollout("plan on")
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+
+    def test_audit_mode_records_everything_and_denies_nothing_unless_a_project_enforces(self):
+        self.gate_mode("audit")
+        prompt = self.gate("UserPromptSubmit", prompt="PRIVATE PROMPT")
+        self.assertIn("audit mode", prompt.stdout)
+        self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
+        self.gate("PreToolUse", tool_name="Write", tool_input={"file_path": "PRIVATE_PATH"})
+        self.run_cli("hook", payload={"session_id": "policy-session", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                      "tool_use_id": "call-z", "tool_input": {"command": "touch PRIVATE_PATH"}})
+        kinds = [e["event_type"] for e in self.queued()]
+        self.assertIn("workflow.plan_optional", kinds)
+        self.assertIn("workflow.tool_started", kinds)
+        self.assertNotIn("PRIVATE PROMPT", json.dumps(self.queued()))
+        project = self.base / "strict"
+        project.mkdir()
+        (project / ".harness-enforce").write_text("")
+        self.gate("UserPromptSubmit", prompt="PRIVATE PROMPT", cwd=str(project / "src"))
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"}, cwd=str(project / "src"))
+        self.gate_mode("enforce")
+        self.gate("UserPromptSubmit", prompt="PRIVATE PROMPT")
+        self.gate("PreToolUse", 2, tool_name="Bash", tool_input={"command": "touch PRIVATE_PATH"})
 
 if __name__ == "__main__": unittest.main()

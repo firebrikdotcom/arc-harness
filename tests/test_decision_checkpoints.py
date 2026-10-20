@@ -179,6 +179,45 @@ class Decisions(unittest.TestCase):
                 decision.resolve(project=self.root, identifier=first['id'], session_id='session', action='delete',
                                  reason='not offered')
 
+    def test_context_request_limit_zero_lets_the_agent_decide_at_once(self):
+        self.config['typesafe']['context_request_limit'] = 0
+        args = self.automatic_args()
+        with patch.object(decision.advice, 'load_router', return_value=object()), patch.object(decision.advice, 'validate_context'), self.jev('gather_context', 0.99) as api:
+            row = decision.evaluate(**args)
+        # With no budget there is nothing to ask Jev: no provider call, no block, the agent decides.
+        self.assertEqual(api.call_count, 0)
+        self.assertEqual((row['action'], row['needs_reasoning'], row['fallback_reason'], row['context_requests']),
+                         ('normal_reasoning', True, 'context_request_limit', 0))
+        # An out-of-range or missing value falls back to the fixed maximum of two.
+        self.config['typesafe']['context_request_limit'] = 9
+        self.assertEqual(decision.context_request_limit(), 2)
+        del self.config['typesafe']['context_request_limit']
+        self.assertEqual(decision.context_request_limit(), 2)
+
+    def test_configured_read_only_commands_and_tools_skip_the_decision_seam(self):
+        self.config['typesafe']['read_only_commands'] = ['career-scheduler phone text', 'gog gmail search']
+        self.config['typesafe']['read_only_tools'] = ['search_threads']
+        self.context()
+        shell = lambda command: {**self.gate_payload(), 'tool_name': 'Bash', 'tool_input': {'command': command}}
+        with patch.object(decision, 'evaluate', side_effect=AssertionError('reads never reach the checkpoint')):
+            workflow_gate.decision_seam(shell('/opt/career/bin/career-scheduler phone text --max 2000'), {'request_id': 'r1'})
+            workflow_gate.decision_seam(shell('gog gmail search "from:greenhouse" | head'), {'request_id': 'r1'})
+            workflow_gate.decision_seam({**self.gate_payload(), 'tool_name': 'mcp__gmail__search_threads', 'tool_input': {'query': 'x'}}, {'request_id': 'r1'})
+            workflow_gate.decision_seam({**self.gate_payload(), 'tool_name': 'search_threads', 'tool_input': {}}, {'request_id': 'r1'})
+        # A prefix is not a license for its siblings: submit and fill still go through the checkpoint.
+        with patch.object(decision, 'evaluate', return_value={'action': 'gather_context'}):
+            for command in ('career-scheduler phone submit --confirm', 'career-scheduler phone fill', 'gog gmail send --to a@b.c'):
+                with self.assertRaisesRegex(ValueError, 'gather_context'):
+                    workflow_gate.decision_seam(shell(command), {'request_id': 'r1'})
+        # Declared reads revise the evidence counter like built-in reads, without needing an active todo.
+        import workflow_audit
+        with workflow_audit.context_db() as db:
+            before = workflow_audit.load(db, 'session').get('evidence_revision', 0)
+        with patch.object(decision, 'evaluate', side_effect=AssertionError('no checkpoint for a read')):
+            workflow_gate.authorize(shell('career-scheduler phone text'))
+        with workflow_audit.context_db() as db:
+            self.assertEqual(workflow_audit.load(db, 'session').get('evidence_revision', 0), before + 1)
+
     def gate_payload(self):
         return {'cwd': str(self.root), 'session_id': 'session', 'hook_event_name': 'PreToolUse',
                 'tool_name': 'Edit', 'tool_input': {'file_path': 'a'}}

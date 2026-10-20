@@ -15,6 +15,7 @@ import subprocess
 import sys
 import uuid
 from audit_transport import ROOT, emit, enabled, flush
+import hook_input
 import workflow_todos as todos
 from run_paths import current_file, session_id
 
@@ -273,8 +274,9 @@ def check_record(sid: str, context: dict, kind: str, path: Path) -> None:
 
 def hook(agent: str | None = None) -> int:
     # Cap hook input in memory; persist only the fields enabled by collection policy.
-    raw = sys.stdin.read(1_000_001)
-    if len(raw) > 1_000_000:
+    try:
+        raw = hook_input.read()
+    except ValueError:
         return 0
     payload = json.loads(raw or "{}")
     sid = session_id(payload.get("session_id"))
@@ -387,10 +389,11 @@ def main() -> int:
     gate.add_argument("--check", choices=("plan", "active", "complete"), required=True)
     todo = sub.add_parser("todo", description=todos.PLAN_HELP, formatter_class=argparse.RawDescriptionHelpFormatter,
                           epilog="Register the plan successfully before updating an item. Questions with only read-only tools use exempt.")
-    todo.add_argument("todo_action", choices=("plan", "confirm", "update", "exempt", "show", "context"))
+    todo.add_argument("todo_action", choices=("plan", "confirm", "update", "exempt", "show", "context", "waive"))
     todo.add_argument("--items", help="JSON array of todos; see the schema and example above")
     todo.add_argument("--reason")
     todo.add_argument("--id")
+    todo.add_argument("--off", action="store_true", help="waive: end the active planning waiver")
     todo.add_argument("--status", choices=sorted(todos.STATUSES))
     todo.add_argument("--evidence")
     todo.add_argument("--action-summary", help="Curated proposed behavior change; no source or private data")

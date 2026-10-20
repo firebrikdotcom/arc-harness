@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 
+import hook_input
 from run_paths import session_id
 
 SHELL_TOOLS = {"Bash", "shell", "exec_command", "local_shell", "container.exec"}
@@ -53,8 +54,9 @@ def outcome(payload: dict) -> tuple[bool, str]:
 
 
 def main() -> int:
-    raw = sys.stdin.read(1_000_001)
-    if len(raw) > 1_000_000:
+    try:
+        raw = hook_input.read()
+    except ValueError:
         return 0
     payload = json.loads(raw or "{}")
     if payload.get("tool_name") not in SHELL_TOOLS:

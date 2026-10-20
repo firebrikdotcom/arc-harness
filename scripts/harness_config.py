@@ -8,6 +8,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,12 @@ DEFAULTS = {
         "_doc_enforce_decisions": "Require decision records at covered native execution seams; internal judgments use harness decision explicitly.",
         "decision_ttl_seconds": 300,
         "_doc_decision_ttl_seconds": "Reuse only unchanged decision states within this many seconds; consumed action receipts remain single-use.",
+        "context_request_limit": 2,
+        "_doc_context_request_limit": "How many gather_context/insufficient_information requests (0-2) may block a tool call per prompt and active todo before the main agent decides.",
+        "read_only_commands": [],
+        "_doc_read_only_commands": "Extra read-only shell commands as word prefixes (e.g. 'career-scheduler phone text'); they count as evidence reads and skip the decision checkpoint. Never list a command that submits, writes or sends.",
+        "read_only_tools": [],
+        "_doc_read_only_tools": "Extra read-only tool names or '__suffixes' (connector reads such as 'search_threads'); treated like Read. Never list a tool that sends, writes or deletes.",
         "_doc_checkpoints": "Enable automatic phase/session checkpoints; required checks always remain enforced.",
     },
     "dispatch": {
@@ -57,6 +64,11 @@ DEFAULTS = {
         "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
         "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained.",
     },
+    "workflow": {
+        "_doc": "Todo gate mode for every agent's hooks. audit records prompts, plans, tool calls and checks but denies nothing; enforce requires plans and decision checkpoints. A .harness-enforce file at a project root enforces that project in audit mode.",
+        "todo_gate": "enforce",
+        "_doc_todo_gate": "audit or enforce.",
+    },
     "sites": {
         "_doc": "Firebrik Sites publishing for every agent (harness sites). The token stays in token_file (0600), never here.",
         "enabled": True,
@@ -66,7 +78,7 @@ DEFAULTS = {
         "_doc_token_file": "File holding a personal API token from Settings > API tokens; FIREBRIK_SITES_TOKEN overrides it.",
     },
 }
-SECTIONS = ("typesafe", "dispatch", "telemetry", "sites")
+SECTIONS = ("typesafe", "dispatch", "telemetry", "sites", "workflow")
 
 
 class ConfigError(ValueError):
@@ -102,13 +114,16 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     allowed = {"version", *SECTIONS}
     if any(k not in allowed and not k.startswith("_doc") for k in value):
         raise ConfigError("unknown configuration section")
-    fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence"},
+    fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence",
+                           "context_request_limit", "read_only_commands", "read_only_tools"},
               "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"},
-              "sites": {"enabled", "url", "token_file"}}
+              "sites": {"enabled", "url", "token_file"}, "workflow": {"todo_gate"}}
     for section, keys in fields.items():
         part = value.get(section)
         if not isinstance(part, dict) or any(k not in keys and not k.startswith("_doc") for k in part):
             raise ConfigError(f"invalid configuration section: {section}")
+    if value["workflow"].get("todo_gate") not in ("audit", "enforce"):
+        raise ConfigError("workflow.todo_gate must be audit or enforce")
     typesafe = value["typesafe"]
     if typesafe.get("mode") not in ("off", "shadow", "active"):
         raise ConfigError("typesafe.mode must be off, shadow or active")
@@ -123,7 +138,12 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         for key in keys:
             if type(value[section].get(key)) is not bool:
                 raise ConfigError(f"{section}.{key} must be boolean")
-    for section, limits in {"typesafe": {"decision_ttl_seconds": (1, 3600)},
+    for key, pattern in (("read_only_commands", r"^[A-Za-z0-9_./-]+( [A-Za-z0-9_.-]+){0,3}$"), ("read_only_tools", r"^[A-Za-z0-9_.-]+$")):
+        items = typesafe.get(key, [])
+        if not isinstance(items, list) or len(items) > 64 or any(
+                not isinstance(item, str) or len(item) > 80 or not re.match(pattern, item) for item in items):
+            raise ConfigError(f"typesafe.{key} must be a list of at most 64 plain words (no shell syntax)")
+    for section, limits in {"typesafe": {"decision_ttl_seconds": (1, 3600), "context_request_limit": (0, 2)},
                             "dispatch": {"max_workers": (1, 16), "max_context_bytes": (1000, 32000), "timeout_seconds": (1, 86400)}}.items():
         for key, (low, high) in limits.items():
             number = value[section].get(key)
@@ -176,8 +196,9 @@ def load(file: Path | None = None) -> dict[str, Any]:
             value["telemetry"].update(legacy_collection(stored))
             return validate(value)
         # Sections added after a file was written start from their defaults.
-        if "sites" not in stored:
-            stored["sites"] = copy.deepcopy(DEFAULTS["sites"])
+        for section in ("sites", "workflow"):
+            if section not in stored:
+                stored[section] = copy.deepcopy(DEFAULTS[section])
         for section in SECTIONS:
             if isinstance(stored.get(section), dict):
                 if section == "dispatch" and stored[section].get("_doc") == "Reserved for automatic role dispatch; false keeps work with the main agent. Dispatcher not implemented yet.":
