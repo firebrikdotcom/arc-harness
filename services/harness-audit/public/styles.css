@@ -10,6 +10,7 @@
   --shadow-hard: 5px 5px 0 var(--border);
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html { background: var(--canvas); color: var(--ink); font-family: var(--body); }
 body { margin: 0; min-height: 100vh; }
 a { color: inherit; text-underline-offset: .2em; }
@@ -37,8 +38,9 @@ h1, h2, p { margin-top: 0; } h1 { font-size: clamp(2.2rem, 6vw, 4.4rem); line-he
 .text-links { display: flex; justify-content: space-between; gap: 1rem; margin-top: 1.2rem; font-size: .85rem; }
 .error-code { color: var(--error); font-weight: 900; }
 .workbench { display: grid; grid-template: 3.5rem 1fr / 15rem minmax(0, 1fr); min-height: 100vh; }
-.rail { grid-row: 1 / -1; border-right: 2px solid var(--border); background: var(--ink); color: var(--panel); padding: 1.2rem; }
-.brand--rail { color: white; margin-bottom: 2rem; }.rail nav { display: grid; gap: .25rem; }.rail nav a { padding: .7rem; border: 1px solid transparent; font: 700 .72rem var(--mono); text-decoration: none; text-transform: uppercase; }.rail nav a:hover { border-color: var(--primary); color: var(--primary); }
+.rail { grid-row: 1 / -1; min-width: 0; overflow-x: hidden; border-right: 2px solid var(--border); background: var(--ink); color: var(--panel); padding: 1.2rem; }
+.brand--rail { color: white; margin-bottom: 2rem; white-space: nowrap; }.rail nav { display: grid; gap: .25rem; }.rail nav a { display: flex; align-items: center; gap: .65rem; padding: .7rem; border: 1px solid transparent; font: 700 .72rem var(--mono); text-decoration: none; text-transform: uppercase; white-space: nowrap; }.rail nav a:hover { border-color: var(--primary); color: var(--primary); }
+.rail__glyph { display: grid; flex: none; place-items: center; width: 1.6rem; aspect-ratio: 1; border: 1px solid currentColor; font: 800 .7rem var(--mono); }
 .rail__signout { margin-top: 2rem; border: 0; background: none; color: var(--panel); font: 700 .72rem var(--mono); text-decoration: underline; cursor: pointer; }
 .topbar { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; border-bottom: 2px solid var(--border); background: var(--panel); padding: 0 1.5rem; font-size: .68rem; }.status-dot { font: 800 .68rem var(--mono); color: var(--success); }.status-dot::before { content: ""; display: inline-block; width: .55rem; aspect-ratio: 1; margin-right: .45rem; background: var(--success); }.rail-toggle { display: none; }
 .workspace { min-width: 0; padding: clamp(1rem, 4vw, 2.5rem); }.breadcrumbs { margin: 0 0 1rem; color: var(--ink-muted); font: 700 .68rem var(--mono); text-transform: uppercase; }.breadcrumbs ol { display: flex; flex-wrap: wrap; gap: .45rem; margin: 0; padding: 0; list-style: none; }.breadcrumbs li:not(:last-child)::after { content: "/"; margin-left: .45rem; color: var(--border-subtle); }.breadcrumbs [aria-current="page"] { color: var(--ink); }.page-head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }.page-head h1 { margin-bottom: 0; font-size: clamp(2rem, 4vw, 3.5rem); }
@@ -132,7 +134,8 @@ summary { cursor:pointer; }
 }
 @media(max-width:850px) {
   .rail nav { display:flex; gap:.5rem; }
-  .rail nav a { flex:1; text-align:center; }
+  .rail nav a { flex:1; justify-content:center; }
+  .rail__glyph { display:none; }
   .brand--rail { margin-bottom:1rem; }
   .topbar { min-height:3.5rem; height:auto; padding:.75rem 1rem; gap:1rem; flex-wrap:wrap; }
 }
@@ -146,7 +149,7 @@ summary { cursor:pointer; }
   .session-metadata dl { grid-template-columns:1fr; gap:1rem; }
   .session-heading { align-items:start; }
   .session-heading h2 { font-size:1.15rem; }
-  .topbar > .mono:nth-child(2) { display:none; }
+  .topbar > .mono:nth-of-type(2) { display:none; }
   .workflow-timeline { padding:1.2rem 1.2rem .25rem 1.5rem; }
   .workflow-event-head { align-items:start; flex-direction:column; }
 }
@@ -495,16 +498,6 @@ details[open] > .row-summary::after { content:"\2212"; }
   .orch-children > li::before { width:1.25rem; }
 }
 /* Architecture boards: rail entries, project list and the full-height board page */
-.rail-projects { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #ffffff2e; }
-.rail-projects__title { margin: 0 0 .4rem; font: 700 .62rem var(--mono); letter-spacing: .08em; text-transform: uppercase; }
-.rail-projects__title a { display: block; padding: .35rem .7rem; color: #ffffffa3; text-decoration: none; border: 1px solid transparent; }
-.rail-projects__title a:hover,.rail-projects__title a[aria-current="page"] { color: var(--primary); border-color: var(--primary); }
-.rail-projects__list { display: grid; gap: .15rem; margin: 0; padding: 0; list-style: none; }
-.rail-projects__list a { display: grid; grid-template-columns: .55rem minmax(0, 1fr) auto; align-items: center; gap: .55rem; padding: .55rem .7rem; border: 1px solid transparent; color: var(--panel); font: 700 .68rem var(--mono); text-decoration: none; text-transform: uppercase; }
-.rail-projects__list a:hover,.rail-projects__list a[aria-current="page"] { border-color: var(--primary); color: var(--primary); }
-.rail-projects__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rail-projects__label { color: #ffffff8c; font-size: .58rem; font-weight: 500; text-transform: lowercase; white-space: nowrap; }
-.rail-projects__empty { padding: .45rem .7rem; color: #ffffff8c; font: .66rem var(--mono); }
 .state-dot { display: inline-block; flex: none; width: .55rem; aspect-ratio: 1; border-radius: 50%; background: var(--border-subtle); vertical-align: middle; }
 .state-dot--ready { background: #3fae74; }
 .state-dot--drifted { background: var(--primary); }
@@ -515,6 +508,9 @@ details[open] > .row-summary::after { content:"\2212"; }
 @media (prefers-reduced-motion: reduce) { .state-dot--mapping,.state-dot--refreshing { animation: none; border-right-color: var(--primary); } }
 .project-table__state { white-space: nowrap; }
 .project-table__root { font-size: .72rem; overflow-wrap: anywhere; }
+.project-table__action { width: 1%; text-align: right; }
+.project-table__action form { margin: 0; }
+.button--quiet { min-height: 2rem; padding: .35rem .7rem; font-size: .68rem; }
 .workspace--board { display: flex; flex-direction: column; height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); min-height: 0; padding: 0; overflow: hidden; }
 .board-page { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 .board-strip { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem 1.25rem; padding: .55rem 1rem; border-bottom: 2px solid var(--border); background: var(--panel); }
@@ -530,10 +526,19 @@ details[open] > .row-summary::after { content:"\2212"; }
 .board-log { max-height: 18rem; overflow: auto; margin: 1rem 0 0; padding: .8rem 1rem; background: var(--ink); color: var(--panel); font: .72rem/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (min-width: 851px) { .rail { overflow-y: auto; } }
 @media (max-width: 850px) {
-  .rail-projects { margin-top: 1rem; }
-  .rail-projects__list { display: flex; gap: .5rem; overflow-x: auto; padding-bottom: .25rem; }
-  .rail-projects__list li { flex: none; }
-  .rail-projects__list a { border-color: #ffffff2e; }
   .workspace--board { height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); min-height: 26rem; }
 }
 @media (max-width: 520px) { .board-command { flex-direction: column; } .board-strip { padding: .5rem .75rem; } }
+/* Collapsible rail (desktop only): workbench.js toggles .rail-collapsed on <html>. */
+@media (min-width: 851px) {
+  .workbench { transition: grid-template-columns .2s ease; }
+  .rail-toggle { display: inline-grid; place-items: center; margin-right: auto; width: 2.25rem; aspect-ratio: 1; border: 2px solid var(--border); background: var(--raised); color: var(--ink); cursor: pointer; }
+  .rail-toggle:hover { background: white; }
+  .rail-toggle::before { content: "\00AB"; font: 800 1rem var(--mono); }
+  .rail-collapsed .rail-toggle::before { content: "\00BB"; }
+  .rail-collapsed .workbench { grid-template-columns: 4.5rem minmax(0, 1fr); }
+  .rail-collapsed .rail { padding-inline: .75rem; }
+  .rail-collapsed .brand--rail { justify-content: center; width: 100%; }
+  .rail-collapsed .rail nav a { justify-content: center; padding-inline: 0; }
+  .rail-collapsed .rail__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}

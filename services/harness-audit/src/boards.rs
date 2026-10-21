@@ -1,6 +1,7 @@
 //! Architecture boards: a thin bridge to `scripts/board.py`.
 //!
-//! The dashboard owns no board data or logic. Every read shells out to the CLI
+//! The dashboard owns no board data or logic. Every read, and the one change it
+//! makes (removing a project from the list, or restoring it), shells out to the CLI
 //! off the async executor, with a timeout, passing only a validated target id
 //! as its own argv element. The project list feeds every page's sidebar, so it
 //! is cached briefly; when the CLI is missing or fails, callers get an empty
@@ -145,6 +146,30 @@ impl Boards {
         web::block(move || self.list_blocking())
             .await
             .unwrap_or_default()
+    }
+
+    /// Removed projects from `list --removed --json`, uncached: only the
+    /// Projects page shows them. A broken CLI yields none.
+    pub async fn removed(self: Arc<Self>) -> Vec<Value> {
+        match web::block(move || self.run(&["list", "--removed", "--json"])).await {
+            Ok(Outcome::Json(Value::Array(rows))) => rows.iter().filter_map(sidebar_row).collect(),
+            other => {
+                tracing::warn!(outcome=?other, "removed board list failed");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Remove a project from the list (keeping its board) or restore it, then
+    /// drop the cached list so the next page shows the change.
+    pub async fn set_removed(self: Arc<Self>, id: TargetId, removed: bool) -> Outcome {
+        let command = if removed { "remove" } else { "restore" };
+        let boards = self.clone();
+        let outcome = web::block(move || boards.run(&[command, "--target", id.as_str()]))
+            .await
+            .unwrap_or_else(|error| Outcome::Failed(error.to_string()));
+        *self.cache.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        outcome
     }
 
     /// Run one per-target query off the executor.

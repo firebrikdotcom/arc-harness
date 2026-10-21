@@ -179,6 +179,21 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(state["check"]["action"], "none")
         self.assertEqual(self.run_cli("state", "--target", "nope", "--json").returncode, 1)
 
+    def test_remove_hides_the_project_and_stops_mapping_until_restored(self):
+        board.do_import(self.target, self.write(SMALL_BOARD))
+        self.assertEqual(json.loads(self.run_cli("remove", "--target", "demo-1").stdout), {"id": "demo-1", "removed": True})
+        self.assertEqual(json.loads(self.run_cli("list", "--json").stdout), [])
+        self.assertEqual([r["id"] for r in json.loads(self.run_cli("list", "--json", "--removed").stdout)], ["demo-1"])
+        (self.project / "src" / "app.py").write_text("# changed\n")
+        self.assertEqual(board.check(self.target)["reason"], "removed")
+        # The stored board is kept, so a restore shows it again at once.
+        self.assertEqual(self.run_cli("show", "--target", "demo-1").returncode, 0)
+        self.run_cli("restore", "--target", "demo-1")
+        self.assertEqual([r["id"] for r in json.loads(self.run_cli("list", "--json").stdout)], ["demo-1"])
+        self.assertEqual(json.loads(self.run_cli("list", "--json", "--removed").stdout), [])
+        self.assertEqual(board.check(self.target)["action"], "refresh")
+        self.assertEqual(self.run_cli("remove", "--target", "nope").returncode, 1)
+
     def test_fixture_is_a_valid_board(self):
         clean, errors, _ = board.validate(json.loads(FIXTURE.read_text()), str(self.project))
         self.assertEqual(errors, [])

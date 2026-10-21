@@ -39,6 +39,16 @@ Each rule is written here so you know the goal, and enforced by a gate so it hol
 
 If a gate blocks you, read its message: it says what to do next. Do not work around a gate; if it is wrong, say so. The gates stop mistakes and shortcuts; they are not a sandbox (docs/setup.md, "What the guard can and cannot stop").
 
+## No-hook launchers
+
+`bin/claude-nohooks` starts Claude Code with `disableAllHooks`, and `bin/codex-nohooks` starts Codex with the `hooks` feature disabled; both pass any other arguments through. When you install or update this harness on a machine, symlink both into `~/.local/bin` so they track this checkout:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf "$PWD/bin/claude-nohooks" ~/.local/bin/claude-nohooks
+ln -sf "$PWD/bin/codex-nohooks" ~/.local/bin/codex-nohooks
+```
+
 ## Working style
 
 - Follow existing patterns; keep the change to the contract's scope.

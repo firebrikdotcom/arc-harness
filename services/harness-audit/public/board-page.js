@@ -1,5 +1,5 @@
 /* Architecture board page: loads board.json into the renderer, then polls the
-   mapping state, the live overlay and the sidebar every 5 s while the tab is
+   mapping state and the live overlay every 5 s while the tab is
    visible. Every string from the server is set as text or escaped. */
 (() => {
   'use strict';
@@ -112,41 +112,6 @@
     return true;
   }
 
-  function sidebarItem(project) {
-    const li = document.createElement('li');
-    const a = document.createElement('a');
-    a.href = '/projects/' + encodeURIComponent(project.id) + '/board';
-    a.title = `${project.name} · ${project.label}`;
-    if (project.id === id) a.setAttribute('aria-current', 'page');
-    const dot = document.createElement('span');
-    dot.className = 'state-dot state-dot--' + String(project.state).replace(/[^a-z]/g, '');
-    dot.setAttribute('aria-hidden', 'true');
-    const name = document.createElement('span');
-    name.className = 'rail-projects__name';
-    name.textContent = project.name;
-    const label = document.createElement('span');
-    label.className = 'rail-projects__label';
-    label.textContent = project.label;
-    a.append(dot, name, label);
-    li.appendChild(a);
-    return li;
-  }
-
-  async function refreshSidebar() {
-    const list = document.querySelector('[data-board-sidebar]');
-    if (!list) return;
-    const response = await getJson('/projects/sidebar.json');
-    if (!response.ok || !Array.isArray(response.body)) return;
-    if (!response.body.length) {
-      const empty = document.createElement('li');
-      empty.className = 'rail-projects__empty';
-      empty.textContent = 'No projects yet';
-      list.replaceChildren(empty);
-      return;
-    }
-    list.replaceChildren(...response.body.map(sidebarItem));
-  }
-
   async function tick() {
     if (busy || document.visibilityState !== 'visible') return;
     busy = true;
@@ -172,7 +137,6 @@
         if (!api) showEmpty(null);
         setStrip('failed', `Status unavailable (HTTP ${state.status}) · retrying`);
       }
-      await refreshSidebar();
     } catch (error) {
       if (!api && emptyKey === null) showEmpty(null);
       setStrip('failed', 'Status unavailable · retrying');

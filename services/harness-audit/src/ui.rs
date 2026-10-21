@@ -10,7 +10,7 @@ use crate::routes::read_report;
 use crate::summary as grouped;
 use actix_session::Session;
 use actix_web::http::StatusCode;
-use actix_web::{get, web, HttpRequest, HttpResponse, Responder};
+use actix_web::{get, post, web, HttpRequest, HttpResponse, Responder};
 use arc_web::ui::{
     Breadcrumb, TemplateBundle, TemplateDef, TemplateName, UiContribution, UiHost, UiPage,
 };
@@ -36,6 +36,9 @@ const BOARD_STYLESHEET: &str = include_str!("../../../tools/architecture-board/b
 
 /// The board page's own loader and poller.
 const BOARD_PAGE_SCRIPT: &str = include_str!("../public/board-page.js");
+
+/// The layout's collapsible navigation rail, from the Arc workbench scaffold.
+const WORKBENCH_SCRIPT: &str = include_str!("../public/workbench.js");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
@@ -180,6 +183,10 @@ const NAVIGATION: &[NavItem] = &[
         label: "Events",
         href: "/events",
     },
+    NavItem {
+        label: "Architecture",
+        href: "/projects",
+    },
 ];
 
 #[derive(Debug, Default, Deserialize)]
@@ -205,9 +212,6 @@ async fn render(
     breadcrumbs: Vec<Breadcrumb>,
 ) -> HttpResponse {
     decorate(&mut context, title);
-    // The sidebar lists architecture boards on every page; a failing CLI leaves it empty.
-    let projects = Boards::for_request(request).list().await;
-    context.insert("architecture_projects", projects.as_slice());
     context.insert("client_timezone", &client_timezone(request).name());
     registry.render(
         UiPage {
@@ -231,9 +235,6 @@ fn decorate(context: &mut Context, title: &str) {
     // crate's name when APP_NAME is unset, so the layout shows this instead.
     context.insert("service_name", "Harness audit");
     context.insert("local_navigation", NAVIGATION);
-    if !context.contains_key("architecture_projects") {
-        context.insert("architecture_projects", &Vec::<Value>::new());
-    }
     context.insert("app_version", env!("CARGO_PKG_VERSION"));
 }
 
@@ -1745,6 +1746,11 @@ async fn board_page_script() -> impl Responder {
     asset("text/javascript; charset=utf-8", BOARD_PAGE_SCRIPT)
 }
 
+#[get("/public/workbench.js")]
+async fn workbench_script() -> impl Responder {
+    asset("text/javascript; charset=utf-8", WORKBENCH_SCRIPT)
+}
+
 fn asset(content_type: &'static str, body: &'static str) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(content_type)
@@ -1764,36 +1770,33 @@ fn no_store_json(status: StatusCode, body: &Value) -> HttpResponse {
         .json(body)
 }
 
-/// `GET /projects`: every project the board CLI lists, with its board state.
+/// `GET /projects`: the Architecture page, every project the board CLI lists
+/// with its board state. Each project's board is reached from here.
 #[get("/projects")]
 async fn projects_page(
     request: HttpRequest,
     session: Session,
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
-    let projects = Boards::for_request(&request).list().await;
+    let boards = Boards::for_request(&request);
+    let projects = boards.clone().list().await;
+    let removed = boards.removed().await;
     let mut context = Context::new();
     context.insert("projects", projects.as_slice());
+    context.insert("removed_projects", &removed);
     render(
         &registry,
         &request,
         &session,
         "audit/projects.html",
-        "Projects",
+        "Architecture",
         context,
         vec![
             Breadcrumb::link("Workbench", "/"),
-            Breadcrumb::current("Projects"),
+            Breadcrumb::current("Architecture"),
         ],
     )
     .await
-}
-
-/// The cached sidebar rows, for live updates from the board page.
-#[get("/projects/sidebar.json")]
-async fn projects_sidebar(request: HttpRequest) -> impl Responder {
-    let projects = Boards::for_request(&request).list().await;
-    no_store_json(StatusCode::OK, &json!(projects.as_slice()))
 }
 
 /// `GET /projects/{id}/board`: the page shell; `board-page.js` loads the data.
@@ -1842,6 +1845,64 @@ async fn board_page(
         Vec::new(),
     )
     .await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CsrfForm {
+    #[serde(default)]
+    csrf_token: String,
+}
+
+/// `POST /projects/{id}/remove`: hide a project from the Architecture list and
+/// stop mapping it. Its stored board is kept, so a restore shows it again.
+#[post("/projects/{id}/remove")]
+async fn remove_project(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    form: web::Form<CsrfForm>,
+) -> impl Responder {
+    change_project(&request, &session, &path, &form.csrf_token, true).await
+}
+
+/// `POST /projects/{id}/restore`: put a removed project back in the list.
+#[post("/projects/{id}/restore")]
+async fn restore_project(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    form: web::Form<CsrfForm>,
+) -> impl Responder {
+    change_project(&request, &session, &path, &form.csrf_token, false).await
+}
+
+async fn change_project(
+    request: &HttpRequest,
+    session: &Session,
+    raw_id: &str,
+    csrf_token: &str,
+    removed: bool,
+) -> HttpResponse {
+    if !arc_web::helpers::csrf::validate_csrf_token(session, csrf_token) {
+        return HttpResponse::Forbidden()
+            .content_type("text/plain; charset=utf-8")
+            .body("The form expired; reload the page and try again.");
+    }
+    let Some(id) = TargetId::parse(raw_id) else {
+        return project_not_found();
+    };
+    match Boards::for_request(request).set_removed(id, removed).await {
+        Outcome::Json(_) => HttpResponse::SeeOther()
+            .insert_header(("Location", "/projects"))
+            .finish(),
+        Outcome::UnknownTarget | Outcome::NotMapped => project_not_found(),
+        Outcome::Failed(error) => {
+            tracing::warn!(%error, removed, "board remove or restore failed");
+            HttpResponse::BadGateway()
+                .content_type("text/plain; charset=utf-8")
+                .body(format!("The board CLI failed: {error}"))
+        }
+    }
 }
 
 #[get("/projects/{id}/board.json")]
@@ -1898,7 +1959,8 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(workflow_page)
         .service(workflow_items)
         .service(projects_page)
-        .service(projects_sidebar)
+        .service(remove_project)
+        .service(restore_project)
         .service(board_page)
         .service(board_json)
         .service(board_state_json)
@@ -1907,6 +1969,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(board_script)
         .service(board_stylesheet)
         .service(board_page_script)
+        .service(workbench_script)
         .service(favicon)
         .service(omarchy_favicon);
 }
@@ -2179,6 +2242,8 @@ mod tests {
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
         assert!(html.contains("/public/styles.css"));
+        assert!(html.contains("<script src=\"/public/workbench.js\"></script>"));
+        assert!(html.contains("data-rail-toggle"));
         assert!(html.contains("rel=\"icon\" href=\"/favicon.ico?v=arc2\""));
         assert!(html.contains("Harness audit"));
         assert!(
@@ -3366,17 +3431,23 @@ mod tests {
         )
         .await;
 
-        // The sidebar on the workbench links the project to its board.
+        // Architecture is a plain navigation item; the sidebar lists no projects.
         let (status, _, html) = get_body!(&app, "/");
         assert_eq!(status, StatusCode::OK, "{html}");
-        assert!(html.contains(">Architecture</a>"));
-        assert!(html.contains("href=\"/projects/demo-1/board\""));
-        assert!(html.contains("rail-projects__name\">project-demo-1<"));
-        assert!(html.contains("state-dot--ready"));
+        assert!(html.contains("<a href=\"&#x2F;projects\" title=\"Architecture\">"));
+        assert!(!html.contains("/projects/demo-1/board"));
 
+        // The Architecture page links each project to its board.
         let (status, _, html) = get_body!(&app, "/projects");
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains("<h1>Projects</h1>"));
+        assert!(html.contains("<h1>Architecture</h1>"));
+        assert!(html
+            .contains("<a href=\"&#x2F;projects\" title=\"Architecture\" aria-current=\"page\">"));
+        assert!(html.contains(
+            "<a href=\"&#x2F;\">Workbench</a></li><li><span aria-current=\"page\">Architecture</span>"
+        ));
+        assert!(html.contains("href=\"/projects/demo-1/board\""));
+        assert!(html.contains("state-dot--ready"));
         assert!(html.contains("project-demo-1"));
         assert!(html.contains("project-demo-2"));
         assert!(html.contains("not mapped"));
@@ -3389,8 +3460,11 @@ mod tests {
         assert!(html.contains("href=\"/public/board.css\""));
         assert!(html.contains("data-target=\"demo-1\""));
         assert!(html.contains("class=\"workspace workspace--board\""));
-        // The current project is highlighted in the sidebar.
-        assert!(html.contains("href=\"/projects/demo-1/board\" title=\"project-demo-1 · ready\" aria-current=\"page\""));
+        // The board is reached through Workbench / Architecture / project, with Architecture current in the nav.
+        assert!(html.contains("<li><a href=\"/\">Workbench</a></li><li><a href=\"/projects\">Architecture</a></li><li><span aria-current=\"page\">project-demo-1</span></li>"));
+        assert!(html
+            .contains("<a href=\"&#x2F;projects\" title=\"Architecture\" aria-current=\"page\">"));
+        assert!(!html.contains("<a href=\"&#x2F;\" title=\"Workbench\" aria-current"));
 
         let (status, content_type, body) = get_body!(&app, "/projects/demo-1/board.json");
         assert_eq!(status, StatusCode::OK);
@@ -3425,16 +3499,77 @@ mod tests {
         ] {
             assert_eq!(get_body!(&app, uri).0, StatusCode::NOT_FOUND, "{uri}");
         }
+    }
 
-        let (status, content_type, body) = get_body!(&app, "/projects/sidebar.json");
-        assert_eq!(status, StatusCode::OK);
-        assert!(content_type.starts_with("application/json"));
-        let rows: Value = serde_json::from_str(&body).unwrap();
-        assert!(rows
-            .as_array()
+    #[actix_web::test]
+    async fn architecture_projects_are_removed_and_restored_with_the_session_token() {
+        use actix_session::{storage::CookieSessionStore, SessionMiddleware};
+        use actix_web::cookie::Key;
+        use actix_web::{test, App};
+        let fixture = BoardFixture::new();
+        let database = fixture.directory.join("audit.sqlite");
+        let store = ReportStore::open(database.to_str().unwrap()).unwrap();
+        let app = test::init_service(
+            App::new()
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .app_data(page_registry())
+                .app_data(web::Data::from(fixture.boards.clone()))
+                .app_data(web::Data::new(store))
+                .configure(config),
+        )
+        .await;
+
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri("/projects").to_request()).await;
+        let cookie = response.response().cookies().next().unwrap().into_owned();
+        let html = String::from_utf8(test::read_body(response).await.to_vec()).unwrap();
+        assert!(html.contains("action=\"/projects/demo-1/remove\""));
+        let token = html
+            .split("name=\"csrf_token\" value=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
             .unwrap()
-            .iter()
-            .any(|row| row["id"] == "demo-1"));
+            .to_owned();
+        let post = |uri: &str, token: &str| {
+            test::TestRequest::post()
+                .uri(uri)
+                .cookie(cookie.clone())
+                .set_form([("csrf_token", token)])
+                .to_request()
+        };
+
+        // A forged form changes nothing.
+        let response = test::call_service(&app, post("/projects/demo-1/remove", "forged")).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = test::call_service(&app, post("/projects/demo-1/remove", &token)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get("location").unwrap(), "/projects");
+        let (_, _, html) = get_body!(&app, "/projects");
+        assert!(!html.contains("href=\"/projects/demo-1/board\""));
+        assert!(html.contains("href=\"/projects/demo-2/board\""));
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/projects")
+                .cookie(cookie.clone())
+                .to_request(),
+        )
+        .await;
+        let html = String::from_utf8(test::read_body(response).await.to_vec()).unwrap();
+        assert!(html.contains("<h2>Removed</h2>"));
+        assert!(html.contains("action=\"/projects/demo-1/restore\""));
+
+        let response = test::call_service(&app, post("/projects/demo-1/restore", &token)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let (_, _, html) = get_body!(&app, "/projects");
+        assert!(html.contains("href=\"/projects/demo-1/board\""));
+
+        let response = test::call_service(&app, post("/projects/nope/remove", &token)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[actix_web::test]
@@ -3493,11 +3628,8 @@ mod tests {
         .await;
         let (status, _, html) = get_body!(&app, "/projects");
         assert_eq!(status, StatusCode::OK);
-        assert!(html.contains(">Architecture</a>"));
+        assert!(html.contains("title=\"Architecture\""));
         assert!(html.contains("No projects yet"));
-        let (status, _, body) = get_body!(&app, "/projects/sidebar.json");
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, "[]");
         assert_eq!(
             get_body!(&app, "/projects/demo-1/board.json").0,
             StatusCode::BAD_GATEWAY
@@ -3521,12 +3653,9 @@ mod tests {
                 "text/javascript",
                 "window.ArchitectureBoard",
             ),
-            (
-                "/public/board-page.js",
-                "text/javascript",
-                "/projects/sidebar.json",
-            ),
+            ("/public/board-page.js", "text/javascript", "/state.json"),
             ("/public/board.css", "text/css", ".ab{"),
+            ("/public/workbench.js", "text/javascript", "rail-collapsed"),
         ] {
             let (status, content_type, body) = get_body!(&app, uri);
             assert_eq!(status, StatusCode::OK, "{uri}");

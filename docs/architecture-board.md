@@ -154,16 +154,17 @@ A skill runs only when an agent decides to load it, and this must happen every t
 | `harness board map [--full]` | Runs the mapper in the foreground, as in §5. The hook uses its background form. `--full` ignores the existing board. | No (agent) |
 | `harness board status` | Shows state, a fresh check and the mapper log tail. | Yes |
 | `harness board import --board FILE` | Installs a hand-made board after the same validation (`tools/architecture-board/import-explorer.mjs` converts an explorer page). | Yes |
-| `harness board list --json`, `show`, `state --json`, `overlay --json` | What the dashboard reads: the sidebar rows, the board, the page status, and the live highlights. | Yes |
+| `harness board list --json`, `show`, `state --json`, `overlay --json` | What the dashboard reads: the Architecture page rows, the board, the page status, and the live highlights. | Yes |
+| `harness board remove`, `restore`; `list --removed --json` | Hides a project from the Architecture list and stops checking and mapping it, keeping its stored board; `restore` undoes it. The Architecture page (`/projects`) calls these through its **Remove** and **Restore** buttons. | Yes |
 | `harness board export --out PATH` | *Not built yet.* Writes a standalone HTML copy (renderer and data inlined) to a path **you** choose, for sharing. It is never run automatically. | Yes |
 
 ---
 
 ## 7. Dashboard view
 
-**Sidebar:** beneath the static `NAVIGATION` items, an **Architecture** entry for every project that has a board or a mapping state, then the four most recently active other projects (registered targets by `LAST_SEEN_AT`; home directories and projects the last check found non-software or opted out are left out). Each entry shows its state: `mapping…`, `ready`, `drifted`, `refreshing…` (the old board stays visible), `failed`, or `not mapped`. A link from the Workflow session view to its project's board is not built yet.
+**Navigation:** **Architecture** is one of the static `NAVIGATION` items, like Workflow and Events; the sidebar lists no projects. It opens `/projects`, which lists every project that has a board or a mapping state, then the four most recently active other projects (registered targets by `LAST_SEEN_AT`; home directories, projects the last check found non-software or opted out, and projects removed with **Remove** on that page are left out; a **Removed** section there restores them). Each row links to the project's board, whose breadcrumb (Workbench / Architecture / project) leads back. Each row shows its state: `mapping…`, `ready`, `drifted`, `refreshing…` (the old board stays visible), `failed`, or `not mapped`. A link from the Workflow session view to its project's board is not built yet.
 
-**Routes** (in `services/harness-audit`, following the existing page pattern). The service holds no board logic: it runs `python3 scripts/board.py --db-root <db> list|show|state|overlay` off the request thread and passes the JSON through, caching `list` for a few seconds because every page's sidebar shows it. `HARNESS_BOARD_SCRIPT` and `HARNESS_DB_ROOT` override the script and database paths.
+**Routes** (in `services/harness-audit`, following the existing page pattern). The service holds no board logic: it runs `python3 scripts/board.py --db-root <db> list|show|state|overlay` off the request thread and passes the JSON through, caching `list` for a few seconds. `HARNESS_BOARD_SCRIPT` and `HARNESS_DB_ROOT` override the script and database paths.
 
 - `GET /projects/{target_id}/board`: the board page. The Tera template holds only the shell; `board.js` is embedded with `include_str!` the same way `styles.css` is.
 - `GET /projects/{target_id}/board.json`: reads `.harness-db/targets/<id>/board/board.json` and `state.json`.

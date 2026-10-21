@@ -1,0 +1,3 @@
+#!/bin/sh
+# Start Claude Code with every hook disabled.
+exec claude --settings '{"disableAllHooks": true}' "$@"

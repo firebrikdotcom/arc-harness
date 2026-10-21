@@ -9,7 +9,9 @@ and `overlay`. See docs/architecture-board.md.
   harness board map     --target ID|PATH [--full]
   harness board import  --target ID|PATH --board FILE
   harness board status  --target ID|PATH
-  harness board list    [--json]
+  harness board list    [--json] [--removed]
+  harness board remove  --target ID          (hide from the dashboard and stop mapping; the board is kept)
+  harness board restore --target ID
   harness board show    --target ID          (board.json; exit 3 when not mapped)
   harness board state   --target ID --json
   harness board overlay --target ID --json
@@ -99,6 +101,19 @@ def write_json(path, value):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, indent=1) + "\n")
     os.replace(tmp, path)
+
+
+def is_removed(target):
+    return (board_dir(target) / "removed.json").exists()
+
+
+def set_removed(target, removed):
+    path = board_dir(target) / "removed.json"
+    if removed:
+        write_json(path, {"removed_at": now()})
+    else:
+        path.unlink(missing_ok=True)
+    return {"id": target["TARGET_ID"], "removed": removed}
 
 
 def set_state(target, **fields):
@@ -211,6 +226,8 @@ def _check(target, ignore_lock=False):
     result = {"target": target["TARGET_ID"], "root": str(root), "state": state.get("state", "none"), "board": bool(board)}
     if not root.is_dir():
         return {**result, "action": "none", "reason": "root missing"}
+    if is_removed(target):
+        return {**result, "action": "none", "reason": "removed"}
     if (root / ".harness-no-upload").exists() or os.environ.get("HARNESS_BOARD", "1") == "0":
         return {**result, "action": "none", "reason": "opted out"}
     man = manifest(root)
@@ -574,10 +591,15 @@ def entry(target):
             "cards": len(board.get("nodes", []))}
 
 
-def listing(limit_recent=4):
-    """Projects with a board or a mapping state first, then the most recently active others."""
+def listing(limit_recent=4, removed=False):
+    """Projects with a board or a mapping state first, then the most recently active others.
+
+    Removed projects are left out; `removed=True` lists only them, all of them."""
     rows = [t for t in targets() if Path(t["TARGET_ROOT"]).is_dir() and t["TARGET_ROOT"].rstrip("/") not in HOME_DIRS]
     rows.sort(key=lambda t: t.get("LAST_SEEN_AT", ""), reverse=True)
+    if removed:
+        return [entry(t) for t in rows if is_removed(t)]
+    rows = [t for t in rows if not is_removed(t)]
     skip = lambda t: (load_json(board_dir(t) / "check.json", {}) or {}).get("reason") in ("not a software project", "opted out")
     rows = [t for t in rows if not skip(t)]
     known = [t for t in rows if (board_dir(t) / "board.json").exists() or (board_dir(t) / "state.json").exists()]
@@ -611,19 +633,20 @@ def state_view(target, max_age=20):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db-root")
-    ap.add_argument("command", choices=["check", "map", "import", "status", "list", "show", "state", "overlay"])
+    ap.add_argument("command", choices=["check", "map", "import", "status", "list", "show", "state", "overlay", "remove", "restore"])
     ap.add_argument("--target")
     ap.add_argument("--spawn", action="store_true")
     ap.add_argument("--full", action="store_true")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--board")
+    ap.add_argument("--removed", action="store_true")
     a = ap.parse_args(argv)
     global DB_ROOT
     if a.db_root:
         DB_ROOT = Path(a.db_root)
     if a.command == "list":
-        rows = listing()
+        rows = listing(removed=a.removed)
         print(json.dumps(rows) if a.json else "\n".join(f"{r['name']:<32} {r['label']:<12} {r['root']}" for r in rows))
         return 0
     if not a.target:
@@ -657,6 +680,9 @@ def main(argv=None):
         return 0
     if a.command == "state":
         print(json.dumps(state_view(target)))
+        return 0
+    if a.command in ("remove", "restore"):
+        print(json.dumps(set_removed(target, a.command == "remove")))
         return 0
     if a.command == "overlay":
         print(json.dumps(overlay(target)))
