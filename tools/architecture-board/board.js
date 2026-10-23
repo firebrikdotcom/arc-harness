@@ -64,6 +64,7 @@ function mount(root,data,opts={}){
       <span class="ab-zoomv" data-r="zv">100%</span>
       <button class="ab-tbtn" data-r="zin" title="Zoom in (+)" aria-label="Zoom in">+</button>
       <button class="ab-tbtn" data-r="fit" title="Fit the whole board (0)">Fit</button>
+      <button class="ab-tbtn ab-heatbtn" data-r="heat" title="Colour components by their recent errors" aria-pressed="true" hidden>Heat</button>
       <button class="ab-tbtn" data-r="theme" title="Switch light / dark" aria-label="Switch light or dark theme"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></svg></button>
     </div>
     <nav class="ab-frames" data-r="frames" aria-label="Jump to a section"></nav>
@@ -83,7 +84,8 @@ function mount(root,data,opts={}){
   const cardEl=new Map(),edgeEl=new Map(),labelEl=new Map();
   const hiddenKinds=new Set();
   let view={x:0,y:0,k:1},selected=null,activeFlow=null,bounds={x:0,y:0,w:1,h:1};
-  let overlay={edited:{},inScope:[],refreshing:[],unownedEdited:[]};
+  let overlay={edited:{},inScope:[],refreshing:[],unownedEdited:[],heat:null},lastOverlay={};
+  let heatOn=true;try{heatOn=localStorage.getItem("ab-heat")!=="off"}catch{}
   const px=col=>col*CW,py=row=>row*RH+FH;
   const colorOf=fid=>tone((frameById.get(fid)||{}).tone);
   const kindColor=k=>tone((kinds[k]||{}).tone);
@@ -301,11 +303,26 @@ function mount(root,data,opts={}){
     const href=fileHref(p);
     return `<li class="${edited?"edited":""}"><code>${esc(p)}</code><span class="acts"><button class="ab-ibtn" data-copy="${esc(p)}" title="Copy path">Copy</button>${href?`<a class="ab-ibtn" href="${esc(href)}" target="_blank" rel="noopener" title="Open on the forge">Open ↗</a>`:""}</span>${note?`<span class="note">${esc(note)}</span>`:""}</li>`;
   }
+  const LEVELS=["fatal","error","warning","info"];
+  function ago(iso){
+    const t=new Date(iso||NaN).getTime();if(!Number.isFinite(t))return "at an unknown time";
+    const m=Math.round((Date.now()-t)/60000);
+    return m<1?"just now":m<60?`${m}m ago`:m<2880?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
+  }
+  function issueItem(i){
+    const lv=LEVELS.includes(i.level)?i.level:"error",n=+i.count||0,u=+i.users||0;
+    const url=typeof i.url==="string"&&/^https?:\/\//.test(i.url)?i.url:null;
+    return `<li class="lv-${lv}"><span class="lv">${lv}</span><b>${esc(i.title)}</b>
+      <small>${n} event${n===1?"":"s"}${u?` · ${u} user${u===1?"":"s"}`:""}${i.last_seen?` · last ${esc(ago(i.last_seen))}`:""}${i.share==="caller"?" · on the call path":""}${i.new?" · <em>new</em>":""}${i.source?` · ${esc(String(i.source).split(":")[0])}`:""}</small>
+      ${url?`<a class="ab-ibtn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`:""}</li>`;
+  }
   function renderNode(n,es){
     const f=frameById.get(n.frame)||{title:"",tag:""};
     panel.style.setProperty("--c",colorOf(n.frame));
     const out=es.filter(e=>e.from===n.id),inn=es.filter(e=>e.to===n.id);
     const edited=overlay.edited[n.id]||[],editedSet=new Set(edited);
+    const hc=heatOn&&overlay.heat&&overlay.heat.cards[n.id];
+    const problems=hc&&Array.isArray(hc.top)&&hc.top.length?`<h4>Problems</h4><ul class="ab-issues">${hc.top.map(issueItem).join("")}</ul>${hc.issues>hc.top.length?`<p class="ab-note">${hc.issues-hc.top.length} more issue${hc.issues-hc.top.length>1?"s":""} touch this component.</p>`:""}`:"";
     const live=[
       edited.length?`<div class="live"><b>Edited now:</b> ${edited.length} uncommitted file${edited.length>1?"s":""} in this component.<ul class="files" style="margin-top:6px">${edited.map(p=>fileItem(p,"",true)).join("")}</ul></div>`:"",
       overlay.inScope.includes(n.id)?`<div class="live scope"><b>In scope</b> for the active harness run.</div>`:"",
@@ -315,6 +332,7 @@ function mount(root,data,opts={}){
       <div class="kicker">${esc(f.title)}${f.tag?" · "+esc(f.tag):""}</div>
       <h3>${esc(n.title)}</h3><p class="sub">${esc(n.sub)}</p>
       ${live}
+      ${problems}
       <p>${esc(n.summary)}</p>
       ${n.responsibility?`<div class="resp">${esc(n.responsibility)}</div>`:""}
       ${es.length?`<h4>Connections</h4><div class="ab-conns">${out.map(e=>connBtn(nodeById.get(e.to),"to",e.label)).join("")}${inn.map(e=>connBtn(nodeById.get(e.from),"from",e.label)).join("")}</div>`:""}
@@ -329,11 +347,24 @@ function mount(root,data,opts={}){
     const liveBox=editedIds.length||overlay.unownedEdited.length?`<h4>What you are touching</h4>
       <div class="ab-conns">${editedIds.map(id=>{const n=nodeById.get(id);return `<button class="ab-link" data-go="${esc(id)}" style="--c2:var(--edited)"><span class="dir">●</span><b>${esc(n.title)}</b><small>${overlay.edited[id].length} uncommitted file${overlay.edited[id].length>1?"s":""}</small></button>`}).join("")}</div>
       ${overlay.unownedEdited.length?`<p class="ab-note" style="margin-top:8px">${overlay.unownedEdited.length} edited file${overlay.unownedEdited.length>1?"s":""} belong to no card yet; the next refresh places them.</p>`:""}`:"";
+    const H=heatOn&&overlay.heat;
+    let heatBox="";
+    if(H){
+      const hot=Object.entries(H.cards||{}).filter(([id,c])=>nodeById.has(id)&&c&&c.heat>0).sort((a,b)=>b[1].heat-a[1].heat).slice(0,5);
+      const failing=Object.entries(H.sources||{}).filter(([,s])=>s&&s.ok===false);
+      const unmapped=(H.totals&&H.totals.unmapped)||0;
+      heatBox=`<h4>Where errors happen</h4>
+      ${hot.length?`<div class="ab-conns">${hot.map(([id,c])=>`<button class="ab-link" data-go="${esc(id)}" style="--c2:var(--hot)"><span class="dir" style="color:var(--hot)">●</span><b>${esc(nodeById.get(id).title)}</b><small>${+c.issues||0} issue${c.issues===1?"":"s"} · heat ${Math.round((+c.heat||0)*100)}%</small></button>`).join("")}</div>`:`<p class="ab-note">No open errors map to a component right now.</p>`}
+      ${unmapped?`<p class="ab-note" style="margin-top:8px">${unmapped} open issue${unmapped>1?"s":""} map to no card: their stack frames are outside the board's files, or need a path_map rule.</p>`:""}
+      ${H.stale?`<p class="ab-note" style="margin-top:8px">Error data is stale: last updated ${esc(ago(H.generated_at))}. Is harness-signals running?</p>`:""}
+      ${failing.map(([src,s])=>`<p class="ab-note" style="margin-top:8px"><b>${esc(src)}</b> failed: ${esc(s.error||"unknown error")}</p>`).join("")}`;
+    }
     panel.innerHTML=`<div class="kicker">How to read this board</div>
       <h3>${esc(B.overview.heading||B.title)}</h3>
       <p class="sub">Each card is a component; each coloured frame is where it lives. Positions are fixed: drag the board, not the cards.</p>
       ${B.overview.text?`<p>${esc(B.overview.text)}</p>`:""}
       ${liveBox}
+      ${heatBox}
       <h4>Lines</h4>
       <div class="ab-legend">${Object.entries(kinds).filter(([k])=>B.edges.some(e=>e.kind===k)).map(([k,v])=>{const st=STYLES[v.style]||STYLES.solid;return `<label><input type="checkbox" data-kind="${esc(k)}" ${hiddenKinds.has(k)?"":"checked"}><svg viewBox="0 0 42 10"><path d="M2 5H40" style="fill:none;stroke:${kindColor(k)};stroke-width:2;stroke-dasharray:${st.dash}"/></svg>${esc(v.label)}</label>`}).join("")}</div>
       ${B.flows.length?`<h4>Walk through a flow</h4><div class="ab-flows">${B.flows.map(fl=>`<button class="ab-flow" data-flow="${esc(fl.id)}" aria-pressed="${activeFlow===fl.id}"><b>${esc(fl.title)}</b><small>${esc(fl.sub)}</small></button>`).join("")}</div><div data-r="flowtext"></div>`:""}
@@ -420,16 +451,22 @@ function mount(root,data,opts={}){
 
   /* ---------- Live overlay and status ---------- */
   function setOverlay(ov){
-    overlay={edited:ov.edited||{},inScope:ov.inScope||[],refreshing:ov.refreshing||[],unownedEdited:ov.unownedEdited||[]};
+    lastOverlay=ov||{};
+    const heat=ov.heat&&typeof ov.heat==="object"&&ov.heat.cards&&typeof ov.heat.cards==="object"?ov.heat:null;
+    overlay={edited:ov.edited||{},inScope:ov.inScope||[],refreshing:ov.refreshing||[],unownedEdited:ov.unownedEdited||[],heat};
+    const hb=$("heat");hb.hidden=!heat;hb.setAttribute("aria-pressed",String(heatOn));
     for(const [id,el] of cardEl){
       const ed=(overlay.edited[id]||[]).length,sc=overlay.inScope.includes(id),rf=overlay.refreshing.includes(id);
+      const hc=heatOn&&heat&&heat.cards[id],hv=hc?Math.max(0,Math.min(1,+hc.heat||0)):0;
       el.classList.toggle("ov-edited",!!ed);el.classList.toggle("ov-scope",sc);el.classList.toggle("ov-refreshing",rf);
-      el.querySelector(".ab-badges").innerHTML=(ed?`<span class="ab-badge" style="--b:var(--edited)">edited · ${ed}</span>`:"")+(sc?`<span class="ab-badge" style="--b:var(--scope);color:#fff">in scope</span>`:"")+(rf?`<span class="ab-badge" style="--b:var(--refresh);color:#fff">refreshing</span>`:"");
+      el.classList.toggle("ov-heat",hv>0);el.style.setProperty("--heat",hv.toFixed(3));
+      el.querySelector(".ab-badges").innerHTML=(hv>0?`<span class="ab-badge" style="--b:var(--hot);color:#fff">errors · ${+hc.issues||0}</span>`:"")+(ed?`<span class="ab-badge" style="--b:var(--edited)">edited · ${ed}</span>`:"")+(sc?`<span class="ab-badge" style="--b:var(--scope);color:#fff">in scope</span>`:"")+(rf?`<span class="ab-badge" style="--b:var(--refresh);color:#fff">refreshing</span>`:"");
     }
     const editedFrames=new Set(Object.keys(overlay.edited).map(id=>(nodeById.get(id)||{}).frame));
     root.querySelectorAll(".ab-chip").forEach(c=>c.classList.toggle("ov",editedFrames.has(c.dataset.frame)));
     if(selected)renderNode(nodeById.get(selected),neighbours(selected));else renderOverview();
   }
+  $("heat").onclick=()=>{heatOn=!heatOn;try{localStorage.setItem("ab-heat",heatOn?"on":"off")}catch{}setOverlay(lastOverlay)};
   function setStatus(s){
     const el=$("status");el.className="ab-status "+(s.kind||"");el.querySelector("span").textContent=s.text||"";el.title=s.title||"";
   }

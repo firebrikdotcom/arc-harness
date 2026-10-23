@@ -86,10 +86,10 @@ def strip(value):
 
 
 def open_files() -> set[str] | None:
-    """Paths any process holds open, or None where /proc is unavailable."""
+    """Paths any process holds open (from /proc, else lsof), or None when neither is available."""
     proc = Path("/proc")
     if not proc.is_dir():
-        return None
+        return lsof_files()
     held = set()
     for fd_dir in proc.glob("[0-9]*/fd"):
         try:
@@ -101,6 +101,17 @@ def open_files() -> set[str] | None:
         except OSError:
             pass
     return held
+
+
+def lsof_files() -> set[str] | None:
+    """macOS and other systems without /proc: every open regular file lsof reports."""
+    try:
+        out = subprocess.run(["lsof", "-n", "-P", "-w", "-Fn"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode not in (0, 1) or not out.stdout:
+        return None
+    return {line[1:] for line in out.stdout.splitlines() if line.startswith("n/")}
 
 
 def slim_file(path: Path, dry_run: bool) -> tuple[int, int]:
@@ -163,7 +174,7 @@ def sweep(roots, idle: float, everything: bool, dry_run: bool) -> dict:
                     continue
                 if (not everything and info.st_mtime < since) or now - info.st_mtime < idle:
                     continue
-                if held is not None and key in held:
+                if held is not None and (key in held or os.path.realpath(key) in held):
                     continue
                 images, saved = slim_file(path, dry_run)
                 if images:

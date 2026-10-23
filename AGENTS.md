@@ -16,6 +16,7 @@ This repository is a harness: the environment that makes an AI agent's work boun
 | `tasks/task.example.json` | A filled-in task contract to copy. |
 | `docs/setup.md` | Every command and environment variable in detail. |
 | `docs/architecture.md`, `docs/conventions.md` | How the pieces fit; coding conventions. |
+| `services/harness-signals/`, `scripts/signals-service.sh` | Optional error heat: pulls each tracked project's errors (per-machine `signals.json`) onto its architecture board; docs/observability-heatmap.md. |
 | `docs/jev-checkpoints.md` | Optional Jev (TypeSafe) advice, and the `harness jev` switch that decides whether it is followed. |
 | `tests/` | One script per behaviour; `scripts/verify.sh` runs them all. |
 

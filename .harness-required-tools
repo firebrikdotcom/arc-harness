@@ -11,3 +11,4 @@ curl       curl
 jq         jq
 bash       -
 sha256sum  -
+cargo      -

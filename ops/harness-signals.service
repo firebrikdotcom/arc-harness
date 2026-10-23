@@ -1,0 +1,13 @@
+[Unit]
+Description=Harness signals: observability errors mapped onto architecture boards
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__SERVICE_ROOT__
+ExecStart="__HARNESS_ROOT__/scripts/signals-service.sh" serve
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

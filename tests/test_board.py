@@ -166,6 +166,22 @@ class BoardTests(unittest.TestCase):
         ov = board.overlay(self.target)
         self.assertEqual(ov["edited"], {"app": ["src/app.py"]})
         self.assertIn("src/fresh.py", ov["unownedEdited"])
+        self.assertIsNone(ov["heat"])
+
+    def test_overlay_carries_the_signals_heat_and_marks_it_stale(self):
+        board.do_import(self.target, self.write(SMALL_BOARD))
+        signals = self.db / "targets" / "demo-1" / "signals"
+        signals.mkdir()
+        fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        heat = {"generated_at": fresh, "cards": {"app": {"heat": 1.0, "score": 3.2, "issues": 1, "top": []}}, "unmapped": []}
+        (signals / "heat.json").write_text(json.dumps(heat))
+        ov = json.loads(self.run_cli("overlay", "--target", "demo-1", "--json").stdout)
+        self.assertEqual(ov["heat"]["cards"]["app"]["heat"], 1.0)
+        self.assertFalse(ov["heat"]["stale"])
+        (signals / "heat.json").write_text(json.dumps(dict(heat, generated_at="2026-01-01T00:00:00Z")))
+        self.assertTrue(board.overlay(self.target)["heat"]["stale"])
+        (signals / "heat.json").write_text("not json")
+        self.assertIsNone(board.overlay(self.target)["heat"])
 
     def test_list_and_show_commands(self):
         self.assertEqual(self.run_cli("show", "--target", "demo-1").returncode, 3)

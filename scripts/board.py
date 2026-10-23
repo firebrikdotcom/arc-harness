@@ -3,7 +3,8 @@
 
 Everything is written under <db>/targets/<id>/board/; nothing is ever written inside the target
 project. The session-start hook runs `check --spawn`; the dashboard reads `list`, `show`, `state`
-and `overlay`. See docs/architecture-board.md.
+and `overlay`. The overlay also carries the error heat that harness-signals writes under
+<db>/targets/<id>/signals/. See docs/architecture-board.md and docs/observability-heatmap.md.
 
   harness board check   --target ID|PATH [--spawn] [--json]
   harness board map     --target ID|PATH [--full]
@@ -565,7 +566,23 @@ def overlay(target):
     except (OSError, ValueError):
         pass
     refreshing = state.get("affected", []) if state.get("state") in ("mapping", "refreshing") else []
-    return {"edited": edited, "inScope": in_scope, "refreshing": refreshing, "unownedEdited": unowned}
+    return {"edited": edited, "inScope": in_scope, "refreshing": refreshing, "unownedEdited": unowned, "heat": heat_view(target)}
+
+
+HEAT_STALE_SECONDS = 900
+
+
+def heat_view(target):
+    """The error heat harness-signals wrote for this target, or None when it tracks nothing here."""
+    heat = load_json(board_dir(target).parent / "signals" / "heat.json")
+    if not isinstance(heat, dict) or not isinstance(heat.get("cards"), dict):
+        return None
+    try:
+        age = time.time() - calendar.timegm(time.strptime(heat.get("generated_at", ""), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        age = None
+    heat["stale"] = age is None or age > HEAT_STALE_SECONDS
+    return heat
 
 
 HOME_DIRS = {str(Path.home()), str(Path.home() / "Code"), str(Path.home() / "Downloads")}

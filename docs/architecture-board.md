@@ -170,6 +170,8 @@ A skill runs only when an agent decides to load it, and this must happen every t
 - `GET /projects/{target_id}/board.json`: reads `.harness-db/targets/<id>/board/board.json` and `state.json`.
 - `GET /projects/{target_id}/overlay.json`: the live highlights (below).
 
+**Error heat.** When this machine's `harness-signals` tracks the project, the overlay also carries `heat`: per-card scores from the errors in its observability tools, drawn as the board's Heat layer. See [observability-heatmap.md](observability-heatmap.md).
+
 **Live highlights ("what am I touching")** are computed per request and never stored:
 
 - Cards whose `owns` covers a file in `git status --porcelain` in `TARGET_ROOT` get an **edited now** ring.
