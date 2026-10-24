@@ -6,7 +6,9 @@
 # PreToolUse, and (Claude Code only, which has Grep and Glob tools) the
 # retrieval reminder. Idempotent:
 # existing harness entries are replaced, other hooks are preserved, and each
-# file is backed up before it is rewritten.
+# file is backed up before it is rewritten. It also denies Claude Code starting
+# Amp orbs directly (`amp -ox`): orbs start only through the gated dispatcher.
+#
 #
 #   scripts/install-hooks.sh [--claude PATH] [--codex PATH] [--root-file PATH] [--uninstall] [--dry-run]
 #
@@ -31,7 +33,7 @@ while [ "$#" -gt 0 ]; do
     --uninstall) MODE=uninstall; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
-      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) printf 'FAIL: unknown argument: %s\n' "$1" >&2; exit 2 ;;
@@ -103,6 +105,25 @@ def is_ours(group: dict) -> bool:
     return False
 
 
+# Orbs start only through the dispatcher, which checks that the person asked for one,
+# so Claude Code may never start one directly; an earlier allow rule is removed.
+AMP_RULES = ["Bash(amp -ox:*)", "Bash(amp --orb-execute:*)"]
+
+
+def sync_amp_rules(data: dict) -> None:
+    permissions = data.get("permissions", {})
+    lists = ("allow", "deny")
+    if not isinstance(permissions, dict) or any(not isinstance(permissions.get(key, []), list) for key in lists):
+        print("WARN: unexpected permissions shape; leaving the amp orb permissions as they are.", file=sys.stderr)
+        return
+    for key in lists:
+        rules = [rule for rule in permissions.get(key, []) if rule not in AMP_RULES]
+        if key == "deny" and mode == "install":
+            rules.extend(AMP_RULES)
+        if rules or key in permissions:
+            data.setdefault("permissions", {})[key] = rules
+
+
 for index, target in enumerate(targets):
     path = Path(target)
     data = {}
@@ -127,6 +148,9 @@ for index, target in enumerate(targets):
             hooks[event] = groups
         else:
             hooks.pop(event, None)
+    if index == 0:
+        # Claude Code only: Codex has no matching command permission list.
+        sync_amp_rules(data)
     rendered = json.dumps(data, indent=2) + "\n"
     if dry_run:
         print(f"--- {path} ({mode}, dry run)")

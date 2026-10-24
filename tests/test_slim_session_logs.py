@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -76,6 +77,7 @@ class SlimTests(unittest.TestCase):
         self.assertEqual(lines[6], LINES[6])
         self.assertEqual(self.sweep("--all")["images"], 0)
 
+    @unittest.skipUnless(Path("/proc").is_dir(), "detecting logs held open needs Linux /proc")
     def test_busy_recent_and_preexisting_logs_are_left_alone(self):
         old = self.write("before-install.jsonl", age=7200)
         self.sweep()  # The first sweep fixes the "from now on" cutoff; move it back past the idle window.
@@ -102,7 +104,11 @@ class SlimTests(unittest.TestCase):
         self.assertFalse((self.base / "state.json").exists())
 
     def test_spawn_returns_at_once(self):
-        result = subprocess.run([sys.executable, str(SCRIPT), "--spawn"], input="{}", env={**self.env, "HOME": str(self.base)},
+        # The detached sweep may still be writing under its home after this returns,
+        # so that home is removed without failing on files it adds meanwhile.
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        result = subprocess.run([sys.executable, str(SCRIPT), "--spawn"], input="{}", env={**self.env, "HOME": home},
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")

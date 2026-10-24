@@ -19,7 +19,7 @@ class Installer(unittest.TestCase):
             for name in ['scripts/harness','scripts/harness-target.sh','scripts/orchestration_common.py','scripts/install-updater.py']:
                 shutil.copy2(ROOT/name,repo/name)
             shutil.copytree(ROOT/'services/harness-updater',repo/'services/harness-updater',ignore=shutil.ignore_patterns('target','__pycache__'),dirs_exist_ok=True)
-            for args in [('init','-q'),('config','user.email','test@example.invalid'),('config','user.name','Fixture'),('add','.'),('commit','-qm','Create synthetic updater fixture.')]:
+            for args in [('init','-q','-b','master'),('config','user.email','test@example.invalid'),('config','user.name','Fixture'),('add','.'),('commit','-qm','Create synthetic updater fixture.')]:
                 subprocess.run(['git','-C',str(repo),*args],check=True)
             (repo/'services/harness-updater/target').symlink_to(ROOT/'services/harness-updater/target',target_is_directory=True)
             local=repo/'unpublished-local-work';local.write_text('preserve this')
@@ -36,7 +36,8 @@ class Installer(unittest.TestCase):
             self.assertEqual(local.read_text(),'preserve this');self.assertEqual((db/'history').read_text(),'preserve existing state')
             hooks=json.loads((codex/'hooks.json').read_text())['hooks']
             self.assertEqual(hooks['OtherEvent'][0]['hooks'][0]['command'],'echo unrelated')
-            self.assertEqual(hooks['SessionEnd'][0]['hooks'][0]['command'],local_hook)
+            # The session-log slimmer is a published hook now, so the release manages it.
+            self.assertTrue(hooks['SessionEnd'][0]['hooks'][0]['command'].endswith('harness-runtime exec scripts/slim_session_logs.py --spawn'))
             commands=[hook['command'] for groups in hooks.values() for group in groups for hook in group.get('hooks',[])]
             self.assertTrue(any('harness-runtime exec scripts/workflow_gate.py' in command for command in commands))
             cli=home/'.local/bin/harness'

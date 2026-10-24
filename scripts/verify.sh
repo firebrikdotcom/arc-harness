@@ -7,8 +7,15 @@ skipped=0
 # Names of the checks that passed, recorded so later gates can reuse this run.
 passed_checks=""
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+CLI_ROOT=${HARNESS_ROOT:-}
 HARNESS_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
-HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$HARNESS_ROOT/.harness-db}"
+# Record where the harness CLI reads gate records: it follows HARNESS_ROOT when that
+# names a harness checkout (for example a worktree verified under the main checkout's run).
+STATE_ROOT=$HARNESS_ROOT
+if [ -n "$CLI_ROOT" ] && [ -f "$CLI_ROOT/AGENTS.md" ] && [ -f "$CLI_ROOT/scripts/verify.sh" ]; then
+  STATE_ROOT=$(CDPATH='' cd "$CLI_ROOT" && pwd -P)
+fi
+HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$STATE_ROOT/.harness-db}"
 PROJECT_ROOT="${HARNESS_TARGET_ROOT:-.}"
 REQUIRED_CHECKS="${HARNESS_REQUIRED_CHECKS:-}"
 REQUIRED_CHECKS_SOURCE="environment"

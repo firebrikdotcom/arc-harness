@@ -447,5 +447,225 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(result['run']['status'], 'failed')
 
 
+FAKE_AMP = r'''#!/usr/bin/env python3
+"""Stand-in for the amp CLI: -ox starts a fake orb thread, threads export prints it."""
+import json, os, re, subprocess, sys
+from pathlib import Path
+state = Path(os.environ['FAKE_AMP_DIR'])
+mode = os.environ.get('FAKE_AMP_MODE', 'read')
+args = sys.argv[1:]
+if args[:2] == ['threads', 'export']:
+    print((state / (args[2] + '.json')).read_text())
+    sys.exit(0)
+prompt = sys.stdin.read()
+(state / 'prompt.txt').write_text(prompt)
+(state / 'argv.json').write_text(json.dumps(args))
+if mode == 'fail':
+    print("Error: Session expired and could not be refreshed. Run 'amp login' to authenticate.", file=sys.stderr)
+    sys.exit(1)
+criteria = json.loads(next(line for line in prompt.splitlines() if line.startswith('Acceptance: '))[len('Acceptance: '):])
+report = {'status': 'completed', 'evidence': 'Checked in the orb', 'artifacts': [],
+          'acceptance': [{'criterion': c, 'passed': True, 'evidence': 'Checked'} for c in criteria],
+          'audit': {'commands': [{'cmd': 'cat source.txt', 'exit': 0}], 'files_written': [], 'network': [], 'deviations': []}}
+tools = [{'type': 'tool_use', 'name': 'shell_command', 'input': {'command': 'cat source.txt'}}]
+if mode in ('edit', 'unowned', 'nocommit'):
+    branch, base = re.search(r'git checkout -B (\S+) ([0-9a-f]+)', prompt).groups()
+    clone = state / 'clone'
+    run = lambda *a: subprocess.run(['git', '-C', str(clone), *a], check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(['git', 'clone', '-q', os.environ['FAKE_AMP_ORIGIN'], str(clone)], check=True)
+    run('checkout', '-q', '-B', branch, base)
+    name = 'source.txt' if mode == 'edit' else 'other.txt'
+    (clone / name).write_text('orb result\n')
+    run('add', name)
+    run('-c', 'user.name=Orb', '-c', 'user.email=orb@localhost', 'commit', '-q', '-m', 'Orb change')
+    run('push', '-q', 'origin', 'HEAD:refs/heads/' + branch)
+    if mode != 'nocommit':
+        report['commit'] = run('rev-parse', 'HEAD').upper()  # Case must not matter.
+    report['audit']['files_written'] = [name]
+    tools.append({'type': 'tool_use', 'name': 'apply_patch', 'input': {'patchText': '*** Begin Patch\n*** Update File: /home/user/workspace/repo/' + name + '\n*** End Patch'}})
+usage = {'totalInputTokens': 100, 'cacheReadInputTokens': 80, 'outputTokens': 10}
+last = {'role': 'assistant', 'state': {'type': 'complete', 'stopReason': 'end_turn'}, 'usage': usage, 'content': [{'type': 'text', 'text': json.dumps(report)}]}
+agent = 'idle'
+if mode == 'hang':
+    last = {'role': 'assistant', 'state': {'type': 'complete', 'stopReason': 'tool_use'}, 'usage': usage, 'content': tools[:1]}
+    agent = 'running'
+export = {'id': 'T-fake', 'meta': {'lastKnownAgentState': {'state': agent}}, 'messages': [
+    {'role': 'user', 'content': [{'type': 'text', 'text': prompt}]},
+    {'role': 'assistant', 'state': {'type': 'complete', 'stopReason': 'tool_use'}, 'usage': usage, 'content': tools},
+    {'role': 'user', 'content': [{'type': 'tool_result'}]}, last]}
+(state / 'T-fake.json').write_text(json.dumps(export))
+print('https://ampcode.com/threads/T-fake')
+'''
+
+
+class AmpOrbTest(unittest.TestCase):
+    # Reuse the dispatcher fixture without rerunning its tests.
+    worker, create, assessment, init_git, tearDown = (DispatcherTest.worker, DispatcherTest.create, DispatcherTest.assessment,
+                                                      DispatcherTest.init_git, DispatcherTest.tearDown)
+
+    def setUp(self):
+        DispatcherTest.setUp(self)
+        self.config['profiles']['orb'] = {'provider': 'amp', 'model': 'amp', 'effort': 'xhigh', 'role': '*'}
+        self.amp = {'enabled': True, 'effort': 'xhigh', 'poll_seconds': 1}
+        self.loader.stop()
+        self.loader = patch.object(d.harness_config, 'load', side_effect=lambda: {'dispatch': self.config, 'amp': self.amp})
+        self.loader.start()
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        (bin_dir / 'amp').write_text(FAKE_AMP)
+        (bin_dir / 'amp').chmod(0o755)
+        self.state = self.root / 'amp-state'
+        self.state.mkdir()
+        self.path = patch.dict(os.environ, {'PATH': str(bin_dir) + os.pathsep + os.environ['PATH'], 'FAKE_AMP_DIR': str(self.state),
+                                            'FAKE_AMP_ORIGIN': str(self.root / 'origin.git')})
+        self.path.start()
+        self.addCleanup(self.path.stop)
+        # An orb clones the remote, so orb workers need a pushed, clean checkout.
+        self.pushed_project()
+
+    def pushed_project(self):
+        self.init_git()
+        subprocess.run(['git', 'init', '-q', '--bare', str(self.root / 'origin.git')], check=True)
+        d.git(self.project, 'remote', 'add', 'origin', str(self.root / 'origin.git'))
+        d.git(self.project, 'push', '-q', 'origin', 'HEAD:refs/heads/main')
+        d.git(self.project, 'fetch', '-q', 'origin')
+
+    def orb_run(self, mode, access='read'):
+        os.environ['FAKE_AMP_MODE'] = mode
+        run = self.create(self.worker(access=access))  # Lists only the native profile; the orb comes first.
+        handoff = d.next_workers(run)['workers']
+        if handoff:
+            self.assertEqual(handoff[0]['provider'], 'amp')
+            d.external(run, 'one')
+        return run, d.status(run)['workers'][0]
+
+    def test_amp_profiles_require_the_amp_switch(self):
+        self.amp['enabled'] = False
+        with self.assertRaisesRegex(ValueError, 'amp orb delegation is disabled'):
+            self.create(self.worker(profiles=['orb']))
+
+    def selected(self, *workers):
+        run = self.create(*workers)
+        return {w['id']: w for w in d.status(run)['workers']}
+
+    def test_with_amp_on_every_worker_is_offered_an_orb_first(self):
+        worker = self.selected(self.worker())['one']
+        self.assertEqual((worker['profile_id'], worker['profile']), ('amp_orb', {'provider': 'amp', 'model': 'amp', 'effort': 'xhigh', 'role': '*'}))
+        self.assertNotIn('orb_skipped', worker)
+
+    def test_with_amp_off_selection_is_unchanged(self):
+        self.amp['enabled'] = False
+        worker = self.selected(self.worker())['one']
+        self.assertEqual(worker['profile_id'], 'scan')
+        self.assertNotIn('orb_skipped', worker)
+
+    def test_workers_an_orb_cannot_take_fall_back_with_the_reason(self):
+        with patch('shutil.which', return_value=None):
+            worker = self.selected(self.worker())['one']
+        self.assertEqual((worker['profile_id'], worker['orb_skipped']), ('scan', 'amp CLI not found'))
+        # A reviewer that depends on another worker must read its results, which exist only here.
+        chosen = self.selected(self.worker('build', access='edit', owned_paths=['other.txt']), self.worker('two', dependencies=['build']))
+        self.assertEqual(chosen['build']['profile_id'], 'amp_orb')
+        self.assertEqual((chosen['two']['profile_id'], chosen['two']['orb_skipped']),
+                         ('scan', 'orb workers cannot see the results of the workers they depend on'))
+
+    def test_a_ruled_out_orb_is_not_picked_again_from_the_listed_profiles(self):
+        with patch('shutil.which', return_value=None):
+            worker = self.selected(self.worker(profiles=['orb', 'scan']))['one']
+            self.assertEqual(worker['profile_id'], 'scan')
+            with self.assertRaisesRegex(ValueError, 'lists only orb profiles, and an orb cannot take it: amp CLI not found'):
+                self.create(self.worker(profiles=['orb']))
+
+    def test_read_workers_see_only_pushed_clean_code_and_read_that_commit(self):
+        (self.project / 'source.txt').write_text('local edit\n')
+        worker = self.selected(self.worker())['one']
+        self.assertEqual((worker['profile_id'], worker['orb_skipped']), ('scan', 'orb workers cannot see uncommitted changes to tracked files'))
+        (self.project / 'source.txt').write_text('base\n')
+        head = d.git(self.project, 'rev-parse', 'HEAD').decode().strip()
+        self.orb_run('read')
+        self.assertIn('git checkout --detach ' + head, (self.state / 'prompt.txt').read_text())
+
+    def test_read_worker_keeps_report_thread_export_and_usage(self):
+        run, worker = self.orb_run('read')
+        self.assertEqual(worker['status'], 'completed', worker.get('result'))
+        prompt = (self.state / 'prompt.txt').read_text()
+        self.assertIn('Read only: do not modify, commit or push anything.', prompt)
+        self.assertNotIn(str(self.project), prompt, 'the orb never sees local paths')
+        self.assertIn('"audit"', prompt)
+        argv = json.loads((self.state / 'argv.json').read_text())
+        self.assertEqual(argv[:3], ['-ox', '-m', 'high'])
+        self.assertEqual(worker['thread_url'], 'https://ampcode.com/threads/T-fake')
+        audit = worker['result']['audit']
+        self.assertTrue(Path(audit['export']).is_file())
+        self.assertEqual(audit['reported']['commands'][0]['cmd'], 'cat source.txt')
+        self.assertEqual(audit['observed']['commands'], ['cat source.txt'])
+        self.assertEqual((worker['input_tokens'], worker['cached_input_tokens'], worker['output_tokens'], worker['total_tokens']), (200, 160, 20, 220))
+
+    def test_edit_worker_branch_is_fetched_into_owned_paths_and_integrates(self):
+        run, worker = self.orb_run('edit', access='edit')
+        self.assertEqual(worker['status'], 'completed', worker.get('result'))
+        self.assertIn('git checkout -B harness/', (self.state / 'prompt.txt').read_text())
+        self.assertEqual(worker['changed_paths'], ['source.txt'])
+        self.assertIn('+orb result', Path(worker['patch']).read_text())
+        self.assertEqual(worker['result']['audit']['unreported_files'], [])
+        d.integrate(run, 'one')
+        self.assertEqual((self.project / 'source.txt').read_text(), 'orb result\n')
+
+    def test_edit_report_must_name_the_pushed_commit(self):
+        _, worker = self.orb_run('nocommit', access='edit')
+        self.assertEqual(worker['status'], 'failed')
+        self.assertIn('edit report must include the pushed commit', worker['result']['evidence'])
+
+    def test_cancel_while_amp_starts_still_records_the_thread(self):
+        real = d.amp_cli
+        def launch_then_cancel(*args, **kwargs):
+            result = real(*args, **kwargs)
+            if args[0] == '-ox':
+                d.cancel(self.run_id, 'one')
+            return result
+        os.environ['FAKE_AMP_MODE'] = 'read'
+        self.run_id = self.create(self.worker(profiles=['orb']))
+        d.next_workers(self.run_id)
+        with patch.object(d, 'amp_cli', side_effect=launch_then_cancel):
+            d.external(self.run_id, 'one')
+        worker = d.status(self.run_id)['workers'][0]
+        self.assertEqual((worker['status'], worker['thread_url']), ('cancelled', 'https://ampcode.com/threads/T-fake'))
+        self.assertIn('not stopped', worker['orb_note'])
+
+    def test_a_slow_export_is_retried(self):
+        real, calls = d.amp_cli, []
+        def stall_once(*args, **kwargs):
+            if args[:2] == ('threads', 'export') and not calls:
+                calls.append(args)
+                raise subprocess.TimeoutExpired(cmd='amp', timeout=120)
+            return real(*args, **kwargs)
+        with patch.object(d, 'amp_cli', side_effect=stall_once):
+            _, worker = self.orb_run('read')
+        self.assertEqual((worker['status'], len(calls)), ('completed', 1))
+
+    def test_edit_outside_owned_paths_fails(self):
+        _, worker = self.orb_run('unowned', access='edit')
+        self.assertEqual((worker['status'], worker['error']), ('failed', 'worker changed paths outside ownership'))
+
+    def test_edit_workers_need_a_pushed_base_and_clean_owned_paths(self):
+        (self.project / 'new.txt').write_text('untracked\n')
+        worker = self.selected(self.worker(access='edit', owned_paths=['new.txt']))['one']
+        self.assertEqual((worker['profile_id'], worker['orb_skipped']), ('scan', 'orb workers cannot see uncommitted changes in their owned paths'))
+        (self.project / 'new.txt').unlink()
+        d.git(self.project, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-q', '--allow-empty', '-m', 'Unpushed')
+        worker = self.selected(self.worker(access='edit'))['one']
+        self.assertEqual(worker['orb_skipped'], 'orb workers need the current commit pushed to a remote')
+        self.assertFalse((self.state / 'prompt.txt').exists(), 'no orb starts')
+
+    def test_launch_failure_and_unfinished_thread_fail_visibly(self):
+        _, worker = self.orb_run('fail')
+        self.assertEqual(worker['status'], 'failed')
+        self.assertIn('Session expired', worker['result']['evidence'])
+        self.config['timeout_seconds'] = 1
+        _, worker = self.orb_run('hang')
+        self.assertEqual((worker['status'], worker['exit_code']), ('failed', 124))
+        self.assertIn('may still be running: https://ampcode.com/threads/T-fake', worker['result']['evidence'])
+
+
 if __name__ == '__main__':
     unittest.main()

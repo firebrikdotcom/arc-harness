@@ -72,13 +72,20 @@ PASSABLE = {"plan", "build", "review", "status", "step", "continue", "contract",
             "advise", "route", "help", "--help", "-h"}
 GUARD_VARIABLES = {"HARNESS_HOOK_DISABLE", "HARNESS_RUN_IDLE_HOURS", "HARNESS_RETAIN_RUNS", "HARNESS_HOME",
                    "HARNESS_DB_ROOT", "HARNESS_REQUIRED_CHECKS", "HARNESS_REVIEWER_CMD", "HARNESS_REVIEW_BASE",
-                   "HARNESS_CONFIRM_TTY"}
+                   "HARNESS_CONFIRM_TTY",
+                   # The dispatcher's records, workflow state and config: redirecting them would
+                   # hide orb runs from the audit. Session IDs are in the denylist, which still
+                   # lets a command clear them.
+                   "HARNESS_WORKFLOW_STATE", "HARNESS_DISPATCH_DB", "HARNESS_CONFIG", "HARNESS_CONFIG_HOME",
+                   "HARNESS_AUDIT_SETTINGS"}
 # Programs that run a command given to them as words or a string; when one of
 # them (or a command word that is a glob, variable, or {}) carries a human-only
 # subcommand, the command is refused even though the CLI's name is hidden.
 INDIRECT = {"script", "flock", "parallel", "expect", "unbuffer", "tmux", "screen", "socat", "setsid", "su", "runuser",
             "busybox", "watch", "entr", "chronic", "ionice", "chrt", "taskset", "unshare", "firejail"}
 HUMAN_WORDS = re.compile(r"(^|\s)(abort|failure|launch|review\s+submit)(\s|$)")
+# The same for runtime-only commands handed to such a program as one string.
+RUNTIME_WORDS = re.compile(r"workflow_gate\.py|(^|[\s'\"/])amp\s.*(-ox|--orb-execute|--executor[=\s]+orb)\b")
 
 
 ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*\+?=")
@@ -211,6 +218,24 @@ def harness_subcommand(argv: list[str]) -> tuple[str, str, bool]:
         session = session or rest[0] == "--session-id"
         rest = rest[2:] if rest[0] == "--session-id" else rest[1:]
     return (rest[0] if rest else ""), (rest[1] if len(rest) > 1 else ""), session
+
+
+PYTHON = re.compile(r"python[\d.]*")
+
+
+def runtime_only(words: list[str], position: int) -> str | None:
+    """Commands only the runtime or the dispatcher may run: the prompt hook records the
+    person's own words (planning waivers, orb requests), and orbs start only through the
+    dispatcher, which checks the person asked for one. Judged on parsed words, so env,
+    nohup, timeout, xargs, sh -c and the like do not hide them."""
+    name = os.path.basename(words[position])
+    if name == "workflow_gate.py" and (position == 0 or any(PYTHON.fullmatch(os.path.basename(w)) for w in words[:position])):
+        return "runs the prompt hook, which only the agent runtime runs"
+    rest = words[position + 1:]
+    if name == "amp" and any(w in ("-ox", "--orb-execute", "--executor=orb") or (w == "--executor" and rest[i + 1:i + 2] == ["orb"])
+                             for i, w in enumerate(rest)):
+        return "starts an Amp orb directly; orbs start only through the dispatcher"
+    return None
 
 
 def human_only(argv: list[str]) -> str | None:
@@ -618,9 +643,14 @@ def analyse(command: str, cwd: str, project: Path, depth: int = 0) -> Analysis:
                                        or GLOB_CHARS.search(command_word) or "$" in command_word):
                 if HUMAN_WORDS.search(" ".join(words[1:])):
                     result.refusal = "runs a human-only harness command through an indirect command word, which is a person's to run"
+                elif RUNTIME_WORDS.search(" ".join(words[1:])):
+                    result.refusal = "runs the prompt hook or starts an Amp orb through an indirect command word"
             # The CLI may be run by a launcher (bash FILE, xargs, find -exec,
             # watch, a symlink): look for it at every position, not only first.
             for position, word in enumerate(words):
+                if result.refusal:
+                    break
+                result.refusal = runtime_only(words, position)
                 if result.refusal:
                     break
                 if is_harness_cli(word, cwds[0]) or os.path.basename(word) == "knowledge-trust.sh":

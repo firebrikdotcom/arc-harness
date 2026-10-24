@@ -41,10 +41,14 @@ All persisted switches and eligible worker profiles share
 | `dispatch.max_context_bytes` | Maximum worker packet size in UTF-8 bytes. |
 | `dispatch.timeout_seconds` | External process timeout and native handoff deadline; external process supervision currently requires Linux /proc. |
 | `dispatch.profiles` | Operator-configured role, provider, model and reasoning effort combinations. |
+| `amp.enabled` | Offer every dispatched worker an Amp orb first ([Amp orb workers](#amp-orb-workers)). Off by default. |
+| `amp.effort` | Effort for orb workers; it picks the Amp mode. Default `medium`. |
+| `amp.poll_seconds` | Seconds between checks of a running orb thread. |
 | `telemetry.*` | Master and category collection switches; does not change execution permissions. |
 
 The supplied profiles cover native exploration, implementation and review, plus
-Codex implementation and Claude review. Add a `command` provider with a fixed
+Codex implementation and Claude review; `amp.enabled` adds the orb profile in front of
+them. Add a `command` provider with a fixed
 argv array for another installed agent or model. Only profiles named in the
 worker's eligible list can be selected. Worker plans cannot inject executables.
 Model availability follows the actual runtime/account; an unavailable model is
@@ -154,6 +158,91 @@ runtime still loads its mandatory ambient instructions and may spend more tokens
 on setup than on a small task. Cached input is measured separately where exposed.
 Codex workers omit the optional skill catalog and apps/plugins/memories, retaining
 project/user instructions, hooks and permission rules.
+
+## Amp orb workers
+
+On a machine where `amp.enabled` is on, every dispatched worker is offered an Amp orb
+first: a remote machine that clones the target's Git remote through its Amp project.
+With it off, nothing changes. Each machine decides for itself, because the switch lives
+in that machine's `config.json`.
+
+When the switch is on, the dispatcher gives each worker the orb profile (`amp_orb`:
+provider `amp`, effort `amp.effort`) before considering the profiles the plan lists. It
+falls back to those listed profiles, recording why in the worker's `orb_skipped`, when
+an orb would not see what a local worker sees: the `amp` CLI is missing, the worker
+depends on other workers (their results exist only locally), the current commit is not
+pushed, a tracked file has uncommitted changes, or the worker's owned paths have new
+files. This applies to read workers (explorers, reviewers) as well as edit workers,
+and the fallback never picks an amp profile from the list; a worker that lists only
+amp profiles is refused at create with the reason. The checks run when the plan is
+created and again at launch. Once an orb has launched, a failure (for example an
+expired `amp login`) is a visible worker failure, not a silent switch. A plan may also
+list an explicit `"provider": "amp"` profile; that still requires `amp.enabled`.
+
+The orb has no harness, so it gets only the bounded packet, and nothing it
+does counts until the parent checks it here. Read workers report back; edit workers
+push a branch that the parent fetches into the worker's own worktree. Integration,
+`verify.sh`, acceptance commands and independent review then run locally as usual.
+
+Before using it:
+
+- Log in with `amp login`, and make sure the target's remote matches an Amp project
+  (`amp projects status` in the target checkout).
+- Push and commit before dispatching. An orb only sees what is on the remote, so
+  workers fall back to local profiles while `HEAD` is unpushed or tracked files are dirty.
+- Turn the switch on, and optionally pick the orb effort:
+  `scripts/harness config update --section amp --values '{"enabled":true,"effort":"medium"}'`.
+  Role dispatch itself must also be on (`dispatch.enabled`).
+
+Orbs start only through the dispatcher. `scripts/install-hooks.sh` denies Claude Code
+running `amp -ox` or `amp --orb-execute` itself (and removes an older allow rule), the
+guard refuses direct orb launches and runs of the prompt hook script, judged on the parsed
+command so wrappers such as `env`, `nohup`, `timeout`, `xargs` and `sh -c` do not hide
+them, and agents cannot redirect the workflow state, dispatch database or config the
+dispatcher reads, or set session IDs. Every orb therefore leaves a dispatch record and
+a saved thread export.
+
+### How it runs
+
+`dispatch execute` sends the packet on stdin to `amp -ox` (stdin because execute
+mode times out reading a long argument), with the mode taken from the profile effort
+(`xhigh` becomes `high`, `max` becomes `ultra`), the title `harness RUN WORKER` and the
+label `harness-dispatch`. It records the thread URL, then polls `amp threads export`
+every `amp.poll_seconds` until the last assistant turn has ended and the thread is
+idle, or `dispatch.timeout_seconds` passes. No local process is supervised, so orb
+workers also run where Linux `/proc` is unavailable.
+
+The packet replaces the local workspace path with the orb checkout. A read worker is
+told to check out the dispatched commit (`git checkout --detach SHA`) and not to modify,
+commit or push. An edit worker is told to check out
+`harness/RUN-WORKER` from the dispatched commit, commit only owned paths, push that
+branch and report the pushed SHA as `commit`. The parent fetches the branch, requires
+it to descend from the dispatched commit and to match the reported SHA, and applies
+its diff to the worker worktree. The usual ownership check then rejects any path the
+worker does not own.
+
+### What is audited
+
+Each report must also carry `audit`: commands with exit codes, files written,
+hosts contacted and deviations. Because a worker's own account can be incomplete,
+the full thread export is saved as `dispatch-artifacts/RUN/WORKER.thread.json`
+(0600) and the worker result keeps:
+
+- `audit.thread_url`, `audit.export` and `audit.export_sha256`;
+- `audit.reported`: the orb's own `audit` object;
+- `audit.observed`: tool-call counts, shell commands and files named by edit tools,
+  taken from the export;
+- `audit.unreported_files`: observed files missing from the reported list (recorded,
+  not failing: files written by shell commands are not observed);
+- token usage summed from the export's per-turn usage, when present.
+
+### Limits
+
+- Cancelling an orb worker stops tracking it locally; the thread itself keeps running.
+- A timed-out worker fails with exit code 124 and the thread URL; the thread may still finish.
+- If the supervisor (`dispatch execute`) itself dies, `dispatch status` marks the worker failed
+  only after `dispatch.timeout_seconds` plus 10 minutes.
+- Pushed `harness/...` branches stay on the remote until someone deletes them.
 
 ## Explicit decision lifecycle
 
