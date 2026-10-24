@@ -58,7 +58,7 @@
         "role": "reviewer"
       }
     },
-    "_doc_profiles": "Eligible role/model/backend combinations. Native needs parent tools; command providers use operator-configured argv only."
+    "_doc_profiles": "Eligible role/model/backend combinations. Native needs parent tools; command providers use operator-configured argv only; amp providers also need amp.enabled."
   },
   "telemetry": {
     "_doc": "Dashboard collection only; does not enable TypeSafe or dispatch. Unavailable service queues events locally.",
@@ -69,6 +69,14 @@
     "_doc_jev": "Collect decision, routing and agent measurements.",
     "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
     "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained."
+  },
+  "amp": {
+    "_doc": "Run dispatch workers in Amp orb threads (amp -ox). On: every worker is offered an orb first and falls back to its listed profiles when an orb cannot take it. Off: no orb is started.",
+    "enabled": false,
+    "effort": "medium",
+    "_doc_effort": "Effort for orb workers (low, medium, high, xhigh, max or ultra); it picks the Amp mode.",
+    "poll_seconds": 10,
+    "_doc_poll_seconds": "Seconds between thread export checks while an orb worker runs."
   },
   "sites": {
     "_doc": "Firebrik Sites publishing for every agent (harness sites). The token stays in token_file (0600), never here.",

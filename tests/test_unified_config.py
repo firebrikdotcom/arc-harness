@@ -111,6 +111,25 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(config.ConfigError, msg=bad):
                 config.update("workflow", bad)
 
+    def test_amp_section_defaults_off_for_older_files_and_is_validated(self):
+        config.update()
+        value = json.loads(config.path().read_text())
+        del value["amp"]
+        config.path().write_text(json.dumps(value))
+        amp = config.load()["amp"]
+        self.assertEqual((amp["enabled"], amp["effort"], amp["poll_seconds"]), (False, "medium", 10))
+        config.update("amp", {"enabled": True, "effort": "xhigh", "poll_seconds": 3})
+        self.assertTrue(config.load()["amp"]["enabled"])
+        for bad in ({"enabled": "yes"}, {"poll_seconds": 0}, {"poll_seconds": 601}, {"mode": "ultra"}, {"effort": "huge"}):
+            with self.assertRaises(config.ConfigError, msg=bad):
+                config.update("amp", bad)
+        profiles = config.load()["dispatch"]["profiles"]
+        orb = {"provider": "amp", "model": "amp", "effort": "medium", "role": "*"}
+        config.update("dispatch", {"profiles": {**profiles, "orb": orb}})
+        with self.assertRaises(config.ConfigError):
+            config.update("dispatch", {"profiles": {**profiles, "orb": {**orb, "command": ["amp", "-x"]}}})
+        self.assertEqual(config.load()["amp"]["poll_seconds"], 3, "a rejected update changes nothing")
+
     def test_collection_master_switch_and_invalid_config(self):
         config.update("telemetry", {"workflow_prompts": True})
         self.assertTrue(audit_transport.enabled("workflow.prompt_recorded"))

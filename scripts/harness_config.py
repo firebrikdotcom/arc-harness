@@ -52,7 +52,7 @@ DEFAULTS = {
             "codex_build": {"provider": "codex", "model": "gpt-6.1-sol", "effort": "medium", "role": "implementer"},
             "claude_review": {"provider": "claude", "model": "sonnet", "effort": "medium", "role": "reviewer"}
         },
-        "_doc_profiles": "Eligible role/model/backend combinations. Native needs parent tools; command providers use operator-configured argv only.",
+        "_doc_profiles": "Eligible role/model/backend combinations. Native needs parent tools; command providers use operator-configured argv only; amp providers also need amp.enabled.",
     },
     "telemetry": {
         "_doc": "Dashboard collection only; does not enable TypeSafe or dispatch. Unavailable service queues events locally.",
@@ -69,6 +69,14 @@ DEFAULTS = {
         "todo_gate": "enforce",
         "_doc_todo_gate": "audit or enforce.",
     },
+    "amp": {
+        "_doc": "Run dispatch workers in Amp orb threads (amp -ox). On: every worker is offered an orb first and falls back to its listed profiles when an orb cannot take it. Off: no orb is started.",
+        "enabled": False,
+        "effort": "medium",
+        "_doc_effort": "Effort for orb workers (low, medium, high, xhigh, max or ultra); it picks the Amp mode.",
+        "poll_seconds": 10,
+        "_doc_poll_seconds": "Seconds between thread export checks while an orb worker runs.",
+    },
     "sites": {
         "_doc": "Firebrik Sites publishing for every agent (harness sites). The token stays in token_file (0600), never here.",
         "enabled": True,
@@ -78,7 +86,7 @@ DEFAULTS = {
         "_doc_token_file": "File holding a personal API token from Settings > API tokens; FIREBRIK_SITES_TOKEN overrides it.",
     },
 }
-SECTIONS = ("typesafe", "dispatch", "telemetry", "sites", "workflow")
+SECTIONS = ("typesafe", "dispatch", "telemetry", "sites", "workflow", "amp")
 
 
 class ConfigError(ValueError):
@@ -117,13 +125,15 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence",
                            "context_request_limit", "read_only_commands", "read_only_tools"},
               "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"},
-              "sites": {"enabled", "url", "token_file"}, "workflow": {"todo_gate"}}
+              "sites": {"enabled", "url", "token_file"}, "workflow": {"todo_gate"}, "amp": {"enabled", "effort", "poll_seconds"}}
     for section, keys in fields.items():
         part = value.get(section)
         if not isinstance(part, dict) or any(k not in keys and not k.startswith("_doc") for k in part):
             raise ConfigError(f"invalid configuration section: {section}")
     if value["workflow"].get("todo_gate") not in ("audit", "enforce"):
         raise ConfigError("workflow.todo_gate must be audit or enforce")
+    if value["amp"].get("effort") not in ("low", "medium", "high", "xhigh", "max", "ultra"):
+        raise ConfigError("amp.effort must be low, medium, high, xhigh, max or ultra")
     typesafe = value["typesafe"]
     if typesafe.get("mode") not in ("off", "shadow", "active"):
         raise ConfigError("typesafe.mode must be off, shadow or active")
@@ -134,7 +144,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(model, str) or not model.strip() or model.endswith("-latest"):
         raise ConfigError("typesafe.model must be an exact model pin")
     for section, keys in {"typesafe": ["checkpoints", "enforce_decisions"], "dispatch": ["enabled"],
-                          "telemetry": ["enabled", "jev", "workflow", "workflow_prompts"], "sites": ["enabled"]}.items():
+                          "telemetry": ["enabled", "jev", "workflow", "workflow_prompts"], "sites": ["enabled"], "amp": ["enabled"]}.items():
         for key in keys:
             if type(value[section].get(key)) is not bool:
                 raise ConfigError(f"{section}.{key} must be boolean")
@@ -144,7 +154,8 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
                 not isinstance(item, str) or len(item) > 80 or not re.match(pattern, item) for item in items):
             raise ConfigError(f"typesafe.{key} must be a list of at most 64 plain words (no shell syntax)")
     for section, limits in {"typesafe": {"decision_ttl_seconds": (1, 3600), "context_request_limit": (0, 2)},
-                            "dispatch": {"max_workers": (1, 16), "max_context_bytes": (1000, 32000), "timeout_seconds": (1, 86400)}}.items():
+                            "dispatch": {"max_workers": (1, 16), "max_context_bytes": (1000, 32000), "timeout_seconds": (1, 86400)},
+                            "amp": {"poll_seconds": (1, 600)}}.items():
         for key, (low, high) in limits.items():
             number = value[section].get(key)
             if type(number) is not int or not low <= number <= high:
@@ -165,7 +176,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError("invalid dispatch profile name")
         if not isinstance(profile, dict) or set(profile) - {"provider", "model", "effort", "role", "agent_type", "command", "_doc"}:
             raise ConfigError(f"invalid dispatch profile: {name}")
-        if profile.get("provider") not in ("native", "codex", "claude", "command"):
+        if profile.get("provider") not in ("native", "codex", "claude", "command", "amp"):
             raise ConfigError(f"invalid dispatch provider: {name}")
         for key in ("model", "role", "effort"):
             if not isinstance(profile.get(key), str) or not profile[key].strip() or len(profile[key]) > 200:
@@ -178,6 +189,8 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
                 raise ConfigError(f"profile {name}.command must be an argv array")
             if any("dangerously" in item or item.startswith("--ignore-") for item in command):
                 raise ConfigError("dispatch command cannot bypass runtime permissions or rules")
+        elif profile["provider"] == "amp" and "command" in profile:
+            raise ConfigError(f"profile {name}: amp providers run the fixed amp argv, not a command")
     return value
 
 
@@ -196,7 +209,7 @@ def load(file: Path | None = None) -> dict[str, Any]:
             value["telemetry"].update(legacy_collection(stored))
             return validate(value)
         # Sections added after a file was written start from their defaults.
-        for section in ("sites", "workflow"):
+        for section in ("sites", "workflow", "amp"):
             if section not in stored:
                 stored[section] = copy.deepcopy(DEFAULTS[section])
         for section in SECTIONS:

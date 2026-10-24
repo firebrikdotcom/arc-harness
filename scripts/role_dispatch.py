@@ -22,6 +22,10 @@ import audit_transport
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'blocked'}
 ACTIVE = {'reserved', 'launching', 'running', 'cancelling'}
+# Amp has modes rather than model pins; the profile effort picks the mode.
+AMP_MODES = {'low': 'low', 'medium': 'medium', 'high': 'high', 'xhigh': 'high', 'max': 'ultra', 'ultra': 'ultra'}
+THREAD_URL = re.compile(r'https://ampcode\.com/threads/(T-[0-9A-Za-z-]+)')
+PARENT_IDS = ('CODEX_THREAD_ID', 'CLAUDE_SESSION_ID', 'HARNESS_SESSION_ID', 'CLAUDECODE', 'HARNESS_RUN_ID')
 
 
 def db_path() -> Path:
@@ -214,8 +218,20 @@ def create(plan: dict, project: Path, session_id: str) -> dict:
     if not plan.get('request_id'):
         plan = {**plan, 'request_id': workflow_context.get('request_id')}
     run = {'id': uuid.uuid4().hex, 'project': str(project), 'session': session_id, 'status': 'active', 'created': time.time(), 'request_id': plan.get('request_id'), 'assessment': assessed}
+    amp = amp_settings()
     # Selection uses only enum metadata, never task text or repository paths.
     for w in validated:
+        if amp['enabled']:
+            # This machine prefers orbs: every worker is offered one before its listed profiles.
+            skipped = orb_unfit(project, w)
+            if skipped is None:
+                w.update(profile=orb_profile(amp), profile_id='amp_orb', decisions=0, status='queued', queued_at=time.time(), context_bytes=len(json.dumps(w).encode()))
+                continue
+            w['orb_skipped'] = skipped
+            # An orb was just ruled out, so the fallback never picks a listed amp profile either.
+            w['profiles'] = [p for p in w['profiles'] if config['profiles'][p]['provider'] != 'amp']
+            if not w['profiles']:
+                raise ValueError(f"worker {w['id']} lists only orb profiles, and an orb cannot take it: {skipped}")
         candidates = w['profiles']
         choice = candidates[0]
         w['decisions'] = 0
@@ -235,6 +251,8 @@ def create(plan: dict, project: Path, session_id: str) -> dict:
             w['decision_id'] = receipt.get('id')
             claim(project=project, identifier=receipt['id'], session_id=session_id, scope=scope, state=state, action_hash=action_hash)
             outcome(project=project, identifier=receipt['id'], session_id=session_id, exit_code=0)
+        if config['profiles'][choice]['provider'] == 'amp' and not amp['enabled']:
+            raise ValueError('amp orb delegation is disabled; set amp.enabled to use amp profiles')
         w.update(profile=config['profiles'][choice], profile_id=choice, status='queued', queued_at=time.time(), context_bytes=len(json.dumps(w).encode()))
     with connection() as db:
         db.execute('INSERT INTO runs (id,project,session,status,created,request_id,assessment) VALUES (?,?,?,?,?,?,?)',
@@ -324,8 +342,56 @@ def integrate(run_id, worker_id):
     return {'status': 'integrated', 'worker_id': worker_id, 'project': run['project']}
 
 
+def amp_settings():
+    return harness_config.load().get('amp') or {'enabled': False, 'effort': 'medium', 'poll_seconds': 10}
+
+
+def orb_profile(amp):
+    return {'provider': 'amp', 'model': 'amp', 'effort': amp.get('effort', 'medium'), 'role': '*'}
+
+
+def pushed_base(project, owned_paths):
+    """An orb clones the remote, so it sees what a local worker would only when the commit
+    is pushed, no tracked file has local changes, and owned paths have no new files."""
+    head = git(project, 'rev-parse', 'HEAD').decode().strip()
+    if not git(project, 'for-each-ref', '--contains', head, '--format=%(refname)', 'refs/remotes').strip():
+        raise ValueError('orb workers need the current commit pushed to a remote')
+    if git(project, 'status', '--porcelain', '--untracked-files=no').strip():
+        raise ValueError('orb workers cannot see uncommitted changes to tracked files')
+    if owned_paths and git(project, 'status', '--porcelain', '--', *owned_paths).strip():
+        raise ValueError('orb workers cannot see uncommitted changes in their owned paths')
+    return head
+
+
+def orb_unfit(project, w):
+    """Why an orb cannot take this worker, or None; then it falls back to its listed profiles."""
+    import shutil
+    if not shutil.which('amp'):
+        return 'amp CLI not found'
+    if w['dependencies']:
+        # Predecessor results (patches or integrated edits) exist only here, not on the remote.
+        return 'orb workers cannot see the results of the workers they depend on'
+    try:
+        pushed_base(project, w['owned_paths'])
+    except subprocess.CalledProcessError:
+        return 'project is not a Git checkout with a pushed commit'
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def orb_base(run, w):
+    w['orb_base'] = pushed_base(Path(run['project']), w['owned_paths'])
+    if w['access'] == 'edit':
+        w['orb_branch'] = 'harness/' + run['id'][:10] + '-' + w['id']
+
+
 def prepare(run, w):
     project = Path(run['project'])
+    orb = w['profile']['provider'] == 'amp'
+    if orb:
+        # Checked again at launch: the tree may have changed since the plan was created.
+        orb_base(run, w)
     if w['access'] == 'read':
         w['workspace'] = str(project)
         return
@@ -356,6 +422,8 @@ def prepare(run, w):
         dependencies = {item['id']: item for item in workers(dep_db, run['id'])}
     for dependency in w['dependencies']:
         predecessor = dependencies[dependency]
+        if predecessor.get('patch') and orb:
+            raise ValueError('orb workers cannot build on unpushed predecessor patches')
         if predecessor.get('patch'):
             apply_patch(run, predecessor, destination)
             for path in predecessor.get('changed_paths', []):
@@ -367,6 +435,20 @@ def prepare(run, w):
 
 def message(run, w):
     return '\n'.join([f"Project: {w['workspace']}", f"Role: {w['role']}", f"Responsibility: {w['responsibility']}", f"Access: {w['access']}; owned paths: {json.dumps(w['owned_paths'])}", 'You are not alone. Preserve other workers changes. Work only in this workspace and owned paths. Do not alter secrets.', 'Acceptance: ' + json.dumps(w['acceptance']), 'Bounded context: ' + w['context'], 'Verified dependency reports: ' + json.dumps(w.get('dependency_evidence', [])), 'Return only a JSON report: status must be completed or failed; acceptance must contain one object per criterion in the original order, copying each criterion string exactly, with nonempty evidence and boolean passed; include nonempty top-level evidence and artifacts array. Completion requires actual verification.'])
+
+
+def orb_message(run, w):
+    lines = message(run, w).split('\n')[1:]
+    if w['access'] == 'edit':
+        lines.insert(0, f"Project: your orb checkout of this repository's Git remote; local uncommitted work is not visible. Start from the dispatched commit: git fetch origin && git checkout -B {w['orb_branch']} {w['orb_base']}. Commit only owned paths, run git push origin HEAD:refs/heads/{w['orb_branch']}, and put the pushed commit SHA in the report as \"commit\".")
+    else:
+        lines.insert(0, f"Project: your orb checkout of this repository's Git remote; local uncommitted work is not visible. Read the dispatched commit: git fetch origin && git checkout --detach {w['orb_base']}. Read only: do not modify, commit or push anything.")
+    lines.append('Also include "audit": {"commands": [{"cmd": "...", "exit": 0}], "files_written": [], "network": [], "deviations": []}, listing every command you ran, every file you wrote, every host you contacted and anything you did outside this packet.')
+    return '\n'.join(lines)
+
+
+def packet(run, w):
+    return orb_message(run, w) if w['profile']['provider'] == 'amp' else message(run, w)
 
 
 def next_workers(run_id):
@@ -402,7 +484,7 @@ def next_workers(run_id):
                 emit('worker_failed', run, w)
                 continue
             w['dependency_evidence'] = [{'worker_id': dependency, 'evidence': str(by_id[dependency].get('result', {}).get('evidence', ''))[:1200], 'patch': by_id[dependency].get('patch')} for dependency in w['dependencies']]
-            w['context_bytes'] = len(message(run, w).encode())
+            w['context_bytes'] = len(packet(run, w).encode())
             if w['context_bytes'] > config.get('max_context_bytes', 12000):
                 w.update(status='failed', error='prepared worker context exceeds configured byte bound', finished_at=time.time())
                 save(db, run_id, w)
@@ -482,6 +564,13 @@ def status(run_id):
         items = workers(db, run_id)
         timeout = harness_config.load()['dispatch'].get('timeout_seconds', 900)
         for w in items:
+            if w['profile']['provider'] == 'amp':
+                # The orb supervisor polls the thread itself; this only catches a supervisor that stopped.
+                if w['status'] in ('launching', 'running') and time.time() - w['started_at'] > timeout + 600:
+                    w.update(status='failed', error='orb supervisor stopped reporting; see the thread', finished_at=time.time())
+                    save(db, run_id, w)
+                    emit('worker_failed', run, w)
+                continue
             if w['status'] == 'launching':
                 supervisor = process_identity(w.get('supervisor_pid'))
                 if not supervisor or supervisor['start'] != w.get('supervisor_start'):
@@ -581,6 +670,8 @@ def cancel(run_id, worker_id=None, acknowledged=False, evidence=None):
                     raise ValueError('native cancellation acknowledgement requires pending cancellation and actual tool evidence')
                 w.update(status=w.get('terminal_after_cancel', 'cancelled'), finished_at=time.time())
                 w.pop('runtime_action', None)
+                if w.get('thread_url'):
+                    w['orb_note'] = 'cancelled locally; the orb thread is not stopped'
                 if evidence:
                     w['cancel_evidence'] = evidence
                 save(db, run_id, w)
@@ -611,8 +702,8 @@ def default_command(profile, access):
             file = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'config.toml'
             if file.exists() and tomllib.loads(file.read_text()).get('sandbox_mode') == 'read-only':
                 sandbox = 'read-only'
-        except (OSError, ValueError):
-            pass  # The CLI still validates and loads its authoritative user config.
+        except (OSError, ValueError, ImportError):
+            pass  # The CLI still validates and loads its authoritative user config; tomllib needs Python 3.11.
         command = ['codex', 'exec', '--json', '--sandbox', sandbox, '--model', profile['model'], '-c', 'model_reasoning_effort="' + profile['effort'] + '"', '-c', 'skills.include_instructions=false']
         for feature in codex_optional_features():
             command.extend(['--disable', feature])
@@ -624,6 +715,10 @@ def default_command(profile, access):
 
 
 def external(run_id, worker_id):
+    with connection() as db:
+        found = next((w for w in workers(db, run_id) if w['id'] == worker_id), None)
+    if found and found['profile']['provider'] == 'amp':
+        return orb(run_id, worker_id)
     if not Path('/proc/self/stat').exists():
         raise ValueError('external worker supervision requires Linux /proc process identity support')
     if not harness_config.load()['dispatch']['enabled']:
@@ -782,6 +877,164 @@ def _external_owned(run_id, worker_id, run, w):
             current = next(x for x in workers(db, run_id) if x['id'] == worker_id)
         if current['status'] not in TERMINAL:
             finish(run_id, worker_id, {'status': 'failed', 'evidence': 'Invalid terminal acceptance report', 'exit_code': code})
+
+
+def amp_cli(*args, stdin=None, cwd=None, timeout=120):
+    env = {k: v for k, v in os.environ.items() if k not in PARENT_IDS}
+    return subprocess.run(['amp', *args], input=stdin, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def thread_finished(export):
+    messages = export.get('messages') or []
+    if not messages or messages[-1].get('role') != 'assistant':
+        return False
+    state = messages[-1].get('state') or {}
+    agent = (export.get('meta') or {}).get('lastKnownAgentState') or {}
+    return state.get('type') in ('complete', 'error', 'cancelled') and state.get('stopReason') != 'tool_use' and agent.get('state', 'idle') == 'idle'
+
+
+def orb_path(raw):
+    return re.sub(r'^/home/user/workspace/(repo/)?', '', str(raw))
+
+
+def thread_record(export):
+    """Usage and tool calls from the thread itself, independent of the worker's own report."""
+    usage, tools, commands, files, text = {}, {}, [], set(), ''
+    for item in export.get('messages') or []:
+        if item.get('role') != 'assistant':
+            continue
+        spent = item.get('usage') or {}
+        for key, source in (('input_tokens', 'totalInputTokens'), ('cached_input_tokens', 'cacheReadInputTokens'), ('output_tokens', 'outputTokens')):
+            if type(spent.get(source)) is int:
+                usage[key] = usage.get(key, 0) + spent[source]
+        texts = []
+        for block in item.get('content') or []:
+            if block.get('type') == 'text' and isinstance(block.get('text'), str):
+                texts.append(block['text'])
+            if block.get('type') != 'tool_use':
+                continue
+            name, arguments = str(block.get('name')), block.get('input') or {}
+            tools[name] = tools.get(name, 0) + 1
+            if isinstance(arguments.get('command'), str):
+                commands.append(arguments['command'][:300])
+            if isinstance(arguments.get('patchText'), str):
+                files.update(orb_path(f) for f in re.findall(r'^\*\*\* (?:Add|Update|Delete) File: (.+)$', arguments['patchText'], flags=re.MULTILINE))
+            if isinstance(arguments.get('path'), str) and re.search(r'(?i)edit|create|write', name):
+                files.add(orb_path(arguments['path']))
+        if texts:
+            text = '\n'.join(texts)
+    if 'input_tokens' in usage and 'output_tokens' in usage:
+        usage['total_tokens'] = usage['input_tokens'] + usage['output_tokens']
+    return usage, {'tools': tools, 'commands': commands[:200], 'files_written': sorted(files)[:200]}, text
+
+
+def fetch_orb_branch(w, report):
+    workspace = Path(w['workspace'])
+    git(workspace, 'fetch', '--no-tags', 'origin', 'refs/heads/' + w['orb_branch'])
+    commit = git(workspace, 'rev-parse', 'FETCH_HEAD').decode().strip()
+    claimed = str(report.get('commit') or '').lower()
+    if not re.fullmatch(r'[0-9a-f]{7,40}', claimed):
+        raise ValueError('edit report must include the pushed commit')
+    if not commit.startswith(claimed):
+        raise ValueError('pushed branch does not match the reported commit')
+    if subprocess.run(['git', '-C', str(workspace), 'merge-base', '--is-ancestor', w['orb_base'], commit], capture_output=True).returncode != 0:
+        raise ValueError('orb branch does not start from the dispatched base commit')
+    patch = git(workspace, 'diff', '--binary', w['orb_base'], commit)
+    if patch:
+        git(workspace, 'apply', '--binary', '-', input=patch)
+    return commit
+
+
+def orb(run_id, worker_id):
+    settings = harness_config.load()
+    if not settings['dispatch']['enabled'] or not (settings.get('amp') or {}).get('enabled'):
+        raise ValueError('role dispatch or amp orb delegation is disabled; reserved orb worker was not launched')
+    with connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        run = get_run(db, run_id)
+        w = next(w for w in workers(db, run_id) if w['id'] == worker_id)
+        if w['status'] != 'reserved':
+            raise ValueError('orb worker must be reserved; another supervisor may already own it')
+        w.update(status='launching', launch_token=uuid.uuid4().hex)
+        save(db, run_id, w)
+    try:
+        _orb_owned(run_id, worker_id, run, w, settings['amp'].get('poll_seconds', 10), settings['dispatch'].get('timeout_seconds', 900),
+                   settings['dispatch'].get('max_context_bytes', 12000))
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        with connection() as db:
+            current = next(x for x in workers(db, run_id) if x['id'] == worker_id)
+        if current['status'] not in TERMINAL and current.get('launch_token') == w['launch_token']:
+            finish(run_id, worker_id, {'status': 'failed', 'evidence': (type(error).__name__ + ': ' + str(error))[:500]})
+
+
+def _orb_owned(run_id, worker_id, run, w, poll, timeout, limit):
+    prompt = packet(run, w)
+    if len(prompt.encode()) > limit:
+        finish(run_id, worker_id, {'status': 'failed', 'evidence': 'orb worker packet exceeds configured context byte bound'})
+        return
+    # The packet goes on stdin: amp execute mode times out reading a long argument.
+    launched = amp_cli('-ox', '-m', AMP_MODES[w['profile']['effort']], '--title', 'harness ' + run['id'][:10] + ' ' + w['id'], '-l', 'harness-dispatch',
+                       stdin=prompt, cwd=run['project'])
+    found = THREAD_URL.search(launched.stdout)
+    if launched.returncode != 0 or not found:
+        raise ValueError('amp did not start an orb thread: ' + (launched.stderr or launched.stdout).strip()[-300:])
+    with connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        current = next(x for x in workers(db, run_id) if x['id'] == worker_id)
+        if current['status'] != 'launching' or current.get('launch_token') != w['launch_token']:
+            # Cancelled while amp was starting: the orb exists, so its thread is still recorded.
+            current.update(thread_id=found.group(1), thread_url=found.group(0), orb_note='cancelled locally; the orb thread is not stopped')
+            save(db, run_id, current)
+            return
+        current.update(status='running', context_bytes=len(prompt.encode()), thread_id=found.group(1), thread_url=found.group(0))
+        save(db, run_id, current)
+        emit('worker_started', run, current)
+        w = current
+    deadline = time.monotonic() + timeout
+    export = None
+    while True:
+        with connection() as db:
+            current = next(x for x in workers(db, run_id) if x['id'] == worker_id)
+        if current['status'] != 'running' or current.get('launch_token') != w['launch_token']:
+            return  # Cancelled here; the thread keeps its own record.
+        # A failed or slow export is retried until the deadline, like any unfinished thread.
+        try:
+            listed = amp_cli('threads', 'export', w['thread_id'])
+            export = json.loads(listed.stdout) if listed.returncode == 0 else export
+        except (ValueError, subprocess.SubprocessError):
+            pass
+        if isinstance(export, dict) and thread_finished(export):
+            break
+        if time.monotonic() >= deadline:
+            finish(run_id, worker_id, {'status': 'failed', 'evidence': 'orb thread did not finish before the dispatch timeout and may still be running: ' + w['thread_url'], 'exit_code': 124})
+            return
+        time.sleep(poll)
+    raw = json.dumps(export).encode()
+    artifact = db_path().parent / 'dispatch-artifacts' / run_id / (worker_id + '.thread.json')
+    artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    artifact.write_bytes(raw)
+    artifact.chmod(0o600)
+    usage, observed, text = thread_record(export)
+    report = parse_terminal_report(text) or {'status': 'failed', 'evidence': 'No terminal acceptance report returned'}
+    reported = report.pop('audit', None)
+    claimed = {orb_path(f) for f in reported.get('files_written', []) if isinstance(f, str)} if isinstance(reported, dict) else set()
+    report['audit'] = {'thread_url': w['thread_url'], 'export': str(artifact), 'export_sha256': hashlib.sha256(raw).hexdigest(),
+                       'reported': reported, 'observed': observed, 'unreported_files': sorted(set(observed['files_written']) - claimed)}
+    if w['access'] == 'edit' and report.get('status') == 'completed':
+        try:
+            report.update(orb_branch=w['orb_branch'], orb_commit=fetch_orb_branch(w, report))
+        except subprocess.CalledProcessError as error:
+            report.update(status='failed', evidence='orb branch could not be integrated: git ' + ' '.join(map(str, error.cmd[3:5])))
+        except ValueError as error:
+            report.update(status='failed', evidence='orb branch could not be integrated: ' + str(error))
+    report.update(usage, exit_code=0)
+    try:
+        finish(run_id, worker_id, report)
+    except ValueError:
+        with connection() as db:
+            current = next(x for x in workers(db, run_id) if x['id'] == worker_id)
+        if current['status'] not in TERMINAL:
+            finish(run_id, worker_id, {'status': 'failed', 'evidence': 'Invalid terminal acceptance report', 'audit': report['audit'], 'exit_code': 0})
 
 
 def run_workers(run_id):

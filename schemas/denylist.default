@@ -38,7 +38,8 @@ command \bgh\s+(release\s+create|repo\s+delete)\b
 
 # Loosening permissions, disabling or retuning the guard, or human-only decisions
 command \bchmod\s+(-R\s+)?[0-7]*777\b
-command (^|[\s;&|(])(export\s+|env\s+)?HARNESS_(HOOK_DISABLE|BUDGET_[A-Z_]+|RUN_IDLE_HOURS|RETAIN_RUNS|HOME|DB_ROOT|REQUIRED_CHECKS|REVIEWER_CMD|REVIEW_BASE)=
+command (^|[\s;&|(])(export\s+|env\s+)?HARNESS_(HOOK_DISABLE|BUDGET_[A-Z_]+|RUN_IDLE_HOURS|RETAIN_RUNS|HOME|DB_ROOT|REQUIRED_CHECKS|REVIEWER_CMD|REVIEW_BASE|WORKFLOW_STATE|DISPATCH_DB|CONFIG|CONFIG_HOME|AUDIT_SETTINGS)=
+command (^|[\s;&|(])(export\s+|env\s+)?(HARNESS_SESSION_ID|CLAUDE_SESSION_ID|CODEX_THREAD_ID)=[^\s;&|]
 command knowledge-trust\.sh\s+approve\b
 command (^|[\s;&|(/])harness\s+(abort|failure|review\s+submit)\b
 

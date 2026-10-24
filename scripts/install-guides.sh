@@ -95,6 +95,7 @@ $CLI review done                 # needs an approval of the current files; no no
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: \`$CLI continue "<new approach>"\`. Abort is theirs.
 - Jev (TypeSafe) advice and the task launcher: $DOCS/jev-checkpoints.md, $DOCS/setup.md. \`$CLI jev status\` controls delegation. Ask Jev first, without picking your own answer beforehand; in active mode follow its recommendation when its confidence meets the threshold (default 70%), otherwise you decide. Deterministic rules and required checks decide first; no routine accuracy labels. See the checkpoint guide for receipt resolution. Semantic search: \`$JG --project PATH "question"\`.
 - Role orchestration and judgment checkpoints: $DOCS/orchestration.md. Read it when \`dispatch.enabled\` or \`typesafe.enforce_decisions\` is enabled in the shared \`config.json\`; use the native bridge for supported models and the external launcher otherwise.
+- When both \`dispatch.enabled\` and \`amp.enabled\` are on in that \`config.json\`, consider Amp orbs first for subagent work: hand it to \`harness dispatch\` rather than spawning a native subagent directly. The dispatcher runs each worker in an orb and falls back to the listed profiles when an orb cannot take it ($DOCS/orchestration.md, "Amp orb workers"). Never start an orb with \`amp -ox\` yourself.
 $END_MARK
 BLOCK
 

@@ -78,6 +78,7 @@ scripts/harness review done                 # needs an approval of the current f
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: `scripts/harness continue "<new approach>"`. Abort is theirs.
 - Jev (TypeSafe) advice and the task launcher: docs/jev-checkpoints.md, docs/setup.md. `scripts/harness jev status` controls delegation. Ask Jev first, without picking your own answer beforehand; in active mode follow its recommendation when its confidence meets the threshold (default 70%), otherwise you decide. Deterministic rules and required checks decide first; no routine accuracy labels. See the checkpoint guide for receipt resolution. Semantic search: `scripts/jg.sh --project PATH "question"`.
 - Role orchestration and judgment checkpoints: docs/orchestration.md. Read it when `dispatch.enabled` or `typesafe.enforce_decisions` is enabled in the shared `config.json`; use the native bridge for supported models and the external launcher otherwise.
+- When both `dispatch.enabled` and `amp.enabled` are on in that `config.json`, consider Amp orbs first for subagent work: hand it to `harness dispatch` rather than spawning a native subagent directly. The dispatcher runs each worker in an orb and falls back to the listed profiles when an orb cannot take it (docs/orchestration.md, "Amp orb workers"). Never start an orb with `amp -ox` yourself.
 <!-- harness-cli:end -->
 
 <!-- shared-rule:lavish-sequential-review:start -->

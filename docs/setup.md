@@ -827,6 +827,11 @@ scripts/harness config update --section telemetry --values '{"enabled":true}'
   (normally sourced from `scripts/jev-enable.sh`); unset or `0` remains disabled.
 - `dispatch.enabled`: enable the role dispatcher and bounded native/external worker lifecycle;
   see [orchestration](orchestration.md) for profiles, plans, receipts and measurements.
+- `amp.enabled` (default `false`): on this machine, offer every dispatched worker an Amp orb
+  thread first, falling back to its listed profiles when an orb cannot take it; `amp.effort`
+  (default `medium`) picks the orb's Amp mode, and `amp.poll_seconds` (1 to 600, default 10)
+  sets how often a running thread is checked. Orbs start only through the dispatcher: `scripts/install-hooks.sh` denies
+  Claude Code running `amp -ox` directly and removes an older `Bash(amp -ox:*)` allow rule. See [Amp orb workers](orchestration.md#amp-orb-workers).
 - `sites.enabled`, `sites.url`, `sites.token_file`: Firebrik Sites publishing for `harness sites`;
   see [Publishing to Firebrik Sites](#publishing-to-firebrik-sites). Older files get this section's defaults.
 - `telemetry.enabled`: master collection switch; `jev`, `workflow` and
