@@ -89,4 +89,20 @@ sed -i.bak 's/^EXIT=0$/EXIT=1/' "$HARNESS_DB_ROOT/records/verify.state"
 "$ROOT/scripts/review.sh" --project "$PROJECT" > "$OUT" 2>&1 || :
 grep -q '^Verification reused: ' "$OUT" && fail "review reused a failing verify record"
 
+# 6. A same-size edit in the same second as the commit still changes the tree hash
+# (git re-reads such files only while the index copy keeps the index's time).
+i=0
+while [ "$i" -lt 25 ]; do
+  racy="$TMP_ROOT/racy-$i"
+  mkdir "$racy"
+  git -C "$racy" init -q
+  printf 'one\n' > "$racy/file.txt"
+  git -C "$racy" add file.txt
+  git -C "$racy" -c user.email=t@example.com -c user.name=t commit -q -m init
+  before=$(sh "$ROOT/scripts/tree-hash.sh" "$racy")
+  printf 'two\n' > "$racy/file.txt"
+  [ "$(sh "$ROOT/scripts/tree-hash.sh" "$racy")" != "$before" ] || fail "tree hash missed a same-second same-size edit (try $i)"
+  i=$((i + 1))
+done
+
 printf '%s\n' 'PASS: a passing verify run is reused by review and identical acceptance checks, and only for the same files'
