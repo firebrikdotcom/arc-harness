@@ -49,9 +49,11 @@ case "$INDEX" in
 esac
 TMP_INDEX=$(mktemp "${TMPDIR:-/tmp}/harness-tree-index.XXXXXX")
 trap 'rm -f "$TMP_INDEX"' EXIT HUP INT TERM
-# Starting from a copy of the real index lets git reuse its stat cache.
+# Starting from a copy of the real index lets git reuse its stat cache. The copy keeps
+# the index's modification time (-p): git re-reads any file changed in the same second
+# as the index was written, and a fresh copy time would hide a same-size edit.
 if [ -f "$INDEX" ]; then
-  cp "$INDEX" "$TMP_INDEX"
+  cp -p "$INDEX" "$TMP_INDEX"
 else
   rm -f "$TMP_INDEX"
 fi
