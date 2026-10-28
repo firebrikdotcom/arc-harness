@@ -54,14 +54,12 @@ PROJECT_ROOT=$(CDPATH='' cd "$PROJECT_ROOT" && pwd -P)
 # use the absolute CLI path, which now resolves its root from its own location.
 if [ "$PROJECT_ROOT" = "$HARNESS_ROOT" ]; then
   CLI="scripts/harness"
-  JG="scripts/jg.sh"
   DOCS="docs"
   TASKS="tasks"
   VERIFY="scripts/verify.sh"
   REVIEW="scripts/review.sh"
 else
   CLI="$HARNESS_ROOT/scripts/harness"
-  JG="$HARNESS_ROOT/scripts/jg.sh"
   DOCS="$HARNESS_ROOT/docs"
   TASKS="$HARNESS_ROOT/tasks"
   VERIFY="$HARNESS_ROOT/scripts/verify.sh"
@@ -87,15 +85,17 @@ $VERIFY --project .              # evidence: fails when no check ran
 $CLI build done                  # needs that verify on the current files and every acceptance command
 $CLI review start
 $REVIEW --project .              # writes a packet for an independent reviewer (fresh context)
-$CLI review submit findings.json # a person submits a fresh-context reviewer's verdict
+$CLI review submit findings.json # request receipt, then retry after chat approval
 $CLI review done                 # needs an approval of the current files; no non-goal path touched
 \`\`\`
 
 - Session start prints \`$CLI brief\`: this session's run (or the latest), its contract, any pause, recent steps, and the project map. Record steps with \`$CLI step --note "..."\`.
+- Run permitted commands yourself; use a persistent shell for test services, and do not ask the user to run commands in another terminal.
+- Submit once to request approval, show the independent findings, and ask for an \`approved\` (or \`approve review RUN_ID\`) chat reply; then retry the same submit command to consume the native receipt.
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: \`$CLI continue "<new approach>"\`. Abort is theirs.
-- Jev (TypeSafe) advice and the task launcher: $DOCS/jev-checkpoints.md, $DOCS/setup.md. \`$CLI jev status\` controls delegation. Ask Jev first, without picking your own answer beforehand; in active mode follow its recommendation when its confidence meets the threshold (default 70%), otherwise you decide. Deterministic rules and required checks decide first; no routine accuracy labels. See the checkpoint guide for receipt resolution. Semantic search: \`$JG --project PATH "question"\`.
+- Jev: see $DOCS/jev-checkpoints.md; ask first, and follow its recommendation when enabled and above threshold. Otherwise decide.
 - Role orchestration and judgment checkpoints: $DOCS/orchestration.md. Read it when \`dispatch.enabled\` or \`typesafe.enforce_decisions\` is enabled in the shared \`config.json\`; use the native bridge for supported models and the external launcher otherwise.
-- When both \`dispatch.enabled\` and \`amp.enabled\` are on in that \`config.json\`, consider Amp orbs first for subagent work: hand it to \`harness dispatch\` rather than spawning a native subagent directly. The dispatcher runs each worker in an orb and falls back to the listed profiles when an orb cannot take it ($DOCS/orchestration.md, "Amp orb workers"). Never start an orb with \`amp -ox\` yourself.
+- When dispatch and Amp are enabled, route worker agents through \`harness dispatch\`; see $DOCS/orchestration.md.
 $END_MARK
 BLOCK
 

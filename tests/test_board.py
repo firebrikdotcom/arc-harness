@@ -45,6 +45,7 @@ class BoardTests(unittest.TestCase):
     def setUp(self):
         # verify.sh exports HARNESS_BOARD=0 for nested runs; these tests exercise the board itself.
         self.saved_switch = os.environ.pop("HARNESS_BOARD", None)
+        self.saved_mapper = os.environ.pop("HARNESS_BOARD_MAPPER", None)
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name).resolve()
         self.db = base / "db"
@@ -72,6 +73,8 @@ class BoardTests(unittest.TestCase):
         self.tmp.cleanup()
         if self.saved_switch is not None:
             os.environ["HARNESS_BOARD"] = self.saved_switch
+        if self.saved_mapper is not None:
+            os.environ["HARNESS_BOARD_MAPPER"] = self.saved_mapper
 
     def project_state(self):
         return subprocess.run(["git", "-C", str(self.project), "status", "--porcelain", "--ignored"], capture_output=True, text=True).stdout

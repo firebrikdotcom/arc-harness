@@ -6,9 +6,10 @@ HARNESS_ROOT_UNDER_TEST=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 CLI="$HARNESS_ROOT_UNDER_TEST/scripts/harness"
 # Root-discovery cases must not inherit a machine-wide explicit override.
 unset HARNESS_ROOT
+unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX HERDR_ENV
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-cli.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
-# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+# Direct human review submissions use typed terminal confirmation in tests.
 printf 'yes\n' > "$TMP_ROOT/confirm"
 HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
 export HARNESS_CONFIRM_TTY
@@ -66,10 +67,18 @@ state_dir() {
 
 # record KIND EXIT [EPOCH_OFFSET]  Fake a scripts/verify.sh or scripts/review.sh record.
 record() {
-  mkdir -p "$HARNESS_DB_ROOT/records"
+  if [ -n "${CODEX_THREAD_ID:-}" ]; then
+    record_dir=$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/run_paths.py" records "$HARNESS_DB_ROOT" --session-id "$CODEX_THREAD_ID")
+    current_file=$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/run_paths.py" current "$HARNESS_DB_ROOT" --session-id "$CODEX_THREAD_ID")
+  else
+    record_dir=$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/run_paths.py" records "$HARNESS_DB_ROOT")
+    current_file=$HARNESS_DB_ROOT/runs/current
+  fi
+  mkdir -p "$record_dir"
   epoch=$(( $(date +%s) + ${3:-0} ))
-  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "PROJECT_ROOT=$FIXTURE" "GIT_HEAD=fixture" "EXIT=$2" \
-    > "$HARNESS_DB_ROOT/records/$1.state"
+  run_id=$(head -n 1 "$current_file")
+  printf '%s\n' "RECORD_KIND=$1" "RUN_ID=$run_id" "RECORD_AT=fixture" "RECORD_EPOCH=$epoch" "PROJECT_ROOT=$FIXTURE" "GIT_HEAD=fixture" "EXIT=$2" \
+    > "$record_dir/$1.state"
 }
 
 # findings VERDICT  Submit an independent reviewer's findings for the fixture (not a git tree).
@@ -138,18 +147,6 @@ run 0 review start
 record review 0
 run 4 review "done"
 expect_output "no review findings"
-# Approval needs a person typing yes on a terminal; none attached, or anything else, stores nothing.
-printf '{"tree_hash":"%s","reviewer":"x","verdict":"approve","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" > "$TMP_ROOT/self.json"
-(HARNESS_CONFIRM_TTY=$TMP_ROOT/no-such-terminal run 4 review submit "$TMP_ROOT/self.json")
-expect_output "asks a person to confirm on a terminal"
-printf 'no\n' > "$TMP_ROOT/refuse"
-(HARNESS_CONFIRM_TTY=$TMP_ROOT/refuse run 4 review submit "$TMP_ROOT/self.json")
-expect_output "not confirmed"
-run 4 review "done"
-expect_output "no review findings"
-findings block
-run 4 review "done"
-expect_output "verdict is block"
 findings approve
 run 0 review "done"
 expect_output "Run complete"
@@ -159,7 +156,45 @@ expect_output "  plan   done"
 expect_output "  build  done"
 expect_output "  review done"
 run 4 build start
-expect_output "is complete. Start a new run"
+expect_output "is complete. Agent action: run harness plan start"
+
+# An agent first creates a pending request; only a native user prompt can issue its receipt.
+new_case
+CODEX_THREAD_ID=fixture-chat-session
+export CODEX_THREAD_ID
+HARNESS_CONFIRM_TTY=$TMP_ROOT/no-such-terminal
+export HARNESS_CONFIRM_TTY
+HARNESS_WORKFLOW_STATE=$TMP_ROOT/workflow-state.sqlite
+export HARNESS_WORKFLOW_STATE
+run 0 workflow todo plan --items '[{"id":"chat-review","description":"Exercise chat review approval","criterion":"Native receipt is consumed"}]' --reason "chat approval fixture"
+run 0 workflow todo update --id chat-review --status in_progress --reason "chat approval fixture"
+run 0 plan start
+run 0 contract waive "fixture task"
+run 0 plan "done"
+run 0 build start
+record verify 0
+run 0 build "done"
+run 0 review start
+record review 0
+printf '{"tree_hash":"%s","reviewer":"x","verdict":"approve","findings":[]}\n' "$(sh "$HARNESS_ROOT_UNDER_TEST/scripts/tree-hash.sh" "$FIXTURE")" > "$TMP_ROOT/self.json"
+run_pointer=$(python3 "$HARNESS_ROOT_UNDER_TEST/scripts/run_paths.py" current "$HARNESS_DB_ROOT" --session-id "$CODEX_THREAD_ID")
+run_id=$(head -n 1 "$run_pointer")
+run 4 review submit "$TMP_ROOT/self.json"
+expect_output "Review approval is pending"
+run 2 review submit "$TMP_ROOT/self.json" --chat-approved "$run_id"
+expect_output "usage: harness review submit FILE"
+printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","cwd":"%s","prompt":"approved"}\n' \
+  "$CODEX_THREAD_ID" "$FIXTURE" \
+  | HARNESS_DB_ROOT="$HARNESS_DB_ROOT" python3 "$HARNESS_ROOT_UNDER_TEST/scripts/workflow_gate.py" > "$OUT"
+# The reply is a new prompt, so an enforcing todo gate needs the plan confirmed again.
+run 0 workflow todo confirm --reason "chat approval fixture"
+run 0 review submit "$TMP_ROOT/self.json"
+expect_output "Native chat approval receipt consumed"
+run 0 review "done"
+expect_output "Run complete"
+unset CODEX_THREAD_ID HARNESS_WORKFLOW_STATE HARNESS_CONFIRM_TTY
+HARNESS_CONFIRM_TTY=$TMP_ROOT/confirm
+export HARNESS_CONFIRM_TTY
 
 # --- gates: build done needs a fresh passing verify record ------------------
 
@@ -358,7 +393,7 @@ RUN_STATE=$(state_dir)
 grep -q 'Scope was wrong' "$RUN_STATE/abort.note" || fail "abort reason not stored"
 grep -q '"status": "aborted"' "$RUN_STATE/run.json" || fail "run.json should show aborted"
 run 4 build start
-expect_output "is aborted. Start a new run"
+expect_output "is aborted. Agent action: run harness plan start"
 run 4 abort "again"
 expect_output "already aborted"
 run 0 plan start

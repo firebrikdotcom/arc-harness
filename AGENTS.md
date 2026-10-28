@@ -31,7 +31,7 @@ Each rule is written here so you know the goal, and enforced by a gate so it hol
 | Work inside a phase; edit only in build. | The guard blocks Write, Edit, and shell writes outside build (plan and review may write `progress.md`, `tasks/`, `task.json`, `review-findings.json`). |
 | Every run has a bounded contract: deliverables, non-goals, acceptance commands. | `plan done` needs `harness contract set` (or a recorded `contract waive`). |
 | Done means evidence, not a claim. | `build done` needs a passing `scripts/verify.sh` on the current files (a run with no checks fails) and every acceptance command to pass. |
-| The author does not approve their own work. | `review done` needs an independent reviewer's approving findings for the current files, and no non-goal path touched. Findings come from the reviewer a person configured (`.harness-db/reviewer`) or are submitted by a person, who types `yes` on a terminal. |
+| The author does not approve their own work. | `review done` needs an independent reviewer's approving findings for the current files, and no non-goal path touched. After showing the findings, ask the user in chat to reply `approved` (or `approve review RUN_ID`); then the agent submits with that run-bound approval. |
 | Evidence is about this project. | Gates accept verify and review records only for the run's own project, and the guard refuses calls in a project other than the run's. |
 | Stop when the same failure repeats. | Two identical failures in a row pause the run; resuming needs the user and a new approach. |
 | Stay inside budgets. | Steps, loops, and continues are counted; a pause waits for the user. `abort` is the user's. |
@@ -52,6 +52,8 @@ ln -sf "$PWD/bin/codex-nohooks" ~/.local/bin/codex-nohooks
 
 ## Working style
 
+- Execute permitted harness commands and project commands yourself through the available shell tools; never ask the user to paste a command into another terminal just because a run is missing or a process needs to stay alive. Use a persistent tool session for long-running test services. Keep protected global settings human-controlled, but run a task-owned test wrapper yourself when it scopes a scratch setting to its child process. If a gate blocks a command, report the exact block and use its supported invocation.
+- For review submission, show the independent findings and ask for the chat reply `approved` (or `approve review RUN_ID`); only after that reply, run `review submit FILE --chat-approved RUN_ID` yourself. Terminal confirmation remains available for direct human submissions.
 - Follow existing patterns; keep the change to the contract's scope.
 - Preserve user changes and unrelated files.
 - Report exactly what ran and its result; say what was skipped.
@@ -70,15 +72,17 @@ scripts/verify.sh --project .              # evidence: fails when no check ran
 scripts/harness build done                  # needs that verify on the current files and every acceptance command
 scripts/harness review start
 scripts/review.sh --project .              # writes a packet for an independent reviewer (fresh context)
-scripts/harness review submit findings.json # a person submits a fresh-context reviewer's verdict
+scripts/harness review submit findings.json # request receipt, then retry after chat approval
 scripts/harness review done                 # needs an approval of the current files; no non-goal path touched
 ```
 
 - Session start prints `scripts/harness brief`: this session's run (or the latest), its contract, any pause, recent steps, and the project map. Record steps with `scripts/harness step --note "..."`.
+- Run permitted commands yourself; use a persistent shell for test services, and do not ask the user to run commands in another terminal.
+- Submit once to request approval, show the independent findings, and ask for an `approved` (or `approve review RUN_ID`) chat reply; then retry the same submit command to consume the native receipt.
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: `scripts/harness continue "<new approach>"`. Abort is theirs.
-- Jev (TypeSafe) advice and the task launcher: docs/jev-checkpoints.md, docs/setup.md. `scripts/harness jev status` controls delegation. Ask Jev first, without picking your own answer beforehand; in active mode follow its recommendation when its confidence meets the threshold (default 70%), otherwise you decide. Deterministic rules and required checks decide first; no routine accuracy labels. See the checkpoint guide for receipt resolution. Semantic search: `scripts/jg.sh --project PATH "question"`.
+- Jev: see docs/jev-checkpoints.md; ask first, and follow its recommendation when enabled and above threshold. Otherwise decide.
 - Role orchestration and judgment checkpoints: docs/orchestration.md. Read it when `dispatch.enabled` or `typesafe.enforce_decisions` is enabled in the shared `config.json`; use the native bridge for supported models and the external launcher otherwise.
-- When both `dispatch.enabled` and `amp.enabled` are on in that `config.json`, consider Amp orbs first for subagent work: hand it to `harness dispatch` rather than spawning a native subagent directly. The dispatcher runs each worker in an orb and falls back to the listed profiles when an orb cannot take it (docs/orchestration.md, "Amp orb workers"). Never start an orb with `amp -ox` yourself.
+- When dispatch and Amp are enabled, route worker agents through `harness dispatch`; see docs/orchestration.md.
 <!-- harness-cli:end -->
 
 <!-- shared-rule:lavish-sequential-review:start -->

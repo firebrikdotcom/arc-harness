@@ -3,9 +3,10 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
 SOURCE_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
+unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX HERDR_ENV
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-hook.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
-# review submit asks for a typed confirmation on a terminal; tests answer from a file.
+# Human review submission asks for typed terminal confirmation; tests answer from a file.
 printf 'yes\n' > "$TMP_ROOT/confirm"
 HARNESS_CONFIRM_TTY="$TMP_ROOT/confirm"
 export HARNESS_CONFIRM_TTY
@@ -22,7 +23,7 @@ cp "$SOURCE_ROOT/scripts/run-paths.sh" "$SOURCE_ROOT/scripts/run_paths.py" "$HAR
 cp "$SOURCE_ROOT/scripts/workflow_audit.py" "$SOURCE_ROOT/scripts/hook_input.py" "$SOURCE_ROOT/scripts/workflow_todos.py" "$SOURCE_ROOT/scripts/audit_transport.py" "$SOURCE_ROOT/scripts/harness_config.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/verify.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/verify.sh"
 cp "$SOURCE_ROOT/scripts/permit.sh" "$SOURCE_ROOT/scripts/permit.py" "$SOURCE_ROOT/scripts/guard-version" "$HARNESS_ROOT_UNDER_TEST/scripts/"
-cp "$SOURCE_ROOT/scripts/review_findings.py" "$SOURCE_ROOT/scripts/tree-hash.sh" "$SOURCE_ROOT/scripts/task_contract.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
+cp "$SOURCE_ROOT/scripts/review_findings.py" "$SOURCE_ROOT/scripts/review_approval.py" "$SOURCE_ROOT/scripts/tree-hash.sh" "$SOURCE_ROOT/scripts/task_contract.py" "$HARNESS_ROOT_UNDER_TEST/scripts/"
 cp "$SOURCE_ROOT/scripts/knowledge-trust.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/knowledge-trust.sh"
 cp "$SOURCE_ROOT/scripts/hooks/require-phase.sh" "$HARNESS_ROOT_UNDER_TEST/scripts/hooks/require-phase.sh"
 cp "$SOURCE_ROOT/schemas/denylist.default" "$HARNESS_ROOT_UNDER_TEST/schemas/denylist.default"
@@ -73,7 +74,7 @@ expect_output() {
 # record KIND EXIT  Fake a verify or review record so phases can close.
 record() {
   mkdir -p "$HARNESS_DB_ROOT/records"
-  printf '%s\n' "RECORD_KIND=$1" "RECORD_AT=fixture" "RECORD_EPOCH=$(date +%s)" "PROJECT_ROOT=$H" "GIT_HEAD=fixture" "EXIT=$2" \
+  printf '%s\n' "RECORD_KIND=$1" "RUN_ID=$(head -n 1 "$HARNESS_DB_ROOT/runs/current")" "RECORD_AT=fixture" "RECORD_EPOCH=$(date +%s)" "PROJECT_ROOT=$H" "GIT_HEAD=fixture" "EXIT=$2" \
     > "$HARNESS_DB_ROOT/records/$1.state"
 }
 
@@ -129,13 +130,13 @@ for spelled in "$H/docs/../scripts/hooks/require-phase.sh" "$H//scripts/hooks/re
 done
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/knowledge-trust.sh approve"}}'
 expect_output "not for the agent"
-# The repeated-failure counter and review approval are not the agent's, alone or chained.
+# The repeated-failure counter is not the agent's, alone or chained; review submit reaches
+# the CLI, which requires a native chat receipt or a direct human terminal confirmation.
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness failure clear --command-key abc"}}'
 expect_output "not for the agent"
 hook 2 '{"tool_name":"Bash","tool_input":{"command":"true && scripts/harness failure clear --command-key abc"}}'
 expect_output "not for the agent"
-hook 2 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness review submit /tmp/f.json"}}'
-expect_output "not for the agent"
+hook 0 '{"tool_name":"Bash","tool_input":{"command":"scripts/harness review submit /tmp/f.json"}}'
 
 # Shell writes to the guard are judged by their real targets, however the path is
 # spelled; the denylist runs before the phase check, so each says "denied command".

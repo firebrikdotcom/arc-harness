@@ -147,7 +147,7 @@ allow_cmd "$(printf "cat > notes.md <<'EOF'\nrm -f %s\nEOF" "$H")"
 # Human-only commands and guard settings are judged on the parsed argv, so
 # quoting, option order, or a quoted assignment cannot hide them (second review).
 # shellcheck disable=SC2016 # the variables are part of the commands under test
-for command in "scripts/harness 'review' submit f.json" 'scripts/harness "abort"' 'scripts/harness fail""ure clear --command-key a' \
+for command in 'scripts/harness "abort"' 'scripts/harness fail""ure clear --command-key a' \
   'scripts/harness --session-id abc abort' 'scripts/harness launch --state t.json --default-command c.json' \
   'env "HARNESS_REVIEWER_CMD=cp /tmp/f.json $2" scripts/review.sh' "env 'HARNESS_HOOK_DISABLE=1' true" \
   'export HARNESS_REVIEWER_""CMD=x' 'export HARNESS_REVIEW_BASE=HEAD'; do
@@ -156,8 +156,7 @@ done
 allow_cmd 'HARNESS_SESSION_ID= CLAUDE_CODE_SESSION_ID= sh tests/x.sh'
 # Launchers, append assignments, and setter builtins (third review).
 # shellcheck disable=SC2016 # the variables are part of the commands under test
-for command in "bash scripts/harness 'review' submit f.json" "sh scripts/harness 'abort'" 'echo review submit f | xargs scripts/harness' \
-  "find f -exec scripts/harness 'review' submit {} \\;" '. ./scripts/harness review submit f' 'watch scripts/harness abort' \
+for command in "sh scripts/harness 'abort'" 'watch scripts/harness abort' \
   "bash scripts/knowledge-trust.sh 'approve'" "HARNESS_REVIEWER_CMD+='cp f.json \"\$2\"' scripts/review.sh" \
   'export HARNESS_REVIEW_BASE+=x' 'set -a; read -r HARNESS_REVIEWER_CMD <<< zz; scripts/review.sh' \
   'printf -v HARNESS_DB_ROOT %s /tmp' 'find scripts -exec rm {} \;'; do
@@ -173,7 +172,7 @@ done
 # shellcheck disable=SC2016 # the variables are part of the commands under test
 for command in "scripts/harnes? 'review' submit f.json" "scripts/h*ss 'abort'" 'h=scripts/harness; $h abort' \
   'find scripts -name harness -exec {} abort \;' "bash -c 'exec \"\$0\" abort' scripts/harness" \
-  "script -qc 'scripts/harness review submit f' /dev/null" 'flock /tmp/l scripts/harness abort' 'parallel scripts/harness ::: abort' \
+  'flock /tmp/l scripts/harness abort' 'parallel scripts/harness ::: abort' \
   "set -a; for HARNESS_REVIEWER_CMD in 'cp f \$2'; do scripts/review.sh; done" 'set -a; declare -n r=HARNESS_REVIEWER_CMD; r=x' \
   ': "${HARNESS_REVIEWER_CMD:=x}"; scripts/review.sh' 'printf -vHARNESS_REVIEW_BASE %s HEAD' 'export HARNESS_CONFIRM_TTY=/tmp/yes' \
   'find .harness-db -exec env rm -rf {} +' 'find scripts/hooks -exec nice rm {} +' 'find scripts/hooks -exec busybox rm {} +' \
@@ -195,9 +194,11 @@ call_kind() {
 }
 call_kind pass 'scripts/harness status'
 call_kind pass 'scripts/harness review start'
+call_kind pass 'scripts/harness review submit f.json'
+call_kind pass 'scripts/harness review submit f.json --chat-approved abc123'
 call_kind pass 'scripts/harness --session-id abc status'
 call_kind pass 'scripts/harness workflow todo show --session-id abc'
-call_kind human "scripts/harness 'review' submit f.json"
+call_kind pass "scripts/harness 'review' submit f.json"
 call_kind human 'scripts/harness --session-id abc abort'
 call_kind human 'true && scripts/harness launch --state t.json'
 call_kind no 'scripts/harness budget --thread x --tokens 5'

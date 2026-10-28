@@ -5,6 +5,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd -P)
+unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX HERDR_ENV
 ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-contract.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM

@@ -107,7 +107,7 @@ def check(path: Path, project: str, contract: Path | None = None) -> int:
         findings = validate(data)
     except FileNotFoundError:
         print(f"FAIL: no review findings at {path}.")
-        print("Hand the review packet to an independent reviewer and submit its JSON: harness review submit FILE")
+        print("Hand the review packet to an independent reviewer, submit once to request approval, show the findings, ask for 'approved' (or 'approve review RUN_ID') in chat, then retry the same submit command.")
         return 1
     except (ValueError, OSError) as error:
         print(f"FAIL: review findings are malformed: {error}")

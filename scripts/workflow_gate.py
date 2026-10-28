@@ -13,6 +13,7 @@ import uuid
 import hook_input
 import permit
 import workflow_audit as audit
+import review_approval
 from workflow_todos import assert_plan, waiver_active, gate_mode
 
 READ_TOOLS = {"StructuredOutput", "Read", "Grep", "Glob", "read_file", "list_dir", "update_plan", "request_user_input", "request_user_input_async", "webrun", "web.run", "web__run"}
@@ -74,7 +75,7 @@ def management_segment(words, cwd, sid=None, *, decision_bookkeeping=False):
         if sub == "dispatch":
             return second in ("status", "cancel") or (decision_bookkeeping and second == "create")
         if sub == "review":
-            return second in ("start", "done")
+            return second in ("start", "done", "submit")
         if sub == "jev":
             return second == "status"
         return sub in TODO_FREE
@@ -263,6 +264,28 @@ def authorize(payload):
         if not context.get("orchestration_project") and payload.get("cwd"):
             context["orchestration_project"] = str(Path(payload["cwd"]).resolve())
         mode = gate_mode(payload.get("cwd") or context.get("orchestration_project"))
+        native_prompt = None
+        native_prompt_at = None
+        if event == "UserPromptSubmit" and not runtime_notice(payload):
+            native_prompt = payload.get("prompt")
+        elif event == "PreToolUse" and "prompt" not in payload:
+            # Codex has no user-prompt hook, so read the host-written rollout
+            # record on the next native tool event in every gate mode.
+            native_prompt = codex_prompt(sid, context)
+            native_prompt_at = context.get("codex_prompt_at")
+        if isinstance(native_prompt, str) and payload.get("cwd"):
+            try:
+                review_approval.capture_prompt(
+                    harness_root=audit.ROOT,
+                    base_db=Path(os.environ.get("HARNESS_DB_ROOT") or audit.ROOT / ".harness-db"),
+                    project=payload["cwd"],
+                    session_id=sid,
+                    prompt=native_prompt,
+                    prompt_at=native_prompt_at,
+                )
+            except (OSError, ValueError, KeyError):
+                # Approval capture fails closed; it must not block ordinary work.
+                pass
         if event == "UserPromptSubmit" and context.get("request_id") and runtime_notice(payload):
             # A background task finishing is not a new request from the person:
             # the current prompt, its confirmed plan, and its role plan carry on.
@@ -289,10 +312,8 @@ def authorize(payload):
             print(f"Todo gate: confirm (todo confirm), revise (todo plan), or exempt (todo exempt, for a question) the plan for this prompt "
                   f"via {audit.ROOT}/scripts/harness workflow todo ... --session-id {sid} --reason TEXT; reads need no todo.")
         elif event == "PreToolUse":
-            if mode == "enforce" and "prompt" not in payload:
-                latest = codex_prompt(sid, context)
-                if latest is not None:
-                    waiver_prompt(latest, context, sid)
+            if mode == "enforce" and native_prompt is not None:
+                waiver_prompt(native_prompt, context, sid)
             tool = payload.get("tool_name", "")
             readonly = tool in READ_TOOLS or any(tool.endswith("__"+name) for name in GRAPH_READS) or configured_read_tool(tool)
             if (readonly and tool != "StructuredOutput") or management_command(payload, reads_only=True):

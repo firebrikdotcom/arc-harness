@@ -48,7 +48,7 @@ grep -q 'step tool:' "$OUT" && fail "brief should hide per-tool step noise"
 
 # A new session sees the latest run but is told to start its own.
 HARNESS_SESSION_ID=b h brief || fail "brief failed"
-grep -q '^No run in this session yet (harness plan start). Latest run: .*(paused' "$OUT" || fail "a new session should see the latest run as context only"
+grep -q '^No run in this session yet. Agent action: run harness plan start in this session. Latest run: .*(paused' "$OUT" || fail "a new session should see the latest run as context only"
 
 # Retention: plan start keeps the newest N runs and never archives a live one.
 for n in 1 2 3; do

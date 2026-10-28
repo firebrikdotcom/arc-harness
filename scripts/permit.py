@@ -165,7 +165,7 @@ def git_path(root: Path, flag: str) -> str:
 
 
 def our_script(word: str, target: str, cwd: str | Path, root: Path | None = None) -> bool:
-    """True when word names this harness's script `target` in this checkout or a git worktree of it."""
+    """True when word names this harness's script in this checkout, a worktree, or installed runtime."""
     root = Path(root or HARNESS_ROOT)
     if "/" in word:
         located = word if os.path.isabs(word) else os.path.join(str(cwd), word)
@@ -176,10 +176,28 @@ def our_script(word: str, target: str, cwd: str | Path, root: Path | None = None
             return False
     try:
         resolved = os.path.realpath(located)
-        expected = os.path.realpath(root / target)
+        expected_paths = {os.path.realpath(root / target)}
+        if target == "scripts/harness":
+            installed_roots = []
+            configured_home = os.environ.get("HARNESS_HOME")
+            if configured_home:
+                installed_roots.append(configured_home)
+            config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            root_file = config_home / "harness" / "root"
+            try:
+                configured_root = root_file.read_text(encoding="utf-8").strip()
+                if configured_root:
+                    installed_roots.append(configured_root)
+            except OSError:
+                pass
+            for installed_root in installed_roots:
+                candidate = Path(installed_root) / target
+                if (candidate.is_file()
+                        and (Path(installed_root) / "scripts" / "guard-version").is_file()):
+                    expected_paths.add(os.path.realpath(candidate))
     except OSError:
         return False
-    if resolved == expected:
+    if resolved in expected_paths:
         return True
     rel = target.replace("\\", "/")
     if not resolved.replace("\\", "/").endswith("/" + rel):
@@ -242,7 +260,7 @@ def human_only(argv: list[str]) -> str | None:
     name = os.path.basename(argv[0]) if argv else ""
     if name == "harness":
         sub, second, _ = harness_subcommand(argv)
-        if sub in HUMAN_ONLY or (sub == "review" and second == "submit"):
+        if sub in HUMAN_ONLY:
             return f"harness {sub}{' ' + second if sub == 'review' else ''}"
     if name == "knowledge-trust.sh" and "approve" in argv[1:]:
         return "knowledge-trust approve"
@@ -882,7 +900,8 @@ def harness_call(command: str, project: Path, cwd: str) -> str:
         # aimed at another session are judged like every command. --session-id
         # naming this session is allowed so workflow todo works before a phase.
         sub, second, _session = harness_subcommand(argv)
-        if sub not in PASSABLE or (sub == "review" and second not in ("start", "done")):
+        review_submit = sub == "review" and second == "submit"
+        if sub not in PASSABLE or (sub == "review" and second not in ("start", "done") and not review_submit):
             return "no"
         if not own_session(argv, os.environ.get("HARNESS_SESSION_ID")):
             return "no"

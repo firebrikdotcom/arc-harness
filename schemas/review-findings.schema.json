@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Independent review findings",
-  "description": "Written by a reviewer in a fresh context from the packet scripts/review.sh produces, submitted with `harness review submit FILE`, and required by `harness review done`. scripts/review_findings.py enforces it.",
+  "description": "Written by a reviewer in a fresh context from the packet scripts/review.sh produces, submitted with `harness review submit FILE` after terminal confirmation or a one-time receipt from a native user-prompt hook bound to the run, findings file, and project tree, and required by `harness review done`. scripts/review_findings.py enforces it.",
   "type": "object",
   "additionalProperties": false,
   "required": ["tree_hash", "reviewer", "verdict", "findings"],

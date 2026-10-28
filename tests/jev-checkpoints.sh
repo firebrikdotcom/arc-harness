@@ -7,7 +7,7 @@ ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$ROOT"
 # The fixtures use the legacy run and record paths and model a human at a terminal: the caller's
 # native session must not move them, and its agent markers must not wake the todo gate.
-unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX || true
+unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX HERDR_ENV || true
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/harness-jev.XXXXXX")
 trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
 # review submit asks for a typed confirmation on a terminal; tests answer from a file.

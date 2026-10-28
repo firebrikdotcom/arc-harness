@@ -31,9 +31,13 @@ usage() {
   info "Independent reviews can take several minutes; when a reviewer is configured,"
   info "run review.sh in the background or with a long tool timeout."
   info "The diff includes commits since HARNESS_REVIEW_BASE, else since the run's plan."
-  info "Otherwise hand the packet to a reviewer in a fresh context and submit its JSON"
-  info "with: harness review submit FILE. 'harness review done' requires an approving"
-  info "verdict for the current files (schemas/review-findings.schema.json)."
+  info "Otherwise hand the packet to a reviewer in a fresh context; after it returns"
+  info "findings, run harness review submit FILE once to request approval, then show the"
+  info "findings and ask the user to reply 'approved' (or 'approve review RUN_ID') in chat."
+  info "Retry the same submit command; the native hook records a one-time receipt."
+  info "A person may also submit directly and confirm yes in a terminal."
+  info "'harness review done' requires an approving verdict for the current files"
+  info "(schemas/review-findings.schema.json)."
 }
 
 while [ "$#" -gt 0 ]; do
@@ -322,7 +326,10 @@ if [ -n "$reviewer_cmd" ]; then
 else
   info "Independent review: hand the packet to a reviewer in a fresh context (a subagent, or"
   info "claude -p / codex exec) that writes JSON per schemas/review-findings.schema.json, then"
-  info "submit it: scripts/harness review submit FILE. 'harness review done' needs its approval."
+  info "first run 'scripts/harness review submit FILE' to request approval, show its findings,"
+  info "and ask for 'approved' (or 'approve review $run_id') in chat; retry that submit after the native hook"
+  info "records a one-time receipt. A person may also submit and type yes in a terminal."
+  info "'harness review done' needs an approving verdict for the current files."
 fi
 
 # Write the KEY=VALUE record that `scripts/harness review done` requires.

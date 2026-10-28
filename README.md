@@ -37,13 +37,15 @@ scripts/harness build done
 
 scripts/harness review start
 scripts/review.sh                          # writes the packet for an independent reviewer
-scripts/harness review submit findings.json
+scripts/harness review submit findings.json # request approval, then retry after chat approval
 scripts/harness review done
 ```
 
 You cannot build before plan is done. You cannot review before build is done. Edits are allowed only in build.
 
 `plan done` needs a task contract (or a recorded waiver). `build done` needs a passing `scripts/verify.sh` on the current files, where at least one check ran, and every acceptance command in the contract (a `make` target that only repeats that verify run's checks on the same files is counted from it). `review done` needs an independent reviewer's approving findings for the current files and no change in a non-goal path. The same command failing the same way twice pauses the run. See "Gates that decide done" in `docs/setup.md`.
+
+After the independent reviewer returns findings, the agent submits once to create a run and findings bound approval request, shows the findings, and asks for an `approved` (or `approve review RUN_ID`) chat reply; a native user-prompt hook records a one-time receipt, and retrying the same submit command stores the findings without a terminal handoff.
 
 If it stops you: `scripts/harness status`. An agent may run `scripts/harness continue "<evaluation note>"` only after the user has explicitly instructed continuation in the current chat; record that authorization in the required evaluation note (for example, `User explicitly requested continuation in chat.`). Only a human may abort a run or approve a `knowledge/` folder. The CLI exits `3` for a pause and `4` for a phase-order or gate violation. A continuation extends the tripped budget by one window and is capped by `HARNESS_BUDGET_CONTINUES` (default: three).
 

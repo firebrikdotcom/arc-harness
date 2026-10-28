@@ -7,8 +7,9 @@ set -eu
 #      run and a new session cannot inherit another session's phase;
 #   2. lets one plain call of this harness's own CLI through (scripts/harness ...,
 #      scripts/action.sh validate ...; permit.py harness-call decides), and refuses
-#      the commands that are not the agent's, alone or chained: abort, review
-#      submit, the repeated-failure counter, and knowledge-trust approve.
+#      the commands that are not the agent's, alone or chained: abort, the
+#      repeated-failure counter, and knowledge-trust approve; review submit is
+#      checked by the CLI against a native one-time receipt or terminal approval.
 #      An agent may invoke continue only after an explicit user instruction in the
 #      current conversation; that conversation-level authorization is enforced by
 #      the agent instructions, not inspectable from this hook payload;
@@ -128,7 +129,7 @@ if [ "$tool_name" = "Bash" ]; then
     esac
   fi
   case "$kind" in
-    human) block "abort, review submit, the repeated-failure counter, and knowledge-trust approve are not for the agent: a person runs them (e.g. with the ! prefix), or the configured reviewer submits." ;;
+  human) block "abort, the repeated-failure counter, and knowledge-trust approve are not for the agent; review submit is allowed only when the CLI can verify approval." ;;
     pass) exit 0 ;;
   esac
 fi
@@ -203,14 +204,14 @@ phase=$(printf '%s\n' "$status_out" | sed -n 's/^Phase:[[:space:]]*//p' | head -
 case "$run_status" in
   active) ;;
   paused) block "the harness run is paused ($(printf '%s\n' "$status_out" | sed -n 's/^Paused on:[[:space:]]*//p' | head -n 1)); wait for an explicit user instruction in this conversation, then run: scripts/harness continue \"<evaluation note>\"." ;;
-  stale) block "the harness run has been idle too long and is stale; start a new one with: scripts/harness plan start." ;;
-  complete) block "the harness run is complete; start a new one with: scripts/harness plan start." ;;
-  aborted|expired) block "the harness run was $run_status; start a new one with: scripts/harness plan start." ;;
-  *) block "no harness run exists for this session ($tool_name). Open a phase first: scripts/harness plan start." ;;
+  stale) block "the harness run has been idle too long and is stale; agent action: start a new one with scripts/harness plan start in this session." ;;
+  complete) block "the harness run is complete; agent action: start a new one with scripts/harness plan start in this session." ;;
+  aborted|expired) block "the harness run was $run_status; agent action: start a new one with scripts/harness plan start in this session." ;;
+  *) block "no harness run exists for this session ($tool_name). Agent action: open one with scripts/harness plan start in this session." ;;
 esac
 case "$phase" in
   plan|build|review) ;;
-  *) block "no phase is active (phase=$phase). Open one first: scripts/harness plan start." ;;
+  *) block "no phase is active (phase=$phase). Agent action: open one with scripts/harness plan start in this session." ;;
 esac
 
 # The run's evidence must be about the project this call works in.

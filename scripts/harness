@@ -71,7 +71,8 @@ usage() {
   info "  plan start|done      Open or close the planning phase."
   info "  build start|done     Open or close the build phase (needs plan done)."
   info "  review start|done    Open or close the review phase (needs build done)."
-  info "  review submit FILE   Store an independent reviewer's findings for review done."
+  info "  review submit FILE"
+  info "                       Store independent findings after a native chat receipt or terminal approval."
   info "  contract set FILE | waive REASON | show"
   info "                       The run's task contract (schemas/task.schema.json); plan done needs it."
   info "  step [--note TEXT] [--tokens N]"
@@ -471,7 +472,7 @@ load_current_run() {
 
 require_run() {
   if ! load_current_run; then
-    info "FAIL: no harness run exists. Start one with: harness plan start"
+    info "FAIL: no harness run exists. Agent action: run harness plan start in this session."
     exit "$EXIT_PHASE"
   fi
 }
@@ -529,7 +530,7 @@ display_status() {
 refuse_stale_run() {
   if run_is_stale; then
     info "FAIL: run $(state_get RUN_ID) has been idle for more than $(idle_cap_hours) hours and is stale."
-    info "Start a new run: harness plan start"
+    info "Agent action: start a new run with harness plan start in this session."
     exit "$EXIT_PHASE"
   fi
 }
@@ -659,7 +660,7 @@ cmd_brief() {
     _mine=0
     _latest=$(latest_run_id)
     if [ -z "$_latest" ] || [ ! -f "$RUNS_DIR/$_latest/state" ]; then
-      info "Harness: no runs yet for $TARGET_ROOT. Start with: harness plan start"
+      info "Harness: no runs yet for $TARGET_ROOT. Agent action: run harness plan start in this session."
       [ -f "$_map" ] && info "Project map: $_map"
       return 0
     fi
@@ -670,7 +671,7 @@ cmd_brief() {
   if [ "$_mine" = "1" ]; then
     info "This session's run: $_summary"
   else
-    info "No run in this session yet (harness plan start). Latest run: $_summary"
+    info "No run in this session yet. Agent action: run harness plan start in this session. Latest run: $_summary"
   fi
   if [ -f "$(contract_file)" ] && has_cmd python3; then
     python3 - "$(contract_file)" <<'PY' 2>/dev/null || :
@@ -1038,6 +1039,14 @@ run_target() {
   state_get RUN_TARGET "$TARGET_ROOT"
 }
 
+agent_runtime() {
+  [ -n "${CODEX_THREAD_ID:-}${CLAUDE_SESSION_ID:-}${CLAUDE_CODE_SESSION_ID:-}${CLAUDECODE:-}${CODEX_SANDBOX:-}" ] || [ "${HERDR_ENV:-0}" = "1" ]
+}
+
+approval_session_id() {
+  printf '%s\n' "${HARNESS_SESSION_ID:-${CODEX_THREAD_ID:-${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}}"
+}
+
 physical_dir() {
   if [ -n "$1" ] && [ -d "$1" ]; then
     (CDPATH='' cd "$1" && pwd -P)
@@ -1065,7 +1074,12 @@ require_review_findings() {
 }
 
 cmd_review_submit() {
-  if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+  if [ "$#" -ne 1 ]; then
+    info "FAIL: usage: harness review submit FILE. Chat approval is accepted only from a native user-prompt event."
+    exit "$EXIT_USAGE"
+  fi
+  _findings=$1
+  if [ ! -f "$_findings" ]; then
     info "FAIL: review submit needs one findings file (schemas/review-findings.schema.json)."
     exit "$EXIT_USAGE"
   fi
@@ -1078,27 +1092,41 @@ cmd_review_submit() {
   fi
   has_cmd python3 || { info "FAIL: python3 is required to check review findings."; exit "$EXIT_USAGE"; }
   _status=0
-  python3 "$SCRIPT_DIR/review_findings.py" check --findings "$1" --project "$(review_project)" || _status=$?
+  python3 "$SCRIPT_DIR/review_findings.py" check --findings "$_findings" --project "$(review_project)" || _status=$?
   if [ "$_status" -ge 2 ]; then
     exit "$EXIT_PHASE"
   fi
-  # Approval is a person's act, whatever the command's spelling: it is confirmed
-  # on a terminal, which an agent's shell does not have.
-  _tty=${HARNESS_CONFIRM_TTY:-/dev/tty}
-  if ! ( : < "$_tty" ) 2>/dev/null; then
-    info "FAIL: review submit asks a person to confirm on a terminal, and none is attached."
-    info "Run it in your own terminal: $SCRIPT_DIR/harness review submit $1"
-    exit "$EXIT_PHASE"
+  _chat_approval=0
+  if agent_runtime; then
+    _approval_session=$(approval_session_id)
+    if [ -z "$_approval_session" ]; then
+      info "FAIL: this agent runtime has no native session ID; chat approval cannot be verified."
+      exit "$EXIT_PHASE"
+    fi
+    _approval_status=0
+    python3 "$SCRIPT_DIR/review_approval.py" request \
+      --db-root "$DB_ROOT" --session-id "$_approval_session" --run-id "$(state_get RUN_ID)" \
+      --findings "$_findings" --project "$(review_project)" --harness-root "$SCRIPT_HARNESS_ROOT" || _approval_status=$?
+    if [ "$_approval_status" -ne 0 ]; then
+      exit "$_approval_status"
+    fi
+    _chat_approval=1
+  else
+    _tty=${HARNESS_CONFIRM_TTY:-/dev/tty}
+    if ! ( : < "$_tty" ) 2>/dev/null; then
+      info "FAIL: review submit needs a native user approval receipt or a person's terminal confirmation."
+      exit "$EXIT_PHASE"
+    fi
+    printf 'Store these findings as the independent review of run %s? Type yes: ' "$(state_get RUN_ID)" >&2
+    _answer=""
+    read -r _answer < "$_tty" || :
+    if [ "$_answer" != "yes" ]; then
+      info "FAIL: not confirmed; nothing was stored."
+      exit "$EXIT_PHASE"
+    fi
   fi
-  printf 'Store these findings as the independent review of run %s? Type yes: ' "$(state_get RUN_ID)" >&2
-  _answer=""
-  read -r _answer < "$_tty" || :
-  if [ "$_answer" != "yes" ]; then
-    info "FAIL: not confirmed; nothing was stored."
-    exit "$EXIT_PHASE"
-  fi
-  # The lock is taken only now, so the guard never waits on a person typing;
-  # the run may have changed while they did.
+  # The lock is taken only after approval, so the guard never waits on a person;
+  # the run may have changed while the user replied.
   _submit_run=$(state_get RUN_ID)
   lock_run
   if [ "$(state_get RUN_ID)" != "$_submit_run" ] || [ "$(state_get RUN_STATUS)" != "active" ] || [ "$(phase_status review)" != "active" ]; then
@@ -1107,11 +1135,25 @@ cmd_review_submit() {
   fi
   refuse_stale_run
   mkdir -p "$RECORDS_DIR"
-  cp "$1" "$RECORDS_DIR/review-findings.json.tmp.$$"
+  cp "$_findings" "$RECORDS_DIR/review-findings.json.tmp.$$"
+  if [ "$_chat_approval" -eq 1 ]; then
+    _approval_status=0
+    python3 "$SCRIPT_DIR/review_approval.py" consume \
+      --db-root "$DB_ROOT" --session-id "$_approval_session" --run-id "$_submit_run" \
+      --findings "$_findings" --project "$(review_project)" --harness-root "$SCRIPT_HARNESS_ROOT" || _approval_status=$?
+    if [ "$_approval_status" -ne 0 ]; then
+      rm -f "$RECORDS_DIR/review-findings.json.tmp.$$"
+      exit "$_approval_status"
+    fi
+  fi
   mv "$RECORDS_DIR/review-findings.json.tmp.$$" "$RECORDS_DIR/review-findings.json"
   count_step
   write_run_json
-  log_event "review findings submitted (check exit $_status)"
+  if [ "$_chat_approval" -eq 1 ]; then
+    log_event "review findings submitted with a consumed native chat approval receipt (check exit $_status)"
+  else
+    log_event "review findings submitted after terminal approval (check exit $_status)"
+  fi
   info "Findings stored: $RECORDS_DIR/review-findings.json"
 }
 
@@ -1168,7 +1210,7 @@ cmd_phase_start() {
         if [ "$_phase" = "plan" ]; then
           create_run
         else
-          info "FAIL: run $(state_get RUN_ID) is $_run_status. Start a new run: harness plan start"
+          info "FAIL: run $(state_get RUN_ID) is $_run_status. Agent action: run harness plan start in this session."
           exit "$EXIT_PHASE"
         fi
         ;;
@@ -1287,12 +1329,12 @@ cmd_phase_done() {
       ;;
     build)
       if [ -f "$REVIEW_OFF_FILE" ]; then
-        info "Review is off ($REVIEW_OFF_FILE): run complete. Next: harness plan start opens a new run."
+        info "Review is off ($REVIEW_OFF_FILE): run complete. Agent action: harness plan start opens the next run in this session."
       else
         info "Next: harness review start"
       fi
       ;;
-    review) info "Run complete. Next: harness plan start opens a new run." ;;
+    review) info "Run complete. Agent action: harness plan start opens the next run in this session." ;;
   esac
   check_budgets
 }
@@ -1333,7 +1375,7 @@ cmd_step() {
   block_when_paused
 
   if [ "$(state_get CURRENT_PHASE)" = "none" ]; then
-    info "FAIL: no phase is active. Start one first: harness plan start"
+    info "FAIL: no phase is active. Agent action: run harness plan start in this session."
     exit "$EXIT_PHASE"
   fi
 
@@ -1506,7 +1548,7 @@ cmd_abort() {
   log_event "abort"
 
   info "OK: run $(state_get RUN_ID) aborted. Reason stored in $RUN_DIR/abort.note"
-  info "Next: harness plan start opens a new run."
+  info "Next agent action: harness plan start opens a new run in this session."
 }
 
 # --- status -----------------------------------------------------------------
@@ -1533,7 +1575,7 @@ cmd_status() {
     else
       info "Harness root: $ROOT"
       info "State root:   $DB_ROOT"
-      info "Run:          none. Start one with: harness plan start"
+      info "Run:          none. Agent action: run harness plan start in this session."
     fi
     return 0
   fi
@@ -1547,7 +1589,7 @@ cmd_status() {
   info "State root:   $DB_ROOT"
   info "Run:          $(state_get RUN_ID) ($(display_status))"
   if run_is_stale; then
-    info "Stale:        idle for more than $(idle_cap_hours) hours; harness plan start replaces it"
+    info "Stale:        idle for more than $(idle_cap_hours) hours; agent action: harness plan start replaces it"
   fi
   info "Run state:    $RUN_DIR"
   info "Target:       $(run_target)"
