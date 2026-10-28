@@ -95,6 +95,12 @@ deny_path 'certs/server.pem'
 deny_path "$HOME/.ssh/authorized_keys"
 deny_path '.claude/settings.json'
 deny_path "$HOME/.claude/CLAUDE.md"
+# A protected guide linked to an unprotected shared copy (a synced vault) stays protected.
+mkdir -p "$TMP_ROOT/linked-home/.claude" "$TMP_ROOT/vault"
+: > "$TMP_ROOT/vault/CLAUDE.md"
+ln -s "$TMP_ROOT/vault/CLAUDE.md" "$TMP_ROOT/linked-home/.claude/CLAUDE.md"
+deny_path "$TMP_ROOT/linked-home/.claude/CLAUDE.md"
+deny_cmd "echo x >> $TMP_ROOT/linked-home/.claude/CLAUDE.md"
 deny_path 'scripts/hooks/require-phase.sh'
 deny_path 'scripts/permit.sh'
 deny_path 'schemas/denylist.default'

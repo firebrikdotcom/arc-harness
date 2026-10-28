@@ -109,6 +109,7 @@ scripts/required-tools.sh   Checks the tools in .harness-required-tools (init.sh
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
 scripts/jg.sh               Semantic retrieval through jevgrep (jg) with refusals, per-target opt-out, and compact private records
 scripts/install-jg-skill.sh Install the jevgrep skill plus harness guidance for Claude Code and Codex sessions (skills and global guides)
+scripts/install-efficiency-rules.sh Install docs/agent-efficiency.md (fresh workers, small context, no polling, worktree cleanup) into the global Claude Code and Codex guides
 scripts/sites.sh            `harness sites doctor|publish|list`: upload a Firebrik Sites page or site with sha256 receipts and live checks; doctor names what is missing
 scripts/sites_manifest.py   Zips a site folder and lists the sha256 of every file a publish should produce
 scripts/install-sites-skill.sh Install the firebrik-sites skill for Claude Code and Codex, pointing at this checkout

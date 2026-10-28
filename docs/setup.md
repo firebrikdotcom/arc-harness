@@ -616,6 +616,24 @@ scripts/install-jg-skill.sh --home /tmp/h --source /path/to/SKILL.md --skip-glob
 
 It copies the upstream skill (`skills/jevgrep/SKILL.md` from the package next to the installed `jg`, or `--source`) verbatim to `~/.claude/skills/jevgrep/SKILL.md` and `~/.agents/skills/jevgrep/SKILL.md` and appends a marked `harness-jg` block that tells the agent to search through `scripts/jg.sh` instead of a bare `jg` inside any harness target. When `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` carries the `global-harness` block, the same marked paragraph is inserted before that block's end marker, so the instruction reaches every session on the machine without editing project-owned guides. Reruns are idempotent; run it again after `jg skill --global` or a package upgrade, since those overwrite the skill files.
 
+### Agent-efficiency rules
+
+`docs/agent-efficiency.md` holds the machine-wide working rules: the main session only coordinates
+from a handoff file, every task or feedback round gets a fresh worker with a self-contained brief in
+its own worktree, workers report once, waits are long and blocking, output is filtered, UI checks are
+batched with few screenshots, and a merged and verified task's worktree is removed. Install or
+refresh them in every session's global guide with:
+
+```sh
+scripts/install-efficiency-rules.sh            # refresh the block in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md
+scripts/install-efficiency-rules.sh --remove   # take it out again
+scripts/install-efficiency-rules.sh --home /tmp/h
+```
+
+Each guide gets one marked `harness-efficiency` block, after its `global-harness` block when it has
+one and at the end otherwise; nothing else in the guide changes, and a missing guide is skipped.
+Edit `docs/agent-efficiency.md` and rerun the script to change the rules; new sessions pick them up.
+
 ### Publishing to Firebrik Sites
 
 Any agent session on the machine can publish or update a Firebrik Sites page or static site through the harness:

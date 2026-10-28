@@ -753,6 +753,14 @@ def relative(path: str, project: Path) -> str:
     return resolved if rel == ".." or rel.startswith("../") else rel
 
 
+def unresolved(path: str, project: Path) -> str:
+    """Like relative() without following links, so a protected path stays protected when it is a
+    link to an unprotected file (for example a global guide linked into a synced vault)."""
+    normal = os.path.normpath(path)
+    rel = os.path.relpath(normal, project)
+    return normal if rel == ".." or rel.startswith("../") else rel
+
+
 def protected_probes(rules, rules_path) -> list[str]:
     return [probe for probe in PROBES if first_match(rules, rules_path, "path", probe)]
 
@@ -800,6 +808,9 @@ def judge_target(target: str, cwds: tuple[str, ...], kind: str, project: Path, r
                         return denial
                 continue
             denial = judge_subject(relative(joined, project), kind, project, rules, rules_path)
+            if denial:
+                return denial
+            denial = judge_subject(unresolved(joined, project), kind, project, rules, rules_path)
             if denial:
                 return denial
     return None
@@ -949,8 +960,9 @@ def main() -> int:
             kind = "command"
         else:
             rules_path, rules = load_rules(project)
-            subject = relative(os.path.join(cwd, os.path.expanduser(args.path)), project)
-            denial = judge_subject(subject, "file", project, rules, rules_path)
+            path = os.path.join(cwd, os.path.expanduser(args.path))
+            denial = (judge_subject(relative(path, project), "file", project, rules, rules_path)
+                      or judge_subject(unresolved(path, project), "file", project, rules, rules_path))
             kind = "path"
     except (OSError, ValueError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
