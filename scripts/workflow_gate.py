@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import sqlite3
 import sys
 import traceback
 import uuid
@@ -467,15 +468,27 @@ def main():
     if payload.get("hook_event_name") in CURSOR_EVENTS or "cursor_version" in payload:
         return cursor_main(payload)
     if payload.get('hook_event_name') in ('PostToolUse', 'PostToolUseFailure'):
-        decision_posttool(payload)
+        # The call has already run: a busy store cannot undo it, so recording its outcome is advisory.
+        try:
+            decision_posttool(payload)
+        except sqlite3.Error as error:
+            print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
         sys.stdin = io.StringIO(raw)
-        return audit.hook(sys.argv[1] if len(sys.argv)>1 else None)
+        return collect()
     authorize(payload)
     if payload.get("hook_event_name") in {"PreToolUse", "UserPromptSubmit"}:
         sys.stdin=io.StringIO(raw)
-        return audit.hook(sys.argv[1] if len(sys.argv)>1 else None)
+        return collect()
     print("{}")
     return 0
+
+def collect():
+    # Telemetry is advisory: once the policy has allowed a call, a busy store must not block it.
+    try:
+        return audit.hook(sys.argv[1] if len(sys.argv)>1 else None)
+    except sqlite3.Error as error:
+        print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
+        return 0
 
 def cursor_main(payload):
     event = payload.get("hook_event_name")

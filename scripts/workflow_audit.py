@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
-from audit_transport import ROOT, emit, enabled, flush
+from audit_transport import ROOT, emit, enabled, flush, local_db
 import hook_input
 import workflow_todos as todos
 from run_paths import current_file, session_id
@@ -25,10 +25,7 @@ def now() -> str:
 
 
 def context_db() -> sqlite3.Connection:
-    path = Path(os.environ.get("HARNESS_WORKFLOW_STATE", ROOT / ".harness-db/workflow-state.sqlite"))
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    db = sqlite3.connect(path, timeout=2)
-    path.chmod(0o600)
+    db = local_db(Path(os.environ.get("HARNESS_WORKFLOW_STATE", ROOT / ".harness-db/workflow-state.sqlite")), timeout=3)
     db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, context TEXT NOT NULL)")
     return db
 

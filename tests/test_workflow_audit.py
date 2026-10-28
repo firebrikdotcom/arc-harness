@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -200,6 +201,64 @@ class WorkflowTests(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_gate.py"), "codex"], input=json.dumps({"session_id":"policy-session","hook_event_name":event,"cwd":str(ROOT),**fields}), env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, code, result.stderr)
         return result
+
+    def test_shared_state_uses_private_write_ahead_log(self):
+        self.run_cli("hook", payload={"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                      "tool_use_id": "call-w", "tool_input": {"command": "true"}})
+        for name in ("state.sqlite", "outbox.sqlite"):
+            path = self.base / name
+            # The side files exist only while a connection is open; SQLite removes them on the last close.
+            db = audit_transport.local_db(path, timeout=1)
+            self.addCleanup(db.close)
+            self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            for part in (path, path.with_name(name + "-wal"), path.with_name(name + "-shm")):
+                self.assertEqual(part.stat().st_mode & 0o777, 0o600, part.name)
+
+    def break_store(self, name):
+        store = self.base / name
+        for part in (store, store.with_name(name + "-wal"), store.with_name(name + "-shm")):
+            part.unlink(missing_ok=True)
+        store.mkdir()  # sqlite3 cannot open a directory: the same OperationalError as a locked store
+
+    def test_unavailable_outbox_does_not_block_prompts_or_allowed_calls(self):
+        self.gate_mode("audit")
+        self.break_store("outbox.sqlite")
+        prompt = self.gate("UserPromptSubmit", prompt="Inspect")
+        self.assertIn("AUDIT EVENT NOT QUEUED: OperationalError", prompt.stderr)
+        result = self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "true"})
+        self.assertIn("AUDIT EVENT NOT QUEUED: OperationalError", result.stderr)
+
+    def hold_write_lock(self, name):
+        holder = sqlite3.connect(self.base / name, timeout=1, isolation_level=None)
+        self.addCleanup(holder.close)
+        holder.execute("BEGIN IMMEDIATE")
+        self.addCleanup(lambda: holder.in_transaction and holder.execute("ROLLBACK"))
+
+    def test_locked_outbox_lets_calls_through_well_inside_the_hook_timeout(self):
+        self.gate_mode("audit")
+        self.gate("UserPromptSubmit", prompt="Inspect")
+        self.hold_write_lock("outbox.sqlite")
+        started = time.monotonic()
+        self.gate("UserPromptSubmit", prompt="Inspect again")
+        result = self.gate("PreToolUse", tool_name="Bash", tool_input={"command": "true"})
+        self.assertIn("AUDIT EVENT NOT QUEUED: OperationalError", result.stderr)
+        self.assertLess(time.monotonic() - started, 6, "two hooks behind a held outbox lock")
+
+    def test_locked_policy_state_denies_before_the_hook_timeout(self):
+        self.gate_mode("audit")
+        self.gate("UserPromptSubmit", prompt="Inspect")
+        self.hold_write_lock("state.sqlite")
+        started = time.monotonic()
+        result = self.gate("PreToolUse", code=2, tool_name="Bash", tool_input={"command": "true"})
+        self.assertIn("TODO GATE: OperationalError", result.stderr)
+        self.assertLess(time.monotonic() - started, 8, "the host stops a hook after 10 s")
+
+    def test_unavailable_policy_state_still_denies(self):
+        self.gate_mode("audit")
+        self.gate("UserPromptSubmit", prompt="Inspect")
+        self.break_store("state.sqlite")
+        result = self.gate("PreToolUse", code=2, tool_name="Bash", tool_input={"command": "true"})
+        self.assertIn("TODO GATE: OperationalError", result.stderr)
 
     def policy(self, *args, code=0):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_audit.py"), "todo", *args, "--session-id", "policy-session"], env=self.env, text=True, capture_output=True)

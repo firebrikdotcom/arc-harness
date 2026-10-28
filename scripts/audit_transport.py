@@ -41,18 +41,37 @@ def audit_url() -> str:
 def outbox_path() -> Path:
     return Path(os.environ.get("HARNESS_AUDIT_OUTBOX", ROOT / ".harness-db/audit-outbox.sqlite"))
 
-def connection() -> sqlite3.Connection:
-    path = outbox_path()
+def local_db(path: Path, timeout: float) -> sqlite3.Connection:
+    """Open shared local state; parallel agents' hooks write it at once.
+
+    A hook may wait on several stores in turn, and the host stops it after 10 s (install-hooks.sh),
+    so each wait stays a small share of that budget."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    db = sqlite3.connect(path, timeout=5)
-    path.chmod(0o600)
+    db = sqlite3.connect(path, timeout=timeout)
+    # WAL keeps readers from blocking the writer; its side files hold the same private data.
+    db.execute("PRAGMA journal_mode=WAL")
+    for part in (path, path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        if part.exists():
+            part.chmod(0o600)
+    return db
+
+def connection() -> sqlite3.Connection:
+    # Advisory: a busy outbox drops one event rather than holding the caller's policy transaction.
+    db = local_db(outbox_path(), timeout=0.25)
     db.execute("CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, body TEXT NOT NULL, destination TEXT NOT NULL)")
     db.execute("CREATE TABLE IF NOT EXISTS rejected_events (id TEXT PRIMARY KEY, event_type TEXT NOT NULL, body TEXT NOT NULL, destination TEXT NOT NULL, http_status INTEGER NOT NULL)")
     return db
 
 def flush() -> bool:
     """Retry until the queue is empty or a transport error occurs (bounded time)."""
-    deadline = time.monotonic() + 2
+    try:
+        return drain(time.monotonic() + 2)
+    except sqlite3.Error as error:
+        # A busy outbox keeps its events for the next attempt.
+        print(f"AUDIT DELIVERY QUEUED: {type(error).__name__}", file=sys.stderr)
+        return False
+
+def drain(deadline: float) -> bool:
     with connection() as db:
         rows = db.execute("SELECT id,event_type,body,destination FROM outbox ORDER BY rowid").fetchall()
         for event_id, event_type, body, destination in rows:
@@ -95,6 +114,11 @@ def emit(event_type: str, payload: dict, *, flush_now: bool = True) -> bool:
     if len(body.encode()) > MAX_RECORD_BYTES:
         raise ValueError("audit event is too large")
     event_id = json.loads(body)["id"]
-    with connection() as db:
-        db.execute("INSERT INTO outbox VALUES (?,?,?,?)", (event_id, event_type, body, audit_url()))
+    try:
+        with connection() as db:
+            db.execute("INSERT INTO outbox VALUES (?,?,?,?)", (event_id, event_type, body, audit_url()))
+    except sqlite3.Error as error:
+        # Delivery is advisory: a busy or unavailable outbox must not fail the caller's gate or command.
+        print(f"AUDIT EVENT NOT QUEUED: {type(error).__name__}; {event_type}", file=sys.stderr)
+        return False
     return flush() if flush_now else True
