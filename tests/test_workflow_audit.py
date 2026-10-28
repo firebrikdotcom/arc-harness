@@ -707,8 +707,6 @@ class WorkflowTests(unittest.TestCase):
         with patch.dict(os.environ, self.env):
             with self.assertRaises(ValueError): audit_transport.enabled()
 
-
-class GateModeTests(WorkflowTests):
     def test_waiver_is_granted_only_by_the_persons_next_message(self):
         self.gate("UserPromptSubmit", prompt="fill the forms")
         self.gate("UserPromptSubmit", prompt="go ahead")  # without a request this is an instruction

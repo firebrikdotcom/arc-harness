@@ -10,8 +10,8 @@ The service listens on all IPv4 interfaces (`0.0.0.0:18080`); use localhost or t
 
 ```sh
 cp .env.example .env
-cargo run -- migrate
-cargo run -- serve
+cargo run --release -- migrate
+cargo run --release -- serve
 curl http://127.0.0.1:18080/health
 ```
 

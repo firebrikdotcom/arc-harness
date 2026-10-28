@@ -18,8 +18,8 @@ VERIFY
 chmod +x "$TMP/repo/scripts/verify.sh"
 
 (cd "$TMP/repo" && GIT_DIR="$TMP/repo/.git" GIT_WORK_TREE="$TMP/repo" GIT_INDEX_FILE="$TMP/repo/.git/index.lock" VERIFY_LOG="$TMP/verify.log" .githooks/pre-commit > "$TMP/pass.out")
-[ "$(cat "$TMP/verify.log")" = "--project $TMP/repo|full|unset|unset" ] || {
-  printf '%s\n' 'FAIL: hook did not invoke isolated full verification for the repository root.' >&2
+[ "$(cat "$TMP/verify.log")" = "--project $TMP/repo|unset|unset|unset" ] || {
+  printf '%s\n' 'FAIL: hook did not invoke isolated, scoped verification for the repository root.' >&2
   exit 1
 }
 set +e

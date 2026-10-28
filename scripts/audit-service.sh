@@ -85,7 +85,8 @@ cd "$SERVICE_ROOT"
 
 case "${1:-serve}" in
 setup|migrate|serve)
-    exec "$CARGO_BIN" run -- "$1"
+    # The release build ingests events several times faster, so parallel agents' queues drain.
+    exec "$CARGO_BIN" run --release -- "$1"
     ;;
   check|test)
     exec "$CARGO_BIN" "$1"

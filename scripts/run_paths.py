@@ -4,8 +4,30 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
+import re
+
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def run_owner(sid: str) -> str:
+    """A Codex subagent works inside its root thread's run; its rollout names that root."""
+    if not UUID.fullmatch(sid):
+        return sid
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    for rollout in (home / "sessions").glob(f"*/*/*/rollout-*-{sid}.jsonl"):
+        try:
+            with rollout.open() as handle:
+                meta = json.loads(handle.readline(1_000_000)).get("payload", {})
+        except (OSError, ValueError, AttributeError):
+            return sid
+        root = meta.get("session_id")
+        if meta.get("id") == sid and meta.get("thread_source") == "subagent" and isinstance(root, str) and UUID.fullmatch(root):
+            return root
+        return sid
+    return sid
 
 
 def session_id(value: str | None = None) -> str | None:
@@ -17,8 +39,9 @@ def session_id(value: str | None = None) -> str | None:
 
 
 def session_key(value: str | None = None) -> str | None:
+    # Runs and check records belong to the root session; todo and audit state stay per agent (session_id).
     sid = session_id(value)
-    return hashlib.sha256(sid.encode()).hexdigest() if sid else None
+    return hashlib.sha256(run_owner(sid).encode()).hexdigest() if sid else None
 
 
 def current_file(db_root: Path, value: str | None = None) -> Path:

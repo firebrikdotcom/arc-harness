@@ -442,22 +442,30 @@ syntax_check_shell_files() {
 # Run this harness's own regression tests when verifying the harness itself.
 run_harness_tests() {
   test_config=$(mktemp -d "${TMPDIR:-/tmp}/harness-test-config.XXXXXX") || return 1
+  test_logs=$(mktemp -d "${TMPDIR:-/tmp}/harness-test-logs.XXXXXX") || { rm -rf "$test_config"; return 1; }
+  # The files are independent (temporary fixtures, no fixed ports), so they run side by side;
+  # HARNESS_VERIFY_JOBS=1 runs them one at a time. Output is printed in file order.
+  jobs=${HARNESS_VERIFY_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 4)}
   status=0
+  # Nested harness runs inside tests must not emit real Jev checkpoints or start
+  # a real architecture-board mapper (HARNESS_BOARD=0), and
+  # they model a human at a terminal, not the agent that may be running verify.
+  # Each fixture declares its own required checks: the outer override applies
+  # to this target (already read into REQUIRED_CHECKS), not to the fixtures.
+  # Each file has its own time limit, so a hung test is named and the rest still run.
+  # shellcheck disable=SC2016
+  printf '%s\n' tests/*.sh | (unset HARNESS_REQUIRED_CHECKS
+    xargs -P "$jobs" -I{} sh -c 'log="$1/$(basename "$2").log"
+      "$3/with-timeout.sh" "$4" "$2" HARNESS_VERIFY_TIMEOUT env HARNESS_CONFIG_HOME="$5" HARNESS_JEV_CHECKPOINTS=0 HARNESS_JEV_DELEGATION=off HARNESS_BOARD=0 \
+        HARNESS_SESSION_ID="" CODEX_THREAD_ID="" CLAUDE_SESSION_ID="" CLAUDE_CODE_SESSION_ID="" CLAUDECODE="" CODEX_SANDBOX="" sh "$2" >"$log" 2>&1 </dev/null
+      printf "%s\n" "$?" >"$log.status"' _ "$test_logs" {} "$SCRIPT_DIR" "$VERIFY_TIMEOUT" "$test_config")
   for test_file in tests/*.sh; do
+    log="$test_logs/$(basename "$test_file").log"
     info "--> $test_file"
-    # Nested harness runs inside tests must not emit real Jev checkpoints or start
-    # a real architecture-board mapper (HARNESS_BOARD=0), and
-    # they model a human at a terminal, not the agent that may be running verify.
-    # Each fixture declares its own required checks: the outer override applies
-    # to this target (already read into REQUIRED_CHECKS), not to the fixtures.
-    # Each file has its own time limit, so a hung test is named and the rest still run.
-    if ! (unset HARNESS_REQUIRED_CHECKS
-      bounded "$test_file" env HARNESS_CONFIG_HOME="$test_config" HARNESS_JEV_CHECKPOINTS=0 HARNESS_JEV_DELEGATION=off HARNESS_BOARD=0 HARNESS_SESSION_ID='' CODEX_THREAD_ID='' CLAUDE_SESSION_ID='' CLAUDE_CODE_SESSION_ID='' \
-        CLAUDECODE='' CODEX_SANDBOX='' sh "$test_file"); then
-      status=1
-    fi
+    cat "$log" 2>/dev/null
+    [ "$(cat "$log.status" 2>/dev/null)" = "0" ] || status=1
   done
-  rm -rf "$test_config"
+  rm -rf "$test_config" "$test_logs"
   return "$status"
 }
 

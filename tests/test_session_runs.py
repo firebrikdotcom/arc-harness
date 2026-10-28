@@ -71,6 +71,21 @@ class SessionRunsTests(unittest.TestCase):
                                 env={**self.env, "HARNESS_SESSION_ID": sid}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_codex_subagent_works_in_its_root_threads_run(self):
+        root, child, other = ("01a17b5c-b302-75e3-81d0-655f09144919", "01a18359-6111-76d0-aac1-0559e3107216",
+                              "01a18359-6111-76d0-aac1-0559e3107299")
+        day = self.base / "codex/sessions/2026/10/28"
+        day.mkdir(parents=True)
+        for thread, source in ((child, "subagent"), (other, "cli")):
+            meta = {"type": "session_meta", "payload": {"id": thread, "session_id": root, "thread_source": source}}
+            (day / f"rollout-2026-10-28T11-30-35-{thread}.jsonl").write_text(json.dumps(meta) + "\n")
+        self.env["CODEX_HOME"] = str(self.base / "codex")
+        self.call(root, "plan", "start")
+        run_line = lambda sid: next(line for line in self.call(sid, "status").splitlines() if line.startswith("Run:"))
+        self.assertIn("(active)", run_line(root))
+        self.assertEqual(run_line(child), run_line(root))
+        self.assertNotEqual(run_line(other), run_line(root))  # only a subagent's rollout redirects its run
+
     def test_new_parallel_sessions_ignore_paused_legacy_run(self):
         self.call(None, "plan", "start", expected=3, extra={"HARNESS_BUDGET_STEPS": "1"})
         legacy = self.run_id(None)
