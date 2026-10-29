@@ -10,7 +10,7 @@ from pathlib import Path
 
 VERSION = "tool-context-2"
 ORIGINS = {"automatic_tool", "explicit_decision", "direct_advice", "worker_selection",
-           "session_routing", "task_routing"}
+           "session_routing", "task_routing", "failure_followup"}
 
 
 def summary(value, limit=220):

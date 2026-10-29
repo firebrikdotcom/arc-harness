@@ -21,6 +21,7 @@ pub fn origin_label(origin: Option<&str>) -> &'static str {
         Some("worker_selection") => "Worker selection",
         Some("session_routing") => "Session routing",
         Some("task_routing") => "Task routing",
+        Some("failure_followup") => "Failure follow-up",
         _ => "Legacy / unknown",
     }
 }

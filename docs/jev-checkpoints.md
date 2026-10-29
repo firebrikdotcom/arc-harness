@@ -2,6 +2,24 @@
 
 Use Jev first when a bounded judgment remains after explicit instructions and deterministic evidence. Do not decide an agent baseline before asking. Permissions, user choices, required verification and known failures remain deterministic; Jev cannot override them.
 
+## When to ask Jev
+
+Ask at a real choice between a few options that a sentence or two of redacted facts can describe. Agreement on labeled samples from earlier question versions of each family is shown where it exists; it is a historical sample, not a guarantee for the current questions.
+
+| Moment | Family | Labeled sample |
+| --- | --- | --- |
+| After a failed command or test: retry, fix, investigate or ask the user | `progress_assessment` | 87% (asked automatically, see below) |
+| Grading a review finding or a piece of evidence | `evidence_assessment` | 69% |
+| How much effort a task needs: direct, deeper reasoning or delegation | `reasoning_allocation` | 62% |
+| Which configured worker profile fits a delegated task | `worker_selection` origin | not yet measured |
+| The next evidence source: read, trace a caller, or one semantic search | `evidence_selection` | not yet measured |
+
+Do not ask per tool call: the automatic tool check (`typesafe.enforce_decisions`) mostly fell below the threshold (median confidence 0.38 in the largest measured cohort) and its confident answers were mostly requests for more context, so it delayed work more than it decided. Keep `handoff_assessment` in shadow mode; its labeled agreement was 0–22%. Permissions, destructive actions and required checks never go to Jev.
+
+### Failure follow-up
+
+`scripts/failure_budget.py` already sees every shell result. When `HARNESS_JEV_CHECKPOINTS=1`, Jev is active and `typesafe.checkpoints` is true, a failed command that is not a read-only inspection (a failed `grep` usually means no match) and did not pause the run asks `progress_assessment` for the next step: `retry`, `fix`, `investigate` or `ask_user`. The facts are the curated task purpose and active step plus fixed action labels; the command and its output are never sent. A choice at or above the confidence threshold reaches the agent as `Jev next step: ...`; otherwise the hook stays silent and the agent decides. Records use the `failure_followup` origin and `failure-context-1` context version.
+
 ## Decision flow
 
 1. Supply a compact, redacted goal, relevant facts and allowed choices. Never send credentials, personal data, source files, raw prompts or full diffs.

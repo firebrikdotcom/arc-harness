@@ -93,7 +93,7 @@ $CLI review done                 # needs an approval of the current files; no no
 - Run permitted commands yourself; use a persistent shell for test services, and do not ask the user to run commands in another terminal.
 - Submit once to request approval, show the independent findings, and ask for an \`approved\` (or \`approve review RUN_ID\`) chat reply; then retry the same submit command to consume the native receipt.
 - A pause (budget, or the same failure twice) waits for the user. Resume only on their instruction: \`$CLI continue "<new approach>"\`. Abort is theirs.
-- Jev: see $DOCS/jev-checkpoints.md; ask first, and follow its recommendation when enabled and above threshold. Otherwise decide.
+- Jev: see $DOCS/jev-checkpoints.md; ask first, and follow its recommendation when enabled and above threshold. Otherwise decide. The harness also asks Jev at each prompt, plan, failure and review; follow a \`Jev ...\` line within the rules. Ask at other real choices yourself, not per tool call.
 - Role orchestration and judgment checkpoints: $DOCS/orchestration.md. Read it when \`dispatch.enabled\` or \`typesafe.enforce_decisions\` is enabled in the shared \`config.json\`; use the native bridge for supported models and the external launcher otherwise.
 - When dispatch and Amp are enabled, route worker agents through \`harness dispatch\`; see $DOCS/orchestration.md.
 $END_MARK
