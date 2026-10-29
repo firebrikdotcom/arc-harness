@@ -8,6 +8,12 @@ command failing with the same error twice in a row pauses the run; a different
 error restarts the count and a success clears it. Neither the command nor the
 error text is stored, only digests and a short first line for the pause notice.
 Exits 2 with the pause notice on stderr when the run pauses, else 0.
+
+A failed non-inspection command that does not pause the run asks Jev for the
+next step (progress_assessment) when HARNESS_JEV_CHECKPOINTS=1 and Jev is
+active. Only fixed action labels and curated task/step summaries are sent,
+never the command or its output. A confident choice reaches the agent with
+exit 2; otherwise the agent decides and the hook stays silent.
 """
 from __future__ import annotations
 
@@ -29,6 +35,45 @@ VOLATILE = (
     (re.compile(r"\d+(\.\d+)?"), "N"),
     (re.compile(r"[ \t]+"), " "),
 )
+NEXT_STEPS = {
+    "retry": "The failure looks transient (network, lock, timing); rerun the same command once.",
+    "fix": "The failure points at a specific defect in the current change; fix it before rerunning.",
+    "investigate": "The cause is unclear; read the failing code or logs before changing anything.",
+    "ask_user": "The failure needs a credential, environment or decision only the user can supply.",
+}
+
+def advise_next_step(payload: dict, project: Path, signature: str) -> str | None:
+    """Jev's confident next step after a failed action, or None when the agent decides."""
+    sid = payload.get("session_id")
+    if os.environ.get("HARNESS_JEV_CHECKPOINTS") != "1" or not isinstance(sid, str) or not sid:
+        return None
+    import harness_config
+    settings = harness_config.load()["typesafe"]
+    if settings.get("mode") != "active" or not settings.get("checkpoints"):
+        return None
+    import jev_context
+    kind = jev_context.action_type(payload)
+    if kind == "inspection":
+        # A failed search or listing usually means "no match", not a problem to triage.
+        return None
+    import workflow_audit as audit
+    from decision_checkpoint import evaluate
+    with audit.context_db() as db:
+        context = audit.load(db, sid)
+    task = context.get("task_summary") or {}
+    active = context.get("todos", {}).get(context.get("active_todo_id"), {})
+    facts = ["Task purpose: " + jev_context.summary(task.get("description") or context.get("plan_summary")),
+             "Active step: " + jev_context.summary(active.get("description")),
+             "Failed action type: " + kind,
+             *jev_context.action_facts(payload),
+             "The same command has not failed this way twice in a row; a repeat would pause the run"]
+    scope = {"request_id": context.get("request_id"), "request_seq": context.get("request_seq"),
+             "plan_revision": context.get("plan_revision"), "failure": signature}
+    receipt = evaluate(project=project, session_id=sid, family="progress_assessment",
+                       goal="Choose the next step after a failed command", facts=facts, choices=NEXT_STEPS,
+                       scope=scope, state={"scope": scope, "task_id": context.get("task_id")},
+                       origin="failure_followup", context_version="failure-context-1")
+    return None if receipt.get("needs_reasoning") else receipt.get("action")
 
 
 def normalize(text: str) -> str:
@@ -86,6 +131,15 @@ def main() -> int:
         # Exit 2 hands the pause notice to the agent with the failed call's result.
         print(result.stdout.strip(), file=sys.stderr)
         return 2
+    if failed and result.returncode == 0:
+        try:
+            action = advise_next_step(payload, Path(cwd).resolve(), args[args.index("--signature") + 1])
+        except Exception:
+            # Advice is optional: an unavailable store or provider must not affect the failed call.
+            action = None
+        if action in NEXT_STEPS:
+            print(f"Jev next step: {action}. {NEXT_STEPS[action]}", file=sys.stderr)
+            return 2
     return 0
 
 
