@@ -825,6 +825,10 @@ info "Verification summary: ran=$ran skipped=$skipped failures=$failures"
 if [ "$failures" -ne 0 ]; then
   write_run_record 1
   jev_checkpoint verify-result --exit 1
+  if [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ] && has_cmd python3; then
+    python3 "$SCRIPT_DIR/jev_moments.py" verify-failed --project "$PROJECT_ROOT" --ran "$ran" --failures "$failures" 2>/dev/null \
+      | while IFS= read -r _jev_line; do info "$_jev_line"; done || :
+  fi
   info "Verification failed."
   exit 1
 fi

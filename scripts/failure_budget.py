@@ -35,45 +35,25 @@ VOLATILE = (
     (re.compile(r"\d+(\.\d+)?"), "N"),
     (re.compile(r"[ \t]+"), " "),
 )
-NEXT_STEPS = {
-    "retry": "The failure looks transient (network, lock, timing); rerun the same command once.",
-    "fix": "The failure points at a specific defect in the current change; fix it before rerunning.",
-    "investigate": "The cause is unclear; read the failing code or logs before changing anything.",
-    "ask_user": "The failure needs a credential, environment or decision only the user can supply.",
-}
+from jev_moments import NEXT_STEPS
+
 
 def advise_next_step(payload: dict, project: Path, signature: str) -> str | None:
     """Jev's confident next step after a failed action, or None when the agent decides."""
-    sid = payload.get("session_id")
-    if os.environ.get("HARNESS_JEV_CHECKPOINTS") != "1" or not isinstance(sid, str) or not sid:
-        return None
-    import harness_config
-    settings = harness_config.load()["typesafe"]
-    if settings.get("mode") != "active" or not settings.get("checkpoints"):
-        return None
     import jev_context
+    import jev_moments
+    sid = payload.get("session_id")
     kind = jev_context.action_type(payload)
-    if kind == "inspection":
+    if not isinstance(sid, str) or not sid or kind == "inspection" or not jev_moments.enabled():
         # A failed search or listing usually means "no match", not a problem to triage.
         return None
-    import workflow_audit as audit
-    from decision_checkpoint import evaluate
-    with audit.context_db() as db:
-        context = audit.load(db, sid)
-    task = context.get("task_summary") or {}
-    active = context.get("todos", {}).get(context.get("active_todo_id"), {})
-    facts = ["Task purpose: " + jev_context.summary(task.get("description") or context.get("plan_summary")),
-             "Active step: " + jev_context.summary(active.get("description")),
-             "Failed action type: " + kind,
+    context = jev_moments.load_context(sid)
+    facts = [*jev_moments.session_facts(context)[:2], "Failed action type: " + kind,
              *jev_context.action_facts(payload),
              "The same command has not failed this way twice in a row; a repeat would pause the run"]
-    scope = {"request_id": context.get("request_id"), "request_seq": context.get("request_seq"),
-             "plan_revision": context.get("plan_revision"), "failure": signature}
-    receipt = evaluate(project=project, session_id=sid, family="progress_assessment",
-                       goal="Choose the next step after a failed command", facts=facts, choices=NEXT_STEPS,
-                       scope=scope, state={"scope": scope, "task_id": context.get("task_id")},
-                       origin="failure_followup", context_version="failure-context-1")
-    return None if receipt.get("needs_reasoning") else receipt.get("action")
+    return jev_moments.ask(project=project, session_id=sid, family="progress_assessment",
+                           goal="Choose the next step after a failed command", facts=facts, choices=NEXT_STEPS,
+                           scope=jev_moments.scope_of(context, failure=signature), origin="failure_followup")
 
 
 def normalize(text: str) -> str:

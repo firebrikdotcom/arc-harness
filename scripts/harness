@@ -1098,6 +1098,11 @@ cmd_review_submit() {
   if [ "$_status" -ge 2 ]; then
     exit "$EXIT_PHASE"
   fi
+  # A second opinion shown before approval; it never changes what is stored.
+  if [ "${HARNESS_JEV_CHECKPOINTS:-0}" = "1" ]; then
+    python3 "$SCRIPT_DIR/jev_moments.py" grade-findings --project "$(review_project)" --findings "$_findings" \
+      --session-id "review-$(state_get RUN_ID)" 2>/dev/null | while IFS= read -r _jev_line; do info "$_jev_line"; done || :
+  fi
   _chat_approval=0
   if agent_runtime; then
     _approval_session=$(approval_session_id)

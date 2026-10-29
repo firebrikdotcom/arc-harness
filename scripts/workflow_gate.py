@@ -476,9 +476,13 @@ def main():
         sys.stdin = io.StringIO(raw)
         return collect()
     authorize(payload)
+    if payload.get("hook_event_name") == "UserPromptSubmit" and not runtime_notice(payload):
+        advise_prompt(payload)
     if payload.get("hook_event_name") in {"PreToolUse", "UserPromptSubmit"}:
         sys.stdin=io.StringIO(raw)
         return collect()
+    if payload.get("hook_event_name") == "Stop":
+        record_handoff(payload)
     print("{}")
     return 0
 
@@ -489,6 +493,27 @@ def collect():
     except sqlite3.Error as error:
         print("WORKFLOW COLLECTION UNAVAILABLE: " + type(error).__name__, file=sys.stderr)
         return 0
+
+def advise_prompt(payload):
+    """Jev's effort choice for a new prompt, as one line of context; silent otherwise."""
+    try:
+        import jev_moments
+        sid = audit.session_id(payload.get("session_id"))
+        line = jev_moments.prompt_effort(Path(payload.get("cwd") or ".").resolve(), sid, payload.get("prompt")) if sid else None
+    except Exception:
+        return
+    if line:
+        print(line)
+
+def record_handoff(payload):
+    # Shadow only, and never allowed to fail: a Stop hook must not trap the user.
+    try:
+        import jev_moments
+        sid = audit.session_id(payload.get("session_id"))
+        if sid:
+            jev_moments.record_handoff(Path(payload.get("cwd") or ".").resolve(), sid)
+    except Exception:
+        pass
 
 def cursor_main(payload):
     event = payload.get("hook_event_name")

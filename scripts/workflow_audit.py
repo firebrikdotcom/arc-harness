@@ -497,6 +497,15 @@ def main() -> int:
         ids = "; ids: " + ", ".join(item["id"] for item in live) if args.todo_action == "plan" else ""
         print(f"todo {args.todo_action}: {detail}{done}/{len(live)} complete, active {context.get('active_todo_id') or 'none'}, "
               f"revision {context.get('plan_revision', 0)}{ids}")
+        if args.todo_action == "plan":
+            try:
+                import jev_moments
+                advice = jev_moments.plan_first_step(Path(context.get("orchestration_project") or os.getcwd()),
+                                                     sid, context, args.reason)
+            except Exception:
+                advice = None
+            if advice:
+                print(advice)
     if args.command in ("task", "decision", "outcome"):
         print(json.dumps({"session_id": sid, "task_id": context["task_id"], "recorded": True}))
     return 0

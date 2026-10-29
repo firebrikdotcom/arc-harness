@@ -2,23 +2,24 @@
 
 Use Jev first when a bounded judgment remains after explicit instructions and deterministic evidence. Do not decide an agent baseline before asking. Permissions, user choices, required verification and known failures remain deterministic; Jev cannot override them.
 
-## When to ask Jev
+## When Jev is asked
 
-Ask at a real choice between a few options that a sentence or two of redacted facts can describe. Agreement on labeled samples from earlier question versions of each family is shown where it exists; it is a historical sample, not a guarantee for the current questions.
+The harness asks Jev automatically at real choices between a few options that a sentence or two of redacted facts can describe. Agreement on labeled samples from earlier question versions of each family is shown where it exists; it is a historical sample, not a guarantee for the current questions.
 
-| Moment | Family | Labeled sample |
-| --- | --- | --- |
-| After a failed command or test: retry, fix, investigate or ask the user | `progress_assessment` | 87% (asked automatically, see below) |
-| Grading a review finding or a piece of evidence | `evidence_assessment` | 69% |
-| How much effort a task needs: direct, deeper reasoning or delegation | `reasoning_allocation` | 62% |
-| Which configured worker profile fits a delegated task | `worker_selection` origin | not yet measured |
-| The next evidence source: read, trace a caller, or one semantic search | `evidence_selection` | not yet measured |
+| Moment | Where | Family / origin | What the agent sees | Labeled sample |
+| --- | --- | --- | --- | --- |
+| New prompt | `UserPromptSubmit` (`workflow_gate.py`) | `reasoning_allocation` / `prompt_routing` | `Jev effort for this prompt: direct, think_deeper or delegate` | 62% |
+| First broad search in a session (Claude Code) | `retrieval-reminder.sh` | `evidence_selection` / `search_selection` | `retrieval` strengthens the semantic-retrieval reminder; `targeted_search` silences it | not yet measured |
+| Todo plan recorded | `harness workflow todo plan` | `prioritization` / `plan_prioritization` | `Jev suggests starting with ID: step` (two or more open steps) | not yet measured |
+| Failed shell command | `failure_budget.py` | `progress_assessment` / `failure_followup` | `Jev next step: retry, fix, investigate or ask_user` | 87% |
+| Failed verification | `scripts/verify.sh` | `progress_assessment` / `verify_followup` | the same next-step line before `Verification failed.` | 87% |
+| Review findings submitted | `harness review submit` | `evidence_assessment` / `review_grading` | `Jev grades finding N as ...` where Jev disagrees with the reviewer | 69% |
+| End of each turn | `Stop` (`workflow_gate.py`) | `handoff_assessment` / `handoff_check` | nothing: recorded only (shadow), because labeled agreement was 0–22% | 0–22% |
+| Worker dispatch and task launch | `role_dispatch.py`, `agent_launch.py`, session start | `worker_selection`, `task_routing`, `session_routing` | the selected profile or route | not yet measured |
 
-Do not ask per tool call: the automatic tool check (`typesafe.enforce_decisions`) mostly fell below the threshold (median confidence 0.38 in the largest measured cohort) and its confident answers were mostly requests for more context, so it delayed work more than it decided. Keep `handoff_assessment` in shadow mode; its labeled agreement was 0–22%. Permissions, destructive actions and required checks never go to Jev.
+Every moment runs only when `HARNESS_JEV_CHECKPOINTS=1`, `typesafe.mode` is `active` and `typesafe.checkpoints` is true. Each asks once with a 5-second timeout and one attempt. A choice below the confidence threshold, or any error, is silent and the agent decides. The answer is advice: it never changes a gate, a stored finding or an exit code. Facts are the curated task purpose and active step (redacted by `jev_context.summary`), plan counts, last verify/review status and fixed action labels. Prompts are reduced to a word count; commands, file paths, source, tool output and review evidence text are never sent. A failed read-only inspection such as `grep` is not triaged, because it usually means no match. Shared code: `scripts/jev_moments.py`.
 
-### Failure follow-up
-
-`scripts/failure_budget.py` already sees every shell result. When `HARNESS_JEV_CHECKPOINTS=1`, Jev is active and `typesafe.checkpoints` is true, a failed command that is not a read-only inspection (a failed `grep` usually means no match) and did not pause the run asks `progress_assessment` for the next step: `retry`, `fix`, `investigate` or `ask_user`. The facts are the curated task purpose and active step plus fixed action labels; the command and its output are never sent. A choice at or above the confidence threshold reaches the agent as `Jev next step: ...`; otherwise the hook stays silent and the agent decides. Records use the `failure_followup` origin and `failure-context-1` context version.
+Do not ask per tool call: the automatic tool check (`typesafe.enforce_decisions`) mostly fell below the threshold (median confidence 0.38 in the largest measured cohort) and its confident answers were mostly requests for more context, so it delayed work more than it decided. Permissions, destructive actions and required checks never go to Jev.
 
 ## Decision flow
 
