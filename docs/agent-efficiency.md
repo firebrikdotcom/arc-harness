@@ -59,4 +59,10 @@ the number of calls. These rules apply to every session and every worker, in eve
 - One short status checklist (at most five lines) per completed task. Batch questions for the user
   into one request per milestone, including design feedback.
 
+**Real fixes**
+- Fix the underlying cause and read configuration from its real source.
+- If a dependency is missing, implement it or clearly report the blocker; never substitute a
+  hardcoded approximation.
+- Verify the reported behavior in the actual environment before claiming it works.
+
 User and project instructions take precedence over these rules.
