@@ -92,6 +92,7 @@ scripts/jev_delegation.py   The persisted `harness jev on|off|status` switch: ob
 scripts/context_advice.py   Jev checkpoints (file or flag form) with the confidence gate; legacy label and cohort reports
 scripts/phase_checkpoint.py Session-start route and verify history; phase gates ask Jev nothing
 scripts/install-hooks.sh    Installs the auto-init and Jev hooks into Claude Code and Codex user settings
+scripts/worktree_cleanup.py Removes merged, clean, idle worktrees (hook at session start and after merges; --dry-run to preview)
 scripts/harness-target.sh   Machine-local target registry: project root, register, lookup, per-target database, bootstrap fingerprint
 scripts/hooks/require-phase.sh  Claude Code PreToolUse hook: blocks edits and shell calls outside an active phase
 scripts/hooks/auto-init.sh      SessionStart hook: registers the session's project as a target, bootstraps it once per lockfile fingerprint, starts the background architecture-board check, then runs the session route
@@ -109,7 +110,7 @@ scripts/required-tools.sh   Checks the tools in .harness-required-tools (init.sh
 scripts/install-guides.sh   Adds the harness command block to AGENTS.md and CLAUDE.md
 scripts/jg.sh               Semantic retrieval through jevgrep (jg) with refusals, per-target opt-out, and compact private records
 scripts/install-jg-skill.sh Install the jevgrep skill plus harness guidance for Claude Code and Codex sessions (skills and global guides)
-scripts/install-efficiency-rules.sh Install docs/agent-efficiency.md (fresh workers, small context, no polling, worktree cleanup) into the global Claude Code and Codex guides
+scripts/install-efficiency-rules.sh Install docs/agent-efficiency.md (fresh workers, small context, no polling, worktree cleanup) into the global Claude Code and Codex guides, plus Codex helper settings (30-minute waits, helpers report once)
 scripts/sites.sh            `harness sites doctor|publish|list`: upload a Firebrik Sites page or site with sha256 receipts and live checks; doctor names what is missing
 scripts/sites_manifest.py   Zips a site folder and lists the sha256 of every file a publish should produce
 scripts/install-sites-skill.sh Install the firebrik-sites skill for Claude Code and Codex, pointing at this checkout

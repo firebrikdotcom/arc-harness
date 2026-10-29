@@ -2,7 +2,8 @@
 # Register the harness hooks in the user's Claude Code settings and Codex
 # hooks file: automatic target initialisation plus the shadow Jev route at
 # SessionStart, a detached sweep that removes base64 images from idle session
-# logs at SessionStart and SessionEnd, the repeated-command observer at
+# logs at SessionStart and SessionEnd, a detached cleanup of merged, idle, clean
+# worktrees at SessionStart and after merge-like shell commands, the repeated-command observer at
 # PreToolUse, and (Claude Code only, which has Grep and Glob tools) the
 # retrieval reminder. Idempotent:
 # existing harness entries are replaced, other hooks are preserved, and each
@@ -58,19 +59,23 @@ WORKFLOW = str(Path(root) / "scripts/workflow_audit.py")
 TODO_GATE = str(Path(root) / "scripts/workflow_gate.py")
 FAILURES = str(Path(root) / "scripts/failure_budget.py")
 SLIM = str(Path(root) / "scripts/slim_session_logs.py")
+CLEANUP = str(Path(root) / "scripts/worktree_cleanup.py")
 MARKERS = ("scripts/hooks/auto-init.sh", "scripts/hooks/session-route.sh", "scripts/hooks/jev-observe.sh",
            "scripts/retrieval-reminder.sh", "scripts/workflow_audit.py", "scripts/workflow_gate.py",
            "scripts/session_hook.py", "scripts/observe_commands.py", "scripts/failure_budget.py",
-           "scripts/slim_session_logs.py")
+           "scripts/slim_session_logs.py", "scripts/worktree_cleanup.py")
 # The repeated-failure stop reads each shell call's outcome.
 FAILURE_HOOK = {"matcher": "Bash|shell|exec_command", "hooks": [{"type": "command", "command": f'python3 "{FAILURES}"', "timeout": 30}]}
 # A detached sweep replaces base64 images in idle session logs with a short note.
 SLIM_HOOK = {"hooks": [{"type": "command", "command": f'python3 "{SLIM}" --spawn', "timeout": 5}]}
+# A detached cleanup removes merged, idle, clean worktrees at session start and after a merge.
+CLEANUP_HOOK = {"hooks": [{"type": "command", "command": f'python3 "{CLEANUP}" --hook', "timeout": 5}]}
+CLEANUP_AFTER_MERGE = {"matcher": "Bash|shell|exec_command", **CLEANUP_HOOK}
 SHARED = {
-    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}, SLIM_HOOK],
+    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}, SLIM_HOOK, CLEANUP_HOOK],
     "SessionEnd": [SLIM_HOOK],
     "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}],
-    "PostToolUse": [FAILURE_HOOK],
+    "PostToolUse": [FAILURE_HOOK, CLEANUP_AFTER_MERGE],
 }
 # Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only;
 # Claude Code reports failed calls on their own event.

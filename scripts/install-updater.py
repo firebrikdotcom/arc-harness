@@ -16,7 +16,8 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 MARKERS = ('scripts/hooks/auto-init.sh','scripts/hooks/session-route.sh','scripts/hooks/jev-observe.sh',
            'scripts/retrieval-reminder.sh','scripts/workflow_audit.py','scripts/workflow_gate.py',
-           'scripts/session_hook.py','scripts/observe_commands.py','scripts/failure_budget.py','scripts/slim_session_logs.py')
+           'scripts/session_hook.py','scripts/observe_commands.py','scripts/failure_budget.py','scripts/slim_session_logs.py',
+           'scripts/worktree_cleanup.py')
 
 
 def rewrite_hooks(path: Path, release: Path, launcher: Path):

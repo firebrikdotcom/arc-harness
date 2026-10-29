@@ -634,6 +634,22 @@ Each guide gets one marked `harness-efficiency` block, after its `global-harness
 one and at the end otherwise; nothing else in the guide changes, and a missing guide is skipped.
 Edit `docs/agent-efficiency.md` and rerun the script to change the rules; new sessions pick them up.
 
+The same script enforces two of the rules in Codex. It appends the `[features.multi_agent_v2]` table
+from `docs/codex-multi-agent.toml` to `~/.codex/config.toml` in a marked block: helper waits last at
+least 30 minutes (they still end when a helper reports or the user types; Codex caps a wait at one
+hour), and every helper is told to send no progress messages and report once. A config that already
+sets that table is skipped, and the file is restored when `codex features list` rejects the result
+(`HARNESS_CODEX_BIN` picks the Codex binary for that check). New Codex sessions load the settings.
+
+Worktree cleanup is automatic: `scripts/install-hooks.sh` registers `scripts/worktree_cleanup.py`,
+which runs detached at session start and after a merge-like shell command (`git merge`, `rebase`,
+`pull`, `cherry-pick`, `am`). It removes a linked worktree only when it is unlocked, clean (no
+uncommitted or untracked files, no merge or rebase in progress), its commit is also on another branch,
+its branch has commits of its own, it has been idle for an hour, and no process works inside it. It
+uses `git worktree remove` without `--force`, which also deletes ignored files such as build output,
+then `git worktree prune` and `git branch -d`. Preview it with
+`scripts/worktree_cleanup.py --project PATH --dry-run`.
+
 ### Publishing to Firebrik Sites
 
 Any agent session on the machine can publish or update a Firebrik Sites page or static site through the harness:

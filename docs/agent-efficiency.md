@@ -32,10 +32,13 @@ the number of calls. These rules apply to every session and every worker, in eve
   `git worktree prune`. Delete the task branch once it is merged (`git branch -d`, never `-D`).
 - Never remove a worktree with uncommitted changes, unmerged commits, or a process still using it;
   report it instead. Record the cleanup in the handoff file.
+- The harness also removes such worktrees by itself, at session start and after a merge; it
+  keeps any worktree that is dirty, unmerged, not started, recently used, or in use.
 
 **Waiting and commands**
 - Wait on workers and long commands with one long blocking wait (30 minutes or more). Never poll
-  at short intervals, sleep-check, or poll idle terminals.
+  at short intervals, sleep-check, or poll idle terminals. Codex enforces a 30-minute minimum wait
+  for helpers; a wait still ends as soon as a helper reports or the user types.
 - Filter command output: quiet flags, `2>&1 | tail -30`, `grep -E 'error|FAIL'`. Never print whole
   files or logs.
 - Build and test once per commit, not after every edit. Use the project's scoped checks when it has
