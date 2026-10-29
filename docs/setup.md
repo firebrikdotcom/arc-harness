@@ -118,7 +118,7 @@ Optional harness variables:
 - `HARNESS_SESSION_ID`: explicit run identity, ahead of `CODEX_THREAD_ID`, `CLAUDE_SESSION_ID`, and `CLAUDE_CODE_SESSION_ID`; hashed for on-disk pointer and record paths. Native resumes preserve identity.
 - `HARNESS_BUDGET_STEPS`, `HARNESS_BUDGET_TIME_MIN`, `HARNESS_BUDGET_LOOPS`, `HARNESS_BUDGET_TOKENS`: session budget caps read when a `scripts/harness` run is created.
 - `HARNESS_BUDGET_TOKENS` is an explicit run cap. A direct `codex` CLI launch with this value is refused because a separate App Server cannot interrupt that CLI-owned turn. Leave it unset or `unknown` for the existing unmetered launch path.
-- `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`.
+- `HARNESS_BUDGET_CONTINUES`: maximum human continuations allowed for a run; defaults to `3`. Past it, `harness continue --user-approved "NOTE"` resumes once the user approves in chat.
 - `HARNESS_LOCK_TIMEOUT`: seconds a state-changing `scripts/harness` command waits for the run-state lock before failing with exit `2`; a non-negative integer, default `30`, `0` to fail at once when another command holds it.
 - `HARNESS_BUDGET_REPEAT_FAILURES`: identical failures of one command in a row before the run pauses; default `2`, `0` disables.
 - `HARNESS_RUN_IDLE_HOURS`: idle hours before a run is stale and refused; default `24`, `0` disables.

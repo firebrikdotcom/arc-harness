@@ -98,7 +98,9 @@ usage() {
   info "                       baseline (shadow); on follows Jev where the harness has a lever."
   info "  budget --thread ID --tokens N [--watch]"
   info "                       Measure a Codex thread and interrupt its active turn at the cap."
-  info "  continue \"NOTE\"      Resume after a budget pause. The evaluation note is required."
+  info "  continue [--user-approved] \"NOTE\""
+  info "                       Resume after a budget pause. The evaluation note is required;"
+  info "                       --user-approved (the user approved it in chat) also passes the continue cap."
   info "  failure record|clear Repeated-failure counter, fed by scripts/failure_budget.py (hook only)."
   info "  abort \"REASON\"       Abort the current run so a new one can start. The reason is required."
   info ""
@@ -1458,9 +1460,15 @@ cmd_failure() {
 # --- continue ---------------------------------------------------------------
 
 cmd_continue() {
+  # --user-approved: the user approved this continuation in chat, which also allows one past the cap.
+  _approved=false
+  if [ "${1:-}" = "--user-approved" ]; then
+    _approved=true
+    shift
+  fi
   if [ "$#" -lt 1 ] || [ -z "$1" ]; then
     info "FAIL: continue requires an evaluation note."
-    info "Usage: harness continue \"<evaluation note>\""
+    info "Usage: harness continue [--user-approved] \"<evaluation note>\""
     exit "$EXIT_USAGE"
   fi
   _note=$1
@@ -1480,9 +1488,10 @@ cmd_continue() {
 
   _continues=$(state_get CONTINUES_USED 0)
   _continue_cap=$(state_get CAP_CONTINUES "$DEFAULT_CAP_CONTINUES")
-  if [ "$_continues" -ge "$_continue_cap" ]; then
+  if [ "$_continues" -ge "$_continue_cap" ] && [ "$_approved" != true ]; then
     info "FAIL: continue cap reached ($_continues/$_continue_cap) for run $(state_get RUN_ID)."
-    info "A human must decide: harness abort \"<reason>\" and then harness plan start."
+    info "Ask the user. Once they approve more work in chat: harness continue --user-approved \"<evaluation note>\"."
+    info "Otherwise a human decides: harness abort \"<reason>\" and then harness plan start."
     exit "$EXIT_BUDGET"
   fi
   state_set CONTINUES_USED "$(( _continues + 1 ))"
@@ -1507,7 +1516,7 @@ cmd_continue() {
   state_set RUN_STATUS active
   state_set LAST_ACTIVITY_EPOCH "$(now_epoch)"
   write_run_json
-  log_event "continue budget=$(budget_label "$_budget")"
+  log_event "continue budget=$(budget_label "$_budget") user_approved=$_approved"
 
   info "OK: evaluation recorded, run $(state_get RUN_ID) resumed (continue $(state_get CONTINUES_USED)/$(state_get CAP_CONTINUES))."
   if [ "$_budget" = "REPEAT_FAILURE" ]; then

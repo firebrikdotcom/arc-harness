@@ -376,8 +376,12 @@ expect_output "continue 1/1"
 run 3 step --note "uses the extended window"
 run 3 continue "second evaluation"
 expect_output "continue cap reached (1/1)"
+expect_output "continue --user-approved"
 expect_output "harness abort"
 run 3 step --note "still paused"
+run 0 continue --user-approved "User explicitly approved more work in chat."
+expect_output "continue 2/1"
+grep -q 'user_approved=true' "$(state_dir)/log" || fail "user approval not logged"
 
 # --- abort ------------------------------------------------------------------
 
