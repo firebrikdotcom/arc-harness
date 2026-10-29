@@ -83,10 +83,15 @@ if [ -n "$run_id" ] && [ -d "$DB_ROOT/retrieval" ]; then
   done
 fi
 
-python3 - "$HARNESS_ROOT/scripts/jg.sh" "$PROJECT_ROOT" <<'PY' 2>/dev/null || :
+# Jev picks the search strategy: a confident targeted_search keeps the reminder silent.
+jev_choice=$(python3 "$SCRIPT_DIR/jev_moments.py" search --project "$PROJECT_ROOT" --session-id "$session" 2>/dev/null || :)
+[ "$jev_choice" != "targeted_search" ] || exit 0
+
+python3 - "$HARNESS_ROOT/scripts/jg.sh" "$PROJECT_ROOT" "$jev_choice" <<'PY' 2>/dev/null || :
 import json, shlex, sys
-wrapper, project = sys.argv[1:]
-line = (f"Harness: no semantic retrieval yet in this run. For an unfamiliar question, run one first: "
+wrapper, project, choice = sys.argv[1:]
+lead = "Jev recommends a semantic retrieval before searching" if choice == "retrieval" else "Harness: no semantic retrieval yet in this run"
+line = (f"{lead}. For an unfamiliar question, run one first: "
         f"{shlex.quote(wrapper)} --project {shlex.quote(project)} \"question\" (shown once per session).")
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": line}}))
 PY

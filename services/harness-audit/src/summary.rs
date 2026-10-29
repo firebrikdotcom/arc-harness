@@ -22,6 +22,12 @@ pub fn origin_label(origin: Option<&str>) -> &'static str {
         Some("session_routing") => "Session routing",
         Some("task_routing") => "Task routing",
         Some("failure_followup") => "Failure follow-up",
+        Some("prompt_routing") => "Prompt effort",
+        Some("search_selection") => "Search strategy",
+        Some("plan_prioritization") => "Plan first step",
+        Some("verify_followup") => "Verify follow-up",
+        Some("review_grading") => "Review grading",
+        Some("handoff_check") => "Handoff (shadow)",
         _ => "Legacy / unknown",
     }
 }
