@@ -59,11 +59,14 @@ class BoardTests(unittest.TestCase):
         git(self.project, "init", "-q")
         git(self.project, "add", ".")
         git(self.project, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init")
-        tdir = self.db / "targets" / "demo-1"
-        tdir.mkdir(parents=True)
-        (tdir / "target.state").write_text(f"TARGET_ID=demo-1\nTARGET_ROOT={self.project}\nLAST_SEEN_AT=2026-10-19T00:00:00Z\n")
+        registered = subprocess.run(
+            ["sh", str(ROOT / "scripts" / "harness-target.sh"), "register", str(self.project)],
+            env=dict(os.environ, HARNESS_DB_ROOT=str(self.db)),
+            check=True, capture_output=True, text=True,
+        )
+        self.target_id = Path(registered.stdout.strip()).name
         board.DB_ROOT = self.db
-        self.target = board.resolve_target("demo-1")
+        self.target = board.resolve_target(self.target_id)
         self.agent = base / "agent.py"
         self.agent.write_text(FAKE_AGENT)
         self.env = dict(os.environ, HARNESS_BOARD_MAPPER_CMD=json.dumps([sys.executable, str(self.agent)]))
@@ -84,12 +87,12 @@ class BoardTests(unittest.TestCase):
                               capture_output=True, text=True, env=env or self.env, timeout=60)
 
     def test_resolve_by_path_inside_target(self):
-        self.assertEqual(board.resolve_target(str(self.project / "src"))["TARGET_ID"], "demo-1")
+        self.assertEqual(board.resolve_target(str(self.project / "src"))["TARGET_ID"], self.target_id)
 
     def test_check_without_board_asks_for_full_mapping(self):
         info = board.check(self.target)
         self.assertEqual(info["action"], "map_full")
-        self.assertTrue((self.db / "targets" / "demo-1" / "board" / "check.json").exists())
+        self.assertTrue((self.db / "targets" / self.target_id / "board" / "check.json").exists())
 
     def test_check_skips_non_software_and_opted_out(self):
         for p in self.project.rglob("*.py"):
@@ -103,9 +106,9 @@ class BoardTests(unittest.TestCase):
 
     def test_map_writes_only_to_the_db_and_any_change_is_drift(self):
         before = self.project_state()
-        result = self.run_cli("map", "--target", "demo-1")
+        result = self.run_cli("map", "--target", self.target_id)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        bd = self.db / "targets" / "demo-1" / "board"
+        bd = self.db / "targets" / self.target_id / "board"
         saved = json.loads((bd / "board.json").read_text())
         self.assertEqual([n["id"] for n in saved["nodes"]], ["app", "store"])
         self.assertEqual(json.loads((bd / "state.json").read_text())["state"], "ready")
@@ -121,19 +124,19 @@ class BoardTests(unittest.TestCase):
 
     def test_failed_mapping_keeps_state_and_releases_lock(self):
         env = dict(self.env, HARNESS_BOARD_MAPPER_CMD=json.dumps([sys.executable, "-c", "print('no json here')"]))
-        result = self.run_cli("map", "--target", "demo-1", env=env)
+        result = self.run_cli("map", "--target", self.target_id, env=env)
         self.assertEqual(result.returncode, 1)
-        bd = self.db / "targets" / "demo-1" / "board"
+        bd = self.db / "targets" / self.target_id / "board"
         self.assertEqual(json.loads((bd / "state.json").read_text())["state"], "failed")
         self.assertFalse((bd / "mapper.lock").exists())
         self.assertFalse((bd / "board.json").exists())
 
     def test_live_lock_blocks_a_second_mapper(self):
-        bd = self.db / "targets" / "demo-1" / "board"
+        bd = self.db / "targets" / self.target_id / "board"
         bd.mkdir(parents=True)
         (bd / "mapper.lock").write_text(f"{os.getpid()} now\n")
         self.assertEqual(board.check(self.target)["reason"], "mapper running")
-        self.assertEqual(self.run_cli("map", "--target", "demo-1").returncode, 1)
+        self.assertEqual(self.run_cli("map", "--target", self.target_id).returncode, 1)
 
     def test_spawn_is_refused_inside_a_mapper_session(self):
         os.environ["HARNESS_BOARD_MAPPER"] = "1"
@@ -173,12 +176,12 @@ class BoardTests(unittest.TestCase):
 
     def test_overlay_carries_the_signals_heat_and_marks_it_stale(self):
         board.do_import(self.target, self.write(SMALL_BOARD))
-        signals = self.db / "targets" / "demo-1" / "signals"
+        signals = self.db / "targets" / self.target_id / "signals"
         signals.mkdir()
         fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         heat = {"generated_at": fresh, "cards": {"app": {"heat": 1.0, "score": 3.2, "issues": 1, "top": []}}, "unmapped": []}
         (signals / "heat.json").write_text(json.dumps(heat))
-        ov = json.loads(self.run_cli("overlay", "--target", "demo-1", "--json").stdout)
+        ov = json.loads(self.run_cli("overlay", "--target", self.target_id, "--json").stdout)
         self.assertEqual(ov["heat"]["cards"]["app"]["heat"], 1.0)
         self.assertFalse(ov["heat"]["stale"])
         (signals / "heat.json").write_text(json.dumps(dict(heat, generated_at="2026-01-01T00:00:00Z")))
@@ -187,28 +190,28 @@ class BoardTests(unittest.TestCase):
         self.assertIsNone(board.overlay(self.target)["heat"])
 
     def test_list_and_show_commands(self):
-        self.assertEqual(self.run_cli("show", "--target", "demo-1").returncode, 3)
+        self.assertEqual(self.run_cli("show", "--target", self.target_id).returncode, 3)
         board.do_import(self.target, self.write(SMALL_BOARD))
         rows = json.loads(self.run_cli("list", "--json").stdout)
-        self.assertEqual(rows[0]["id"], "demo-1")
+        self.assertEqual(rows[0]["id"], self.target_id)
         self.assertEqual(rows[0]["state"], "ready")
-        shown = self.run_cli("show", "--target", "demo-1")
+        shown = self.run_cli("show", "--target", self.target_id)
         self.assertEqual(json.loads(shown.stdout)["title"], "Demo")
-        state = json.loads(self.run_cli("state", "--target", "demo-1", "--json").stdout)
+        state = json.loads(self.run_cli("state", "--target", self.target_id, "--json").stdout)
         self.assertEqual(state["check"]["action"], "none")
         self.assertEqual(self.run_cli("state", "--target", "nope", "--json").returncode, 1)
 
     def test_remove_hides_the_project_and_stops_mapping_until_restored(self):
         board.do_import(self.target, self.write(SMALL_BOARD))
-        self.assertEqual(json.loads(self.run_cli("remove", "--target", "demo-1").stdout), {"id": "demo-1", "removed": True})
+        self.assertEqual(json.loads(self.run_cli("remove", "--target", self.target_id).stdout), {"id": self.target_id, "removed": True})
         self.assertEqual(json.loads(self.run_cli("list", "--json").stdout), [])
-        self.assertEqual([r["id"] for r in json.loads(self.run_cli("list", "--json", "--removed").stdout)], ["demo-1"])
+        self.assertEqual([r["id"] for r in json.loads(self.run_cli("list", "--json", "--removed").stdout)], [self.target_id])
         (self.project / "src" / "app.py").write_text("# changed\n")
         self.assertEqual(board.check(self.target)["reason"], "removed")
         # The stored board is kept, so a restore shows it again at once.
-        self.assertEqual(self.run_cli("show", "--target", "demo-1").returncode, 0)
-        self.run_cli("restore", "--target", "demo-1")
-        self.assertEqual([r["id"] for r in json.loads(self.run_cli("list", "--json").stdout)], ["demo-1"])
+        self.assertEqual(self.run_cli("show", "--target", self.target_id).returncode, 0)
+        self.run_cli("restore", "--target", self.target_id)
+        self.assertEqual([r["id"] for r in json.loads(self.run_cli("list", "--json").stdout)], [self.target_id])
         self.assertEqual(json.loads(self.run_cli("list", "--json", "--removed").stdout), [])
         self.assertEqual(board.check(self.target)["action"], "refresh")
         self.assertEqual(self.run_cli("remove", "--target", "nope").returncode, 1)
@@ -225,7 +228,11 @@ class BoardTests(unittest.TestCase):
         started = time.time()
         subprocess.run(["sh", str(ROOT / "scripts" / "hooks" / "auto-init.sh")], input=payload, text=True, env=env,
                        capture_output=True, timeout=120, cwd=str(self.project))
-        bd = self.db / "targets" / "demo-1" / "board"
+        self.assertEqual(
+            sorted(p.parent.name for p in (self.db / "targets").glob("*/target.state")),
+            [self.target_id], "session startup must reuse the registered fixture target",
+        )
+        bd = self.db / "targets" / self.target_id / "board"
         deadline = time.time() + 60
         while time.time() < deadline and not (bd / "board.json").exists():
             time.sleep(0.5)
