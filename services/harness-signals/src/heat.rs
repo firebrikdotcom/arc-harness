@@ -17,6 +17,16 @@ const UNMAPPED: usize = 10;
 const CALLER_WEIGHT: f64 = 0.3;
 const NEW_HOURS: i64 = 24;
 
+/// The time scores decay to. Tests pin it to the fixtures' time so their scores never age.
+#[cfg(not(test))]
+fn clock() -> DateTime<Utc> {
+    Utc::now()
+}
+#[cfg(test)]
+fn clock() -> DateTime<Utc> {
+    "2026-10-23T12:00:00Z".parse().unwrap()
+}
+
 fn level_weight(level: &str) -> f64 {
     match level {
         "fatal" => 8.0,
@@ -202,7 +212,7 @@ pub fn refresh(target: &Target, project: &Project, half_life: f64) -> anyhow::Re
         project,
         &target.issues(),
         &target.polls(),
-        Utc::now(),
+        clock(),
         half_life,
     );
     crate::store::write_json(&target.signals().join("heat.json"), &heat)?;

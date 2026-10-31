@@ -31,6 +31,9 @@ FIXTURE="$TMP_ROOT/fixture"
 WORKDIR="$FIXTURE/src"
 OUT="$TMP_ROOT/out.txt"
 PARALLEL=16
+# The burst cases check that every queued step lands, not how fast: 16 serialized
+# steps can outlast the 30s default wait when a full verify loads the machine.
+BURST_LOCK_TIMEOUT=300
 
 fail() {
   printf '%s\n' "FAIL: $*"
@@ -91,7 +94,7 @@ run 0 plan start
 i=0
 pids=""
 while [ "$i" -lt "$PARALLEL" ]; do
-  (cd "$WORKDIR" && "$CLI" step --note "parallel $i") > "$TMP_ROOT/step-$i.txt" 2>&1 &
+  (cd "$WORKDIR" && HARNESS_LOCK_TIMEOUT=$BURST_LOCK_TIMEOUT "$CLI" step --note "parallel $i") > "$TMP_ROOT/step-$i.txt" 2>&1 &
   pids="$pids $!"
   i=$((i + 1))
 done
@@ -177,7 +180,7 @@ ln -s "pid:$(dead_pid)" "$LOCK"
 i=0
 pids=""
 while [ "$i" -lt "$PARALLEL" ]; do
-  (cd "$WORKDIR" && "$CLI" step --note "behind a crash $i") > "$TMP_ROOT/crash-$i.txt" 2>&1 &
+  (cd "$WORKDIR" && HARNESS_LOCK_TIMEOUT=$BURST_LOCK_TIMEOUT "$CLI" step --note "behind a crash $i") > "$TMP_ROOT/crash-$i.txt" 2>&1 &
   pids="$pids $!"
   i=$((i + 1))
 done

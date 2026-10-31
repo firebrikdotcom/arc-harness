@@ -180,3 +180,50 @@ confidence threshold may be stricter than 70%, but cannot lower that floor.
 This floor applies to explicit advice, decision receipts and task-entry routing.
 Policy cohorts now use `decision-3`; context/question versions remain unchanged
 because the provider question did not change.
+
+## Codex as the decision provider (available, not in use)
+
+Decisions go to Jev. A second provider, `scripts/codex_router.py`, can answer the
+same questions with the signed-in Codex plan instead, but it is switched off.
+On 2026-10-30 we decided to keep Jev, because each Codex answer uses about
+37,000 tokens of the plan's usage allowance. A Jev call uses far fewer tokens
+and costs a fraction of a cent.
+
+Reconsider the Codex provider if the TypeSafe key is unavailable, if Jev pricing
+rises, or if the Codex allowance has room to spare.
+
+### What was measured
+
+- Three test questions on 2026-10-30, with `gpt-6.1-sol` at low reasoning effort,
+  each took 5 to 11 seconds and used 37,000 to 38,000 input tokens and about 25
+  output tokens.
+- Almost all of those input tokens are Codex's own fixed instructions and tool
+  descriptions. Skipping the user configuration and rules
+  (`--ignore-user-config --ignore-rules`) saved only about 1,000 of them, so
+  they cannot be trimmed from the harness side.
+- A real `harness advise` call through Codex was evaluated and delegated with
+  confidence 0.99. `harness decision` loads the router through the same code
+  path.
+
+### How to switch to Codex
+
+Setup steps are in `docs/setup.md`, under `HARNESS_TYPESAFE_ROUTER`. In short,
+set `HARNESS_TYPESAFE_ROUTER` to `scripts/codex_router.py`,
+`TYPESAFE_MODEL=codex:<model>` and `HARNESS_JEV_TIMEOUT=60`. Unset all three to
+return to Jev. The pin must start with `codex:`, so a stray Jev pin fails
+clearly instead of sending a Jev model name to Codex.
+
+### Design notes
+
+- The router keeps the TypeSafe router interface (`post_json`, `api_url`,
+  `pinned_model`, `resolve_api_key`, `redact`, request logs), so no harness
+  caller changed. It reuses the TypeSafe skill's redaction and log helpers, so
+  that skill must stay installed.
+- Each question runs one `codex exec` in an empty scratch directory with a
+  read-only sandbox, `--ephemeral` and an output schema built from the
+  questions. The harness and agent-session variables are removed from its
+  environment, except `CODEX_HOME`, which keeps the login.
+  `HARNESS_AUTO_INIT=0` stops the child from registering a target, and a marker
+  variable refuses nested decision calls.
+- The response records the requested `codex:` model and the token counts, and
+  no dollar cost: usage counts against the plan, not a bill.
