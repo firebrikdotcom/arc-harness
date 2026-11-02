@@ -9,9 +9,6 @@ Items are numbered so they can be referred to as `#N`. Numbers are stable: a don
 
 The repository is public. #58 (supervisor paths rendered from the install root, with `.env` overrides and a test from another directory) was resolved 2026-10-10.
 
-- [ ] 55. `README.md` does not mention the license.
-  - Why: readers look for reuse terms on the front page; `LICENSE` exists but nothing points to it.
-  - Fix: link `LICENSE` from `README.md` and check third-party attribution requirements.
 - [ ] 56. Older commits still contain personal paths, machine names, and private run notes.
   - Why: cleaning today's tree leaves every earlier commit readable on GitHub; `tests/personal-paths.sh` guards only the current tree.
   - Fix: decide whether to rewrite history (`git-filter-repo` in a disposable clone, then a coordinated force-push) or publish a fresh single-commit repository; run a full-history secret scan either way.

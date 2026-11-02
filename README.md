@@ -228,6 +228,8 @@ Audited todo plans are enforced by additive native hooks, independently of colle
 
 ## License
 
+Bundled artwork attribution and license notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Dependencies retain their own licenses.
+
 This harness is licensed under either of the MIT license ([LICENSE-MIT](LICENSE-MIT)) or the Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your option. Unless you state otherwise, any contribution you submit for inclusion is dual licensed as above, without any additional terms or conditions.
 
 Runtime toggles share `~/.config/harness/config.json` with brief `_doc` reminders. Run `scripts/harness config init` to preserve and migrate current choices; see [unified runtime configuration](docs/setup.md#unified-runtime-configuration).
