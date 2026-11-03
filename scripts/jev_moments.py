@@ -33,10 +33,18 @@ NEXT_STEPS = {
     "investigate": "The cause is unclear; read the failing code or logs before changing anything.",
     "ask_user": "The failure needs a credential, environment or decision only the user can supply.",
 }
+# EFFORT is the advice line the agent reads; EFFORT_CRITERIA is what Jev chooses between. The
+# criteria name the facts that are sent and which one wins: replaying recorded prompts, criteria
+# phrased as "routine" versus "ambiguous" held Jev near 0.5, and fact-tied ones cleared 0.70.
+# delegate is not offered: Jev never chose it in any recorded call.
 EFFORT = {
     "direct": "Handle it directly with normal reasoning; the request is routine and well scoped.",
     "think_deeper": "Plan first and reason carefully; the request is ambiguous, risky or spans several parts.",
-    "delegate": "Split it and hand bounded parts to workers when dispatch is enabled.",
+}
+EFFORT_CRITERIA = {
+    "think_deeper": "Any of: two or more separate asks, pasted text or code, or more than 40 words with no task "
+                    "in progress. This wins over referring back.",
+    "direct": "None of those: a single ask, a short question, or a follow-up to the task in progress.",
 }
 SEARCH = {
     "retrieval": "Run one semantic retrieval (jg) first; the question is behavioral or the code is unfamiliar.",
@@ -48,9 +56,9 @@ SEVERITY = {
     "minor": "A follow-up: style, naming, small clarity or an unlikely edge case.",
 }
 HANDOFF = {
-    "hand_off": "Hand off now, stating any remaining gap.",
-    "keep_working": "Keep working: an open step or failing check should be resolved first.",
-    "ask_user": "A decision or input only the user can supply is needed.",
+    "hand_off": "Nothing is left: no open or blocked step, no failing check, and the final reply does not end with a question.",
+    "keep_working": "Work remains: an open step or a failing check, and the final reply does not end with a question.",
+    "ask_user": "The final reply ends with a question to the user, or a step is blocked on the user.",
 }
 # Local prompt-shape signals: the prompt is read here and only these labels and counts leave.
 # A leading "do" usually opens an instruction ("do all of those"), so it is not a question marker.
@@ -122,6 +130,19 @@ def session_facts(context: dict) -> list[str]:
     return facts
 
 
+def known(facts: list[str]) -> list[str]:
+    """Drop facts that carry no information: an unknown value or an empty plan reads to Jev as ambiguity."""
+    return [fact for fact in facts if not fact.endswith(": unknown")
+            and fact != "Plan steps: 0 open, 0 completed, 0 blocked"]
+
+
+def task_in_progress(context: dict) -> str:
+    task = context.get("task_summary") or {}
+    open_steps = any(item.get("status") in ("pending", "in_progress", "blocked")
+                     for item in context.get("todos", {}).values())
+    return "yes" if task.get("description") or context.get("plan_summary") or open_steps else "no"
+
+
 def scope_of(context: dict, **extra) -> dict:
     return {"request_id": context.get("request_id"), "request_seq": context.get("request_seq"),
             "plan_revision": context.get("plan_revision"), **extra}
@@ -147,11 +168,11 @@ def prompt_shape(prompt) -> list[str]:
 def prompt_effort(project: Path, session_id: str, prompt) -> str | None:
     """How much effort a new prompt needs; only locally derived counts and labels are shared, never its text."""
     context = load_context(session_id)
-    facts = [*session_facts(context), *prompt_shape(prompt),
-             "Prompt number in this session: " + str(context.get("request_seq", "unknown"))]
+    facts = known([*session_facts(context), "Task in progress: " + task_in_progress(context), *prompt_shape(prompt),
+                   "Prompt number in this session: " + str(context.get("request_seq", "unknown"))])
     action = ask(project=project, session_id=session_id, family="reasoning_allocation",
-                 goal="Choose how much effort the new request needs", facts=facts, choices=EFFORT,
-                 scope=scope_of(context), origin="prompt_routing", version=2)
+                 goal="Choose how much effort the new request needs", facts=facts, choices=EFFORT_CRITERIA,
+                 scope=scope_of(context), origin="prompt_routing", version=3)
     return f"Jev effort for this prompt: {action}. {EFFORT[action]}" if action else None
 
 
@@ -255,8 +276,8 @@ def last_reply(payload: dict) -> str | None:
 def handoff_facts(project: Path, context: dict, payload: dict) -> list[str]:
     reply = last_reply(payload)
     asks = "unknown" if reply is None else "yes" if reply.rstrip().rstrip("*_`)\"'").endswith("?") else "no"
-    return [*session_facts(context), "Uncommitted changed files: " + uncommitted_files(project),
-            "Final reply ends with a question to the user: " + asks]
+    return known([*session_facts(context), "Uncommitted changed files: " + uncommitted_files(project),
+                  "Final reply ends with a question to the user: " + asks])
 
 
 def record_handoff(project: Path, session_id: str, payload: dict | None = None) -> None:
@@ -265,7 +286,7 @@ def record_handoff(project: Path, session_id: str, payload: dict | None = None) 
     ask(project=project, session_id=session_id, family="handoff_assessment",
         goal="Decide whether the agent should hand off at the end of this turn",
         facts=handoff_facts(project, context, payload or {}), choices=HANDOFF,
-        scope=scope_of(context, moment="stop"), origin="handoff_check", version=2)
+        scope=scope_of(context, moment="stop"), origin="handoff_check", version=3)
 
 
 def main(argv=None) -> int:

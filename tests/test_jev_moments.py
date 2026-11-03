@@ -73,7 +73,20 @@ class Moments(unittest.TestCase):
         for private in PRIVATE + ('jane', 'charge'):
             self.assertNotIn(private, sent)
         self.assertEqual(self.origin(), ('prompt_routing', 'reasoning_allocation'))
-        self.assertEqual(self.sent[-1]['checkpoint']['context_version'], 'prompt-routing-2')
+        self.assertEqual(self.sent[-1]['checkpoint']['context_version'], 'prompt-routing-3')
+        # Only known facts go out, and Jev chooses between the fact-tied criteria, not the advice text.
+        facts = self.sent[-1]['context']['facts']
+        self.assertIn('Task in progress: yes', facts)
+        self.assertFalse([fact for fact in facts if fact.endswith(': unknown')], facts)
+        self.assertEqual(self.sent[-1]['questions']['recommendation']['criteria'], jev_moments.EFFORT_CRITERIA)
+
+    def test_known_drops_uninformative_facts_and_flags_a_missing_task(self):
+        self.assertEqual(jev_moments.known(['Task purpose: unknown', 'Plan steps: 0 open, 0 completed, 0 blocked',
+                                            'Plan steps: 1 open, 0 completed, 0 blocked', 'Last recorded verify: passed']),
+                         ['Plan steps: 1 open, 0 completed, 0 blocked', 'Last recorded verify: passed'])
+        self.assertEqual(jev_moments.task_in_progress({}), 'no')
+        self.assertEqual(jev_moments.task_in_progress({'todos': {'a': {'status': 'blocked'}}}), 'yes')
+        self.assertEqual(jev_moments.task_in_progress({'todos': {'a': {'status': 'completed'}}}), 'no')
 
     def test_prompt_shape_separates_questions_instructions_and_scope(self):
         def shape(prompt):
@@ -142,8 +155,9 @@ class Moments(unittest.TestCase):
             self.assertEqual(workflow_gate.main(), 0)
         self.assertEqual(out.getvalue(), '{}\n')
         self.assertEqual(self.origin(), ('handoff_check', 'handoff_assessment'))
-        self.assertEqual(self.sent[-1]['checkpoint']['context_version'], 'handoff-check-2')
-        self.assertIn('Final reply ends with a question to the user: unknown', json.dumps(self.sent[-1]))
+        self.assertEqual(self.sent[-1]['checkpoint']['context_version'], 'handoff-check-3')
+        self.assertNotIn('Final reply ends with a question to the user', json.dumps(self.sent[-1]))
+        self.assertEqual(self.sent[-1]['questions']['recommendation']['criteria'], jev_moments.HANDOFF)
         with patch.object(jev_moments, 'record_handoff', side_effect=RuntimeError('store down')):
             workflow_gate.record_handoff({'session_id': 'session', 'cwd': str(self.root)})
 
@@ -166,7 +180,7 @@ class Moments(unittest.TestCase):
         self.assertIn('Final reply ends with a question to the user: yes', sent)
         self.assertNotIn(PRIVATE[1], sent)
         facts = jev_moments.handoff_facts(self.root / 'missing', {}, {'last_assistant_message': 'Done.'})
-        self.assertIn('Uncommitted changed files: unknown', facts)
+        self.assertNotIn('Uncommitted changed files: unknown', facts)
         self.assertIn('Final reply ends with a question to the user: no', facts)
 
     def test_prompt_advice_is_printed_once_and_failures_are_silent(self):

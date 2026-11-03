@@ -1,0 +1,21 @@
+{
+  "goal": "Raise prompt-effort and handoff checkpoint confidence by sending only known facts and describing each choice in terms of those facts, as measured by replaying recorded fact sets.",
+  "deliverables": [
+    "scripts/jev_moments.py",
+    "tests/test_jev_moments.py",
+    "docs/jev-checkpoints.md"
+  ],
+  "constraints": [
+    "Prompt text, reply text, paths and source never leave the machine.",
+    "The 0.70 confidence threshold is unchanged.",
+    "The handoff check stays shadow-only and a Stop hook never fails.",
+    "The printed effort line keeps its plain description."
+  ],
+  "non_goals": [
+    {"description": "Do not change Jev provider calls, decision receipts or the threshold.", "paths": ["scripts/decision_checkpoint.py", "scripts/context_advice.py"]},
+    {"description": "Do not change other checkpoints (verify, failure, review, plan, search)."}
+  ],
+  "acceptance": [
+    {"id": "moments", "criterion": "Prompt and handoff checks send known facts and fact-tied criteria, without private text", "command": ["python3", "-m", "unittest", "tests/test_jev_moments.py"]}
+  ]
+}
