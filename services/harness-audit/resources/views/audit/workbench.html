@@ -26,7 +26,7 @@
 })();
 </script>
 <section class="panel confidence-chart" data-client-calendar="{{ client_timezone | default(value='') }}"><div class="panel__head"><h2>Jev confidence over time</h2>{% if confidence_chart.latest %}<span class="mono">Latest {{ confidence_chart.latest.date }}: {{ confidence_chart.latest.percent }}%</span>{% endif %}</div>
-<p class="section-note">Daily mean of Jev’s self-reported recommendation confidence in your timezone, pooling all checkpoint families. This is not measured accuracy. Missing or invalid confidence is unknown; days without valid samples leave gaps.</p>
+<p class="section-note">Daily mean of Jev’s self-reported recommendation confidence in your timezone, pooling all checkpoint families except legacy advice (calls sent without a checkpoint, listed in the table below). This is not measured accuracy. Missing or invalid confidence is unknown; days without valid samples leave gaps.</p>
 {% if confidence_chart.points %}<div class="chart-wrap"><svg class="chart" viewBox="0 0 {{ confidence_chart.width }} {{ confidence_chart.height }}" role="img" aria-labelledby="confidence-chart-title"><title id="confidence-chart-title">Daily Jev confidence, {{ confidence_chart.points | length }} days with confidence samples</title>
 {% for g in confidence_chart.gridlines %}<line class="chart__grid" x1="{{ confidence_chart.plot_left }}" x2="{{ confidence_chart.plot_right }}" y1="{{ g.y }}" y2="{{ g.y }}"/><text class="chart__axis" x="{{ confidence_chart.plot_left - 8 }}" y="{{ g.y }}" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>{% endfor %}
 {% for t in confidence_chart.ticks %}<text class="chart__axis" x="{{ t.x }}" y="{{ confidence_chart.axis_y }}" text-anchor="middle">{{ t.label }}</text>{% endfor %}

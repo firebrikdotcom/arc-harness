@@ -154,20 +154,14 @@ export HARNESS_TYPESAFE_ROUTER="$ROOT/tests/fake_router.py"
 export FAKE_ROUTER_LOG_DIR="$TMP_ROOT/logs"
 payload SessionStart "$WT" "" "" | sh "$HOOK" > "$OUT" 2>&1
 [ "$(count "$TDIR/db/routes")" -ge 1 ] || fail "chained session route did not record in the target database"
-python3 - "$TDIR/db/routes" "$TMP_ROOT" <<'PY' || fail "session route did not carry enum-only target history"
+# No request exists at session start, so a deterministic rule routes it and Jev is not asked;
+# target history for routed launches is covered by tests/test_task_routing.py.
+python3 - "$TDIR/db/routes" <<'PY' || fail "session route was not the deterministic default"
 import json, sys
 from pathlib import Path
-directory, private = sys.argv[1:]
-records = [json.loads(path.read_text()) for path in Path(directory).glob("*.json")]
-routed = [record for record in records if record.get("source") != "deterministic"]
-assert routed, records
-enums = {"none", "one", "few", "many", "passed", "failed"}
-for record in routed:
-    history = record["history"]
-    assert len(history) == 7 and set(history.values()) <= enums, history
-    assert private not in json.dumps(history), history
-    # Section 10 left one run in the target database with a verified build.
-    assert (history["prior_runs"], history["verified_builds"], history["last_verify"]) == ("one", "one", "passed"), history
+records = [json.loads(path.read_text()) for path in Path(sys.argv[1]).glob("*.json")]
+assert records and all((r["source"], r["recommendation"], r["metadata"]["uncertainty_reason"])
+                       == ("deterministic", "default", "none") for r in records), records
 PY
 before=$(count "$TDIR/db/advice")
 for _ in 1 2 3; do

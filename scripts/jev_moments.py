@@ -20,6 +20,8 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,6 +52,14 @@ HANDOFF = {
     "keep_working": "Keep working: an open step or failing check should be resolved first.",
     "ask_user": "A decision or input only the user can supply is needed.",
 }
+# Local prompt-shape signals: the prompt is read here and only these labels and counts leave.
+# A leading "do" usually opens an instruction ("do all of those"), so it is not a question marker.
+QUESTION_START = re.compile(r"(why|what|how|which|where|when|who|whose|is|are|was|were|can|could|should|would|"
+                            r"does|did)\b", re.I)
+BACK_REFERENCE = re.compile(r"\b(that|those|them|it|again|same|above|previous|earlier)\b", re.I)
+PATH_LIKE = re.compile(r"(?<![\w/@.-])(?:[\w.~-]*/[\w.~/-]+|[\w-]+\.[A-Za-z][A-Za-z0-9]{0,4})(?![\w/@])")
+LIST_ITEM = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.M)
+TRANSCRIPT_TAIL_BYTES = 262144
 
 
 def enabled() -> bool:
@@ -61,7 +71,7 @@ def enabled() -> bool:
 
 
 def ask(*, project: Path, session_id: str | None, family: str, goal: str, facts: list[str],
-        choices: dict[str, str], scope: dict, origin: str) -> str | None:
+        choices: dict[str, str], scope: dict, origin: str, version: int = 1) -> str | None:
     """Jev's confident choice, or None when disabled, unsure or unavailable."""
     try:
         if not isinstance(session_id, str) or not session_id or not enabled():
@@ -75,7 +85,7 @@ def ask(*, project: Path, session_id: str | None, family: str, goal: str, facts:
     try:
         receipt = evaluate(project=Path(project).resolve(), session_id=session_id, family=family, goal=goal,
                            facts=facts, choices=choices, scope=scope, state={"scope": scope},
-                           origin=origin, context_version=origin.replace("_", "-") + "-1")
+                           origin=origin, context_version=f"{origin.replace('_', '-')}-{version}")
     except Exception:
         return None
     finally:
@@ -117,16 +127,31 @@ def scope_of(context: dict, **extra) -> dict:
             "plan_revision": context.get("plan_revision"), **extra}
 
 
+def prompt_shape(prompt) -> list[str]:
+    """Counts and labels derived locally from a prompt; its text, paths and names stay here."""
+    text = prompt if isinstance(prompt, str) else ""
+    stripped = text.strip()
+    question = stripped.endswith("?") or bool(QUESTION_START.match(stripped))
+    items = len(LIST_ITEM.findall(text))
+    sentences = len([part for part in re.split(r"[.?!]+(?:\s|$)|\n+", text) if part.strip()])
+    opening = " ".join(stripped.split()[:12])
+    pasted = "```" in text or "<pasted_content" in text or text.count("\n") >= 20
+    return [f"New prompt size: {len(text.split())} words (text not shared)",
+            "Prompt form: " + ("question" if question else "instruction"),
+            f"Separate asks (list items or sentences): {items or sentences}",
+            f"File paths or file names mentioned: {len(PATH_LIKE.findall(text))}",
+            "Opens by referring back to earlier conversation: " + ("yes" if BACK_REFERENCE.search(opening) else "no"),
+            "Contains pasted text or code: " + ("yes" if pasted else "no")]
+
+
 def prompt_effort(project: Path, session_id: str, prompt) -> str | None:
-    """How much effort a new prompt needs; only its word count is shared, never its text."""
+    """How much effort a new prompt needs; only locally derived counts and labels are shared, never its text."""
     context = load_context(session_id)
-    words = len(prompt.split()) if isinstance(prompt, str) else 0
-    facts = [*session_facts(context),
-             f"New prompt size: {words} words (text not shared)",
+    facts = [*session_facts(context), *prompt_shape(prompt),
              "Prompt number in this session: " + str(context.get("request_seq", "unknown"))]
     action = ask(project=project, session_id=session_id, family="reasoning_allocation",
                  goal="Choose how much effort the new request needs", facts=facts, choices=EFFORT,
-                 scope=scope_of(context), origin="prompt_routing")
+                 scope=scope_of(context), origin="prompt_routing", version=2)
     return f"Jev effort for this prompt: {action}. {EFFORT[action]}" if action else None
 
 
@@ -184,12 +209,63 @@ def grade_findings(project: Path, session_id: str, findings: dict) -> list[str]:
     return notes
 
 
-def record_handoff(project: Path, session_id: str) -> None:
+def uncommitted_files(project: Path) -> str:
+    try:
+        result = subprocess.run(["git", "-C", str(project), "status", "--porcelain"], capture_output=True,
+                                text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if result.returncode:
+        return "unknown"
+    count = sum(1 for line in result.stdout.splitlines() if line.strip())
+    return "100 or more" if count >= 100 else str(count)
+
+
+def last_reply(payload: dict) -> str | None:
+    """The agent's final reply text: the Stop payload's field, else the transcript's last assistant text."""
+    message = payload.get("last_assistant_message")
+    if isinstance(message, str):
+        return message
+    path = payload.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - TRANSCRIPT_TAIL_BYTES))
+            lines = stream.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        content = (entry.get("message") or {}).get("content")
+        texts = [block.get("text") for block in content if isinstance(block, dict) and block.get("type") == "text"] \
+            if isinstance(content, list) else [content] if isinstance(content, str) else []
+        text = "\n".join(item for item in texts if isinstance(item, str) and item.strip())
+        if text:
+            return text
+    return None
+
+
+def handoff_facts(project: Path, context: dict, payload: dict) -> list[str]:
+    reply = last_reply(payload)
+    asks = "unknown" if reply is None else "yes" if reply.rstrip().rstrip("*_`)\"'").endswith("?") else "no"
+    return [*session_facts(context), "Uncommitted changed files: " + uncommitted_files(project),
+            "Final reply ends with a question to the user: " + asks]
+
+
+def record_handoff(project: Path, session_id: str, payload: dict | None = None) -> None:
     """Shadow only: Jev's handoff judgment is recorded and never shown or followed."""
     context = load_context(session_id)
     ask(project=project, session_id=session_id, family="handoff_assessment",
-        goal="Decide whether the agent should hand off at the end of this turn", facts=session_facts(context),
-        choices=HANDOFF, scope=scope_of(context, moment="stop"), origin="handoff_check")
+        goal="Decide whether the agent should hand off at the end of this turn",
+        facts=handoff_facts(project, context, payload or {}), choices=HANDOFF,
+        scope=scope_of(context, moment="stop"), origin="handoff_check", version=2)
 
 
 def main(argv=None) -> int:

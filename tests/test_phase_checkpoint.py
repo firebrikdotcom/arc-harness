@@ -225,54 +225,30 @@ class PhaseCheckpointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "verify history not written: FileExistsError")
 
-    def test_session_start_without_a_router_leaves_the_main_agent_path(self) -> None:
-        self.switch_on()
+    def test_session_start_takes_the_default_route_without_asking_jev(self) -> None:
+        # No request exists at session start, so nothing is uncertain and no provider call is made.
+        (self.project / "util.py").write_text("y = 2\n")  # python outweighs markdown: area backend
+        for switch in (False, True):
+            if switch:
+                self.switch_on()
+            for path in (self.db / "routes").glob("*.json"):
+                path.unlink()
+            result = self.run_event("session-start", env={**self.env, "FAKE_STATE_PATH": str(self.root / "state.json")})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "Jev session route: default (source deterministic); existing rules decide.")
+            [route] = [json.loads(p.read_text()) for p in (self.db / "routes").glob("*.json")]
+            self.assertEqual((route["source"], route["recommendation"], route["metadata"]["uncertainty_reason"],
+                              route["metadata"]["area"]), ("deterministic", "default", "none", "backend"))
+            self.assertFalse((self.root / "state.json").exists())
+
+    def test_session_start_sends_a_known_failure_to_normal_diagnosis(self) -> None:
+        self.write_state(RUN_STATUS="active", RUN_ID="run-1")
+        records = self.db / "records"
+        records.mkdir()
+        (records / "verify.state").write_text("RECORD_EPOCH=200\nEXIT=1\n")
         result = self.run_event("session-start", env={**self.env, "HARNESS_TYPESAFE_ROUTER": str(self.root / "missing.py")})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Jev session route not followed", result.stdout)
-        self.assertIn("the main agent decides", result.stdout)
-        route = json.loads(next((self.db / "routes").glob("*.json")).read_text())
-        self.assertEqual((route["source"], route["recommendation"], route["needs_reasoning"]), ("fallback", "default", True))
-
-    def test_session_start_writes_one_shadow_route_from_enum_metadata(self) -> None:
-        (self.project / "util.py").write_text("y = 2\n")  # python outweighs markdown: area backend
-        result = self.run_event("session-start", env={**self.env, "FAKE_STATE_PATH": str(self.root / "state.json")})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "Jev session route observed in shadow mode, not followed: the main agent decides.")
-        [route] = [json.loads(p.read_text()) for p in (self.db / "routes").glob("*.json")]
-        self.assertEqual((route["mode"], route["recommendation"], route["metadata"]["uncertainty_reason"]),
-                         ("shadow", "default", "scope_unclear"))
-        sent = json.loads((self.root / "state.json").read_text())["state"]
-        self.assertNotIn("secretive", json.dumps(sent))
-        self.assertEqual(sent["task"], {"kind": "change", "area": "backend"})
-
-    def test_session_start_reports_the_delegated_route_when_the_switch_is_on(self) -> None:
-        self.switch_on()
-        result = self.run_event("session-start", env={**self.env, "FAKE_STATE_PATH": str(self.root / "state.json")})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "Jev session route: proceed (confidence 0.9, minimum 0.7); "
-                                                "follow it unless a deterministic rule decides.")
-        route = json.loads(next((self.db / "routes").glob("*.json")).read_text())
-        self.assertEqual((route["routing_mode"], route["mode_source"], route["recommendation"]), ("active", "delegation", "proceed"))
-
-    def test_session_start_below_the_threshold_leaves_the_main_agent_path(self) -> None:
-        self.switch_on()
-        result = self.run_event("session-start", env={**self.env, "FAKE_ROUTER_CONFIDENCE": "0.69"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "Jev session route not followed (low_confidence; confidence 0.69, "
-                                                "minimum 0.7): the main agent decides.")
-        route = json.loads(next((self.db / "routes").glob("*.json")).read_text())
-        self.assertEqual((route["recommendation"], route["action"], route["escalation_reason"]),
-                         ("default", "normal_reasoning", "low_confidence"))
-
-    def test_session_start_names_the_holdback_when_the_switch_cannot_apply(self) -> None:
-        self.switch_on()
-        env = {k: v for k, v in self.env.items() if k != "TYPESAFE_MODEL"}
-        (self.config_home / "jev-delegation.json").write_text(json.dumps({"enabled": True, "model": None}))
-        result = self.run_event("session-start", env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("observed in shadow mode, not followed", result.stdout)
-        self.assertIn("Delegation is on but held back: active routing requires an exact model pin", result.stdout)
+        self.assertEqual(result.stdout.strip(), "Jev session route: reasoning_model (source deterministic); existing rules decide.")
 
     def test_session_start_outside_git_skips(self) -> None:
         plain = self.root / "plain"

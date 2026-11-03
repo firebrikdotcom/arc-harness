@@ -105,23 +105,20 @@ advice=$(FAKE_ROUTER_CHOICE=retrieval HARNESS_JEV_DELEGATION=off ask)
 [ "$(field "$advice" action)" = "normal_reasoning" ] || fail "shadow advise did not leave the choice to the agent: $advice"
 [ "$(field "$advice" delegated)" = "false" ] || fail "shadow advise is marked delegated: $advice"
 
-# 7. The session-start route names the delegated route to follow.
+# 7. The session-start route is deterministic with the switch on or off: no request exists yet.
 TARGET="$TMP_ROOT/target"
 mkdir -p "$TARGET"
 git -C "$TARGET" init -q
 printf '<!-- harness-cli:start -->\n<!-- harness-cli:end -->\n' > "$TARGET/AGENTS.md"
 git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid add AGENTS.md
 git -C "$TARGET" -c user.name=t -c user.email=t@example.invalid commit -q -m init
-out=$(HARNESS_JEV_CHECKPOINTS=1 python3 scripts/phase_checkpoint.py session-start --project "$TARGET" --db-root "$HARNESS_DB_ROOT")
-case "$out" in
-  "Jev session route: proceed (confidence 0.9, minimum 0.7); follow it unless a deterministic rule decides.") ;;
-  *) fail "unexpected delegated session line: $out" ;;
-esac
-out=$(HARNESS_JEV_CHECKPOINTS=1 HARNESS_JEV_DELEGATION=off python3 scripts/phase_checkpoint.py session-start --project "$TARGET" --db-root "$HARNESS_DB_ROOT")
-case "$out" in
-  "Jev session route observed in shadow mode, not followed: the main agent decides.") ;;
-  *) fail "unexpected shadow session line: $out" ;;
-esac
+for delegation in on off; do
+  out=$(HARNESS_JEV_CHECKPOINTS=1 HARNESS_JEV_DELEGATION=$delegation python3 scripts/phase_checkpoint.py session-start --project "$TARGET" --db-root "$HARNESS_DB_ROOT")
+  case "$out" in
+    "Jev session route: default (source deterministic); existing rules decide.") ;;
+    *) fail "unexpected session line with delegation $delegation: $out" ;;
+  esac
+done
 
 # 8. off persists too, and a corrupt file is refused rather than guessed.
 scripts/harness jev off --reason "observe only" >/dev/null

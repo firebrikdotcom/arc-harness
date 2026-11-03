@@ -511,7 +511,7 @@ def record_handoff(payload):
         import jev_moments
         sid = audit.session_id(payload.get("session_id"))
         if sid:
-            jev_moments.record_handoff(Path(payload.get("cwd") or ".").resolve(), sid)
+            jev_moments.record_handoff(Path(payload.get("cwd") or ".").resolve(), sid, payload)
     except Exception:
         pass
 

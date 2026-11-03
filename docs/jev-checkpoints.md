@@ -8,16 +8,18 @@ The harness asks Jev automatically at real choices between a few options that a 
 
 | Moment | Where | Family / origin | What the agent sees | Labeled sample |
 | --- | --- | --- | --- | --- |
-| New prompt | `UserPromptSubmit` (`workflow_gate.py`) | `reasoning_allocation` / `prompt_routing` | `Jev effort for this prompt: direct, think_deeper or delegate` | 62% |
+| New prompt | `UserPromptSubmit` (`workflow_gate.py`) | `reasoning_allocation` / `prompt_routing` (`prompt-routing-2`) | `Jev effort for this prompt: direct, think_deeper or delegate` | 62% |
 | First broad search in a session (Claude Code) | `retrieval-reminder.sh` | `evidence_selection` / `search_selection` | `retrieval` strengthens the semantic-retrieval reminder; `targeted_search` silences it | not yet measured |
 | Todo plan recorded | `harness workflow todo plan` | `prioritization` / `plan_prioritization` | `Jev suggests starting with ID: step` (two or more open steps) | not yet measured |
 | Failed shell command | `failure_budget.py` | `progress_assessment` / `failure_followup` | `Jev next step: retry, fix, investigate or ask_user` | 87% |
 | Failed verification | `scripts/verify.sh` | `progress_assessment` / `verify_followup` | the same next-step line before `Verification failed.` | 87% |
 | Review findings submitted | `harness review submit` | `evidence_assessment` / `review_grading` | `Jev grades finding N as ...` where Jev disagrees with the reviewer | 69% |
-| End of each turn | `Stop` (`workflow_gate.py`) | `handoff_assessment` / `handoff_check` | nothing: recorded only (shadow), because labeled agreement was 0–22% | 0–22% |
-| Worker dispatch and task launch | `role_dispatch.py`, `agent_launch.py`, session start | `worker_selection`, `task_routing`, `session_routing` | the selected profile or route | not yet measured |
+| End of each turn | `Stop` (`workflow_gate.py`) | `handoff_assessment` / `handoff_check` (`handoff-check-2`) | nothing: recorded only (shadow), because labeled agreement was 0–22% | 0–22% |
+| Worker dispatch and task launch | `role_dispatch.py`, `agent_launch.py` | `worker_selection`, `task_routing` | the selected profile or route | not yet measured |
 
-Every moment runs only when `HARNESS_JEV_CHECKPOINTS=1`, `typesafe.mode` is `active` and `typesafe.checkpoints` is true. Each asks once with a 5-second timeout and one attempt. A choice below the confidence threshold, or any error, is silent and the agent decides. The answer is advice: it never changes a gate, a stored finding or an exit code. Facts are the curated task purpose and active step (redacted by `jev_context.summary`), plan counts, last verify/review status and fixed action labels. Prompts are reduced to a word count; commands, file paths, source, tool output and review evidence text are never sent. A failed read-only inspection such as `grep` is not triaged, because it usually means no match. Shared code: `scripts/jev_moments.py`.
+Every moment runs only when `HARNESS_JEV_CHECKPOINTS=1`, `typesafe.mode` is `active` and `typesafe.checkpoints` is true. Each asks once with a 5-second timeout and one attempt. A choice below the confidence threshold, or any error, is silent and the agent decides. The answer is advice: it never changes a gate, a stored finding or an exit code. Facts are the curated task purpose and active step (redacted by `jev_context.summary`), plan counts, last verify/review status and fixed action labels. Prompts are reduced locally to their shape: word count, question or instruction, number of separate asks, number of file paths or names, whether the opening refers back to earlier conversation, and whether text or code was pasted. At the end of a turn the handoff check adds the count of uncommitted changed files and whether the final reply ends with a question, read locally from the Stop payload or the transcript tail. Commands, file paths, prompt and reply text, source, tool output and review evidence text are never sent.
+
+Confidence behaves like the margin between Jev's top two choices, so a checkpoint only clears the threshold when its facts tell the choices apart. Prompt effort originally sent a word count alone and split almost evenly between `direct` and `think_deeper`. The handoff check sent plan counts alone. Session start sent a hardcoded `scope_unclear` before any request existed and scored 0.54–0.66 in every session. It now sends `uncertainty_reason: none`, so a deterministic rule routes it to `default` and Jev is not asked; `session_routing` records remain only from earlier sessions. A failed read-only inspection such as `grep` is not triaged, because it usually means no match. Shared code: `scripts/jev_moments.py`.
 
 Do not ask per tool call: the automatic tool check (`typesafe.enforce_decisions`) mostly fell below the threshold (median confidence 0.38 in the largest measured cohort) and its confident answers were mostly requests for more context, so it delayed work more than it decided. Permissions, destructive actions and required checks never go to Jev.
 
@@ -68,7 +70,7 @@ Mechanical phase, verification, review and repeat-command seams no longer reques
 
 ## Measurement
 
-Workbench plots daily mean Jev confidence from genuine valid recommendation samples, in the selected browser timezone. Missing confidence remains unknown; zero is a valid sample. The chart does not join agent choices or correctness labels. It is confidence, not observed accuracy.
+Workbench plots daily mean Jev confidence from genuine valid recommendation samples, in the selected browser timezone. It leaves out `legacy_advice`: calls sent with no checkpoint, which record that family and choose among unnamed labels. They were about two-thirds of recent calls and set the line on their own; the groups table still lists them. Missing confidence remains unknown; zero is a valid sample. The chart does not join agent choices or correctness labels. It is confidence, not observed accuracy.
 
 Private decision and advice records retain confidence, timings and available usage. Historical events, manual outcome APIs and legacy reports remain readable for compatibility; they are not prerequisites for accepting a new recommendation. No pilot accuracy batch is required for the intended active flow.
 

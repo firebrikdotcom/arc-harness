@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import types
@@ -68,9 +69,27 @@ class Moments(unittest.TestCase):
         self.assertEqual(line, 'Jev effort for this prompt: think_deeper. ' + jev_moments.EFFORT['think_deeper'])
         sent = json.dumps(self.sent)
         self.assertIn('New prompt size: 7 words', sent)
+        self.assertIn('File paths or file names mentioned: 1', sent)
         for private in PRIVATE + ('jane', 'charge'):
             self.assertNotIn(private, sent)
         self.assertEqual(self.origin(), ('prompt_routing', 'reasoning_allocation'))
+        self.assertEqual(self.sent[-1]['checkpoint']['context_version'], 'prompt-routing-2')
+
+    def test_prompt_shape_separates_questions_instructions_and_scope(self):
+        def shape(prompt):
+            return dict(fact.split(': ', 1) for fact in jev_moments.prompt_shape(prompt))
+        question = shape('why is the parser slow?')
+        self.assertEqual((question['Prompt form'], question['Separate asks (list items or sentences)'],
+                          question['Opens by referring back to earlier conversation']), ('question', '1', 'no'))
+        follow_up = shape('do all of those, commit and push')
+        self.assertEqual((follow_up['Prompt form'], follow_up['Opens by referring back to earlier conversation']),
+                         ('instruction', 'yes'))
+        listed = shape('Fix these:\n- scripts/a.py crashes\n- README.md is stale\n- add a test')
+        self.assertEqual((listed['Separate asks (list items or sentences)'],
+                          listed['File paths or file names mentioned'], listed['Contains pasted text or code']),
+                         ('3', '2', 'no'))
+        self.assertEqual(shape('see\n```\nx = 1\n```')['Contains pasted text or code'], 'yes')
+        self.assertEqual(shape(None)['New prompt size'], '0 words (text not shared)')
 
     def test_low_confidence_and_disabled_jev_stay_silent(self):
         self.answer = ('direct', 0.5)
@@ -123,8 +142,32 @@ class Moments(unittest.TestCase):
             self.assertEqual(workflow_gate.main(), 0)
         self.assertEqual(out.getvalue(), '{}\n')
         self.assertEqual(self.origin(), ('handoff_check', 'handoff_assessment'))
+        self.assertEqual(self.sent[-1]['checkpoint']['context_version'], 'handoff-check-2')
+        self.assertIn('Final reply ends with a question to the user: unknown', json.dumps(self.sent[-1]))
         with patch.object(jev_moments, 'record_handoff', side_effect=RuntimeError('store down')):
             workflow_gate.record_handoff({'session_id': 'session', 'cwd': str(self.root)})
+
+    def test_handoff_facts_count_changes_and_read_the_final_reply_locally(self):
+        project = self.root / 'repo'
+        project.mkdir()
+        subprocess.run(['git', 'init', '-q', str(project)], check=True)
+        (project / 'a.txt').write_text('a')
+        (project / 'b.txt').write_text('b')
+        transcript = self.root / 'session.jsonl'
+        reply = 'I changed ' + PRIVATE[1] + '. Should I push it?'
+        transcript.write_text('\n'.join(json.dumps(entry) for entry in (
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'earlier'}]}},
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': reply}]}},
+            {'type': 'user', 'message': {'content': 'tool result'}})) + '\n')
+        self.answer = ('ask_user', 0.9)
+        jev_moments.record_handoff(project, 'session', {'transcript_path': str(transcript)})
+        sent = json.dumps(self.sent[-1])
+        self.assertIn('Uncommitted changed files: 2', sent)
+        self.assertIn('Final reply ends with a question to the user: yes', sent)
+        self.assertNotIn(PRIVATE[1], sent)
+        facts = jev_moments.handoff_facts(self.root / 'missing', {}, {'last_assistant_message': 'Done.'})
+        self.assertIn('Uncommitted changed files: unknown', facts)
+        self.assertIn('Final reply ends with a question to the user: no', facts)
 
     def test_prompt_advice_is_printed_once_and_failures_are_silent(self):
         self.answer = ('direct', 0.95)

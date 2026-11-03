@@ -57,11 +57,11 @@ out=$(payload SessionStart "$TARGET" "" "" | HARNESS_JEV_CHECKPOINTS=0 sh script
 out=$(payload PreToolUse "$TARGET" Bash "ls" | HARNESS_JEV_CHECKPOINTS=0 sh scripts/hooks/jev-observe.sh)
 [ -z "$out" ] || fail "jev-observe.sh printed while disabled: $out"
 
-# 2. SessionStart in a harness target records one shadow route and one context line.
+# 2. SessionStart in a harness target records one deterministic route and one context line.
 export HARNESS_JEV_CHECKPOINTS=1
 out=$(payload SessionStart "$TARGET" "" "" | sh scripts/hooks/session-route.sh)
 case "$out" in
-  "Jev session route observed in shadow mode, not followed: the main agent decides.") ;;
+  "Jev session route: default (source deterministic); existing rules decide.") ;;
   *) fail "unexpected session-route output: $out" ;;
 esac
 [ "$(count "$HARNESS_DB_ROOT/routes")" = "1" ] || fail "expected one route record"

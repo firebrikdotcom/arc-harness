@@ -348,10 +348,12 @@ def session_metadata(project: Path, db_root: Path, signals: dict[str, Any]) -> d
     state = run_state(db_root)
     record = last_verify(db_root)
     failing = bool(state and state.get("RUN_STATUS") == "active" and record and record.get("EXIT") not in {"", "0"})
+    # No request exists yet at session start, so nothing specific is uncertain:
+    # claiming scope_unclear here held every session route below the threshold.
     return {
         "version": 1, "task_kind": "change", "area": area_for(signals["language_counts"], project),
         "proposed_action": "start_routine_agent", "reversibility": "reversible",
-        "uncertainty_reason": "scope_unclear", "diff_size": signals["dirty_bucket"],
+        "uncertainty_reason": "none", "diff_size": signals["dirty_bucket"],
         "changed_file_count": min(signals["dirty_count"], 10000), "known_failures": 1 if failing else 0,
         "required_checks_pending": False, "approval_required": False, "user_choice_explicit": False,
     }
@@ -370,17 +372,7 @@ def session_start(project: Path, db_root: Path, router: Path) -> str:
         route = task_route.route_task(path, project, db_root, router, None, origin="session_routing")
     finally:
         path.unlink(missing_ok=True)
-    if route["source"] == "fallback":
-        return (f"Jev session route not followed ({route.get('reason')}; confidence {route.get('confidence')}, "
-                f"minimum {route.get('min_confidence')}): the main agent decides.")
-    if route.get("routing_mode") == "shadow":
-        line = "Jev session route observed in shadow mode, not followed: the main agent decides."
-        if route.get("delegation_gate"):
-            line += f" Delegation is on but held back: {route['delegation_gate']}."
-        return line
-    if route["source"] == "typesafe":
-        return (f"Jev session route: {route['recommendation']} (confidence {route.get('confidence')}, "
-                f"minimum {route.get('min_confidence')}); follow it unless a deterministic rule decides.")
+    # Session metadata carries no uncertainty, so a deterministic rule always decides and Jev is not asked.
     return f"Jev session route: {route['recommendation']} (source {route['source']}); existing rules decide."
 
 

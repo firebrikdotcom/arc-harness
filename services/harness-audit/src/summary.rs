@@ -444,6 +444,8 @@ pub fn route_groups(rows: &[Value], include_fixtures: bool) -> Value {
 }
 
 const MICROS_PER_DAY: i64 = 86_400_000_000;
+/// The family `context_advice.py` records when a caller sends no checkpoint.
+pub const LEGACY_FAMILY: &str = "legacy_advice";
 
 /// Jev's own confidence samples on one calendar day. Labels and baselines are ignored.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -473,6 +475,11 @@ pub fn daily_checkpoint_confidence(rows: &[Value], include_fixtures: bool) -> Ve
             continue;
         };
         if !include_fixtures && is_fixture(payload) {
+            continue;
+        }
+        // Legacy advice arrives without a checkpoint and picks among unnamed labels; pooling it
+        // would let an unrelated classifier set the harness line. The groups table still lists it.
+        if payload.get("family").and_then(Value::as_str) == Some(LEGACY_FAMILY) {
             continue;
         }
         let Some(confidence) = recommendation_confidence(&row["payload"]) else {
@@ -689,6 +696,9 @@ mod tests {
                 mean: 0.75,
             },
         ];
+        let mut legacy = make(0, json!(0.1));
+        legacy["payload"]["family"] = json!(LEGACY_FAMILY);
+        rows.push(legacy);
         assert_eq!(daily_checkpoint_confidence(&rows, false), expected);
         assert_eq!(daily_checkpoint_confidence(&rows, true)[0].samples, 3);
         for row in &mut rows {
