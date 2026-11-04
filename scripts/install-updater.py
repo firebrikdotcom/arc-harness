@@ -103,7 +103,7 @@ def install(args):
         if not path.exists():
             continue
         body = path.read_text()
-        managed = '<!-- harness-managed:start -->\n## Managed harness runtime\n\nUse `'+str(cli)+'` for harness commands. Run other harness scripts through `'+str(launcher)+' exec scripts/SCRIPT [ARGS]`. These launchers pin each operation and preserve the existing machine database. The editable checkout is for development; use `'+str(launcher)+' override '+str(ROOT)+'` to test it and `'+str(launcher)+' resume` to return to published versions.\n<!-- harness-managed:end -->'
+        managed = '<!-- harness-managed:start -->\n## Managed harness runtime\n\nUse `'+str(cli)+'` for harness commands. Run other harness scripts through `'+str(launcher)+' exec scripts/SCRIPT [ARGS]`. These launchers pin each operation and preserve the existing machine database. The editable checkout is for development; use `'+str(launcher)+' override '+str(ROOT)+'` to test it and `'+str(launcher)+' resume` to return to published versions.\n\nWhen the target root has `.harness-handoff`, run its command after every code change and quote its read-back line (installed version and commit) in your reply, with the steps to test; "skip checks" never skips it.\n<!-- harness-managed:end -->'
         pattern = r'<!-- harness-managed:start -->.*?<!-- harness-managed:end -->'
         body = re.sub(pattern, lambda m: managed, body, flags=re.S) if re.search(pattern, body, re.S) else managed+'\n\n'+body
         body = body.replace(str(ROOT)+'/scripts/harness ',str(cli)+' ')

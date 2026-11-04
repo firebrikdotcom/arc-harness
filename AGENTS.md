@@ -40,6 +40,8 @@ Each rule is written here so you know the goal, and enforced by a gate so it hol
 
 If a gate blocks you, read its message: it says what to do next. Do not work around a gate; if it is wrong, say so. The gates stop mistakes and shortcuts; they are not a sandbox (docs/setup.md, "What the guard can and cannot stop").
 
+When the target root has `.harness-handoff`, run its command after every code change and quote its read-back line (installed version and commit) in your reply, with the steps to test; "skip checks" never skips it. A reply that says fixed or ready without that line is not a handoff.
+
 ## No-hook launchers
 
 `bin/claude-nohooks` starts Claude Code with `disableAllHooks`, and `bin/codex-nohooks` starts Codex with the `hooks` feature disabled; both pass any other arguments through. When you install or update this harness on a machine, symlink both into `~/.local/bin` so they track this checkout:

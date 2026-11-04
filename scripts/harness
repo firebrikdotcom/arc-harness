@@ -965,8 +965,8 @@ contract_tool() {
 }
 
 require_contract() {
-  if ! contract_tool validate "$(contract_file)" >/dev/null; then
-    contract_tool validate "$(contract_file)" || :
+  if ! contract_tool validate "$(contract_file)" --project "$(run_target)" >/dev/null; then
+    contract_tool validate "$(contract_file)" --project "$(run_target)" || :
     info "FAIL: cannot mark plan done without a task contract."
     info "Write one (tasks/task.example.json, schemas/task.schema.json) and run: harness contract set FILE"
     info "or record why this run has none: harness contract waive \"<reason>\""
@@ -1010,7 +1010,7 @@ cmd_contract() {
       # Read the input once: /dev/stdin and pipes cannot be validated and then copied.
       _contract_tmp="$(contract_file).tmp.$$"
       if ! cat "$1" > "$_contract_tmp"; then rm -f "$_contract_tmp"; exit "$EXIT_PHASE"; fi
-      if ! contract_tool validate "$_contract_tmp"; then rm -f "$_contract_tmp"; exit "$EXIT_PHASE"; fi
+      if ! contract_tool validate "$_contract_tmp" --project "$(run_target)"; then rm -f "$_contract_tmp"; exit "$EXIT_PHASE"; fi
       mv "$_contract_tmp" "$(contract_file)"
       log_event "contract set"
       info "Contract stored: $(contract_file)"

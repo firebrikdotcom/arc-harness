@@ -84,6 +84,27 @@ h 0 contract show
 expect_output '"goal": "Change src/a.txt to say two."'
 h 4 contract set /dev/stdin < "$TMP_ROOT/bad.json"
 if find "$HARNESS_DB_ROOT" -name 'task.json.tmp.*' | grep -q .; then fail "a refused contract left a temp file"; fi
+
+# A target that declares its handoff command refuses a contract without it as a
+# criterion, and plan done re-checks the stored one; a waiver stays allowed.
+printf '%s\n' '["make", "dev-install"]' > "$PROJECT/.harness-handoff"
+h 4 contract set "$TMP_ROOT/task.json"
+expect_output 'declares its handoff in .harness-handoff'
+expect_output '"command": \["make", "dev-install"\]'
+h 4 plan "done"
+expect_output "without a task contract"
+python3 - "$TMP_ROOT/task.json" "$TMP_ROOT/handoff.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+data["acceptance"].append({"id": "handoff", "criterion": "Installed where the user tests", "command": ["make", "dev-install"]})
+json.dump(data, open(sys.argv[2], "w"))
+PY
+h 0 contract set "$TMP_ROOT/handoff.json"
+printf '%s\n' 'not json' > "$PROJECT/.harness-handoff"
+h 4 contract set "$TMP_ROOT/handoff.json"
+expect_output 'is not a JSON argv list'
+rm -f "$PROJECT/.harness-handoff"
+h 0 contract set "$TMP_ROOT/task.json"
 h 0 plan "done"
 h 4 contract set "$TMP_ROOT/task.json"
 expect_output "set while planning"

@@ -8,7 +8,13 @@ the commands that decide when it is done (schemas/task.schema.json).
 files is counted from that run instead of running twice), and
 `review done` refuses a change that touched a non-goal path.
 
-  task_contract.py validate FILE
+A target that names its handoff command in `.harness-handoff` at its root (one
+JSON argv: the quick build, install on the machine the user tests on, and
+read-back of the installed version) makes `validate --project` refuse a contract
+that does not list that exact command as an acceptance criterion, so pushing a
+branch can never pass `build done` while the user's install is stale.
+
+  task_contract.py validate FILE [--project PATH]
   task_contract.py criteria FILE --project PATH [--verified VERIFY_RECORD]
   task_contract.py checklist FILE
   task_contract.py nongoals FILE --project PATH --base REV
@@ -87,6 +93,34 @@ def validate(data) -> dict:
 
 def load(path: Path) -> dict:
     return validate(json.loads(path.read_text(encoding="utf-8")))
+
+
+HANDOFF_FILE = ".harness-handoff"
+
+
+def handoff_command(project: Path) -> list[str] | None:
+    """The target's declared handoff argv, or None when it declares none."""
+    path = project / HANDOFF_FILE
+    if not path.is_file():
+        return None
+    try:
+        command = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"{HANDOFF_FILE} is not a JSON argv list: {error}") from error
+    return strings(command, HANDOFF_FILE, 1)
+
+
+def require_handoff(data: dict, project: Path) -> None:
+    """Refuses a contract that leaves out the target's handoff command; a waiver
+    (a run with nothing to accept) stays allowed and shows its reason."""
+    command = handoff_command(project)
+    if command is None or "waived" in data:
+        return
+    if not any(item.get("command") == command for item in data["acceptance"]):
+        raise ValueError(
+            f"this target declares its handoff in {HANDOFF_FILE}: add an acceptance criterion with "
+            f"\"command\": {json.dumps(command)} so build done installs and reads back what the user tests"
+        )
 
 
 def read_record(path: Path | None) -> dict[str, str]:
@@ -244,6 +278,11 @@ def main() -> int:
         print(f"FAIL: the contract is invalid: {error}")
         return 2
     if args.action == "validate":
+        try:
+            require_handoff(data, args.project.resolve())
+        except ValueError as error:
+            print(f"FAIL: the contract is invalid: {error}")
+            return 2
         print("OK: contract waived." if "waived" in data else f"OK: contract with {len(data['acceptance'])} acceptance criteria.")
         return 0
     if args.action == "show":
