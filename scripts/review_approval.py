@@ -28,9 +28,10 @@ APPROVAL_PATTERN = re.compile(
     r"(?=\Z|[\s,.!;:-])",
     re.IGNORECASE,
 )
-# A negated or conditional reply is not an approval.
+# A negated reply or one with a reservation is not an approval. Timing words
+# ("once", "then", "after") are ordinary instructions, so they do not count.
 REJECTION_PATTERN = re.compile(
-    r"\b(?:not|no|don'?t|do\s+not|never|but|except|unless|wait|hold|until|after|once|if|before)\b",
+    r"\b(?:not|don'?t|do\s+not|never|but|except|unless|wait|hold)\b",
     re.IGNORECASE,
 )
 

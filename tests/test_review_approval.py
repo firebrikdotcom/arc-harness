@@ -57,7 +57,8 @@ class ReviewApprovalTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("`approved`", message)
         for prompt in ("not approved", "approved, but fix the tests", "don't approve",
-                       "approved once CI passes", "disapproved", "approval pending"):
+                       "approved unless CI fails", "approved, wait for me", "disapproved",
+                       "approval pending"):
             self.assertFalse(approval.capture_prompt(
                 harness_root=ROOT, base_db=self.db, project=self.project,
                 session_id=self.session, prompt=prompt,
@@ -70,7 +71,8 @@ class ReviewApprovalTests(unittest.TestCase):
 
     def test_natural_approval_replies_issue_receipt(self):
         for prompt in ("approved, that should suffice", "Yes, approved", "approve, go ahead",
-                       "Approved - ship it"):
+                       "Approved - ship it", "approved, no more changes needed",
+                       "approved, submit the review once, then open the PR after CI"):
             with self.subTest(prompt=prompt):
                 state = approval.receipt_path(self.db, self.session)
                 if state.exists():
