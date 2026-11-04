@@ -161,9 +161,55 @@ def write_state(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
+CHAT_APPROVAL_NAME = "chat-approval.json"
+
+
+def chat_approval_path(base_db: Path, session_id: str) -> Path:
+    return receipt_path(base_db.resolve(), session_id).with_name(CHAT_APPROVAL_NAME)
+
+
+def record_latest_prompt(base_db: Path, session_id: str, prompt: str, prompt_at=None) -> None:
+    """Remember whether the person's latest chat message is an approval, so a
+    review submitted right after it needs no second ask. A later message that is
+    not an approval replaces it."""
+    at = time.time() if prompt_at is None else timestamp_epoch(prompt_at)
+    if at is None:
+        return
+    path = chat_approval_path(base_db, session_id)
+    old = read_state(path)
+    if old and float(old.get("at", 0)) > at:
+        return
+    write_state(path, {
+        "schema_version": 1,
+        "session_id": session_id,
+        "approval": approval_match(prompt) is not None,
+        "used": False,
+        "at": at,
+        "message_sha256": hashlib.sha256(prompt.strip().encode("utf-8")).hexdigest(),
+    })
+
+
+def take_latest_approval(base_db: Path, session_id: str, now: float) -> dict | None:
+    """Use the person's latest chat message once, if it approved within the TTL."""
+    path = chat_approval_path(base_db, session_id)
+    state = read_state(path)
+    if not state or state.get("approval") is not True or state.get("used"):
+        return None
+    at = float(state.get("at", 0))
+    if at > now + 5 or now - at > RECEIPT_TTL_SECONDS:
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", str(state.get("message_sha256", ""))):
+        return None
+    state["used"] = True
+    state["used_at"] = now
+    write_state(path, state)
+    return state
+
+
 def request_or_check(
     *, db_root: Path, session_id: str, run_id: str, findings: Path,
     project: str | Path, harness_root: Path = ROOT, now: float | None = None,
+    base_db: Path | None = None,
 ) -> tuple[bool, str]:
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise ValueError("run ID is invalid")
@@ -200,10 +246,22 @@ def request_or_check(
             "status": "pending",
             "requested_at": current_time,
         }
+    prior = take_latest_approval(base_db, session_id, current_time) if base_db is not None else None
+    if prior:
+        old.update({
+            "status": "approved",
+            "approved_at": current_time,
+            "approval_message_at": prior["at"],
+            "approval_message_sha256": prior["message_sha256"],
+            "approval_source": "native-user-prompt-hook",
+        })
         write_state(path, old)
+        return True, "Native chat approval receipt verified from the person's latest message."
+    write_state(path, old)
     return False, (
-        f"Review approval is pending for run {run_id}; show the independent findings to the user, "
-        f"ask them to reply `approved` (or `approve review {run_id}`) in this chat, then retry `harness review submit {findings}`."
+        f"Review approval is pending for run {run_id}. Show the independent findings to the user and ask them "
+        f"to reply `approved` in this chat, then retry `harness review submit {findings}`. "
+        "Their chat reply is the only approval needed: never ask them to run a terminal command or confirm a prompt there."
     )
 
 
@@ -236,6 +294,10 @@ def capture_prompt(
     session_id: str, prompt: str, prompt_at=None,
 ) -> bool:
     """Record approval only when called with a native prompt hook's user text."""
+    try:
+        record_latest_prompt(base_db, session_id, prompt, prompt_at)
+    except (OSError, ValueError):
+        pass
     match = approval_match(prompt)
     if not match:
         return False
@@ -315,6 +377,7 @@ def main() -> int:
         sub.add_argument("--findings", type=Path, required=True)
         sub.add_argument("--project", required=True)
         sub.add_argument("--harness-root", type=Path, default=ROOT)
+    subparsers.choices["request"].add_argument("--base-db", type=Path)
     args = parser.parse_args()
     try:
         command = args.command

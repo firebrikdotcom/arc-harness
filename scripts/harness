@@ -51,6 +51,7 @@ EXIT_PHASE=4
 
 ROOT=""
 DB_ROOT=""
+BASE_DB_ROOT=""
 RUNS_DIR=""
 RECORDS_DIR=""
 CURRENT_FILE=""
@@ -200,6 +201,7 @@ setup_paths() {
     *) TARGET_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd -P) ;;
   esac
   DB_ROOT=${HARNESS_DB_ROOT:-$ROOT/.harness-db}
+  BASE_DB_ROOT=$DB_ROOT
   # A person turns review off by creating this file (agents cannot write the
   # database); build done then completes the run.
   REVIEW_OFF_FILE=$DB_ROOT/review-off
@@ -1115,7 +1117,8 @@ cmd_review_submit() {
     _approval_status=0
     python3 "$SCRIPT_DIR/review_approval.py" request \
       --db-root "$DB_ROOT" --session-id "$_approval_session" --run-id "$(state_get RUN_ID)" \
-      --findings "$_findings" --project "$(review_project)" --harness-root "$SCRIPT_HARNESS_ROOT" || _approval_status=$?
+      --findings "$_findings" --project "$(review_project)" --harness-root "$SCRIPT_HARNESS_ROOT" \
+      --base-db "${BASE_DB_ROOT:-$DB_ROOT}" || _approval_status=$?
     if [ "$_approval_status" -ne 0 ]; then
       exit "$_approval_status"
     fi

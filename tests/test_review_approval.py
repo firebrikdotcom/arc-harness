@@ -100,6 +100,62 @@ class ReviewApprovalTests(unittest.TestCase):
         )
         self.assertEqual((ready, message), (True, "Native chat approval receipt verified."))
 
+    def request_with_base(self):
+        return approval.request_or_check(
+            db_root=self.db, session_id=self.session, run_id=self.run_id,
+            findings=self.findings, project=self.project, harness_root=ROOT, base_db=self.db,
+        )
+
+    def test_latest_chat_approval_before_submit_needs_no_second_ask(self):
+        self.assertFalse(approval.capture_prompt(
+            harness_root=ROOT, base_db=self.db, project=self.project,
+            session_id=self.session, prompt="approved, go ahead",
+        ))
+        ready, message = self.request_with_base()
+        self.assertTrue(ready, message)
+        self.assertEqual(approval.consume(
+            db_root=self.db, session_id=self.session, run_id=self.run_id,
+            findings=self.findings, project=self.project, harness_root=ROOT,
+        ), (True, "Native chat approval receipt consumed."))
+        # One approval message covers one submission.
+        ready, _ = self.request_with_base()
+        self.assertFalse(ready)
+
+    def test_later_non_approval_or_stale_approval_does_not_count(self):
+        approval.capture_prompt(harness_root=ROOT, base_db=self.db, project=self.project,
+                                session_id=self.session, prompt="approved")
+        approval.capture_prompt(harness_root=ROOT, base_db=self.db, project=self.project,
+                                session_id=self.session, prompt="actually, change the docs first")
+        ready, message = self.request_with_base()
+        self.assertFalse(ready)
+        self.assertIn("never ask them to run a terminal command", message)
+        old = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - 3600, timezone.utc).isoformat()
+        approval.capture_prompt(harness_root=ROOT, base_db=self.db, project=self.project,
+                                session_id=self.session, prompt="approved", prompt_at=old)
+        self.assertFalse(self.request_with_base()[0])
+
+    def test_codex_approval_before_submit_is_used_without_second_ask(self):
+        sessions = self.base / "sessions"
+        rollout = sessions / "2026" / "10" / "26" / ("rollout-1-" + self.session + ".jsonl")
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text(json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "approved, that should suffice"}]},
+        }) + "\n", encoding="utf-8")
+        env = patch.dict(os.environ, {
+            "HARNESS_DB_ROOT": str(self.db),
+            "HARNESS_WORKFLOW_STATE": str(self.base / "workflow.sqlite"),
+            "HARNESS_CODEX_SESSIONS": str(sessions),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        with patch.object(workflow_gate, "decision_seam"):
+            workflow_gate.authorize({"hook_event_name": "PreToolUse", "session_id": self.session,
+                                     "cwd": str(self.project), "tool_name": "Bash"})
+        ready, message = self.request_with_base()
+        self.assertTrue(ready, message)
+
     def test_bare_approve_review_issues_receipt(self):
         self.request()
         self.assertTrue(approval.capture_prompt(
@@ -110,7 +166,7 @@ class ReviewApprovalTests(unittest.TestCase):
     def test_only_native_exact_prompt_issues_one_time_bound_receipt(self):
         ready, message = self.request()
         self.assertFalse(ready)
-        self.assertIn("approve review " + self.run_id + "`", message)
+        self.assertIn("reply `approved` in this chat", message)
         self.assertFalse(approval.capture_prompt(
             harness_root=ROOT, base_db=self.db, project=self.project,
             session_id=self.session, prompt="please approve review " + self.run_id,
