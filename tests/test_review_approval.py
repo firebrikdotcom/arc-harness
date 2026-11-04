@@ -56,7 +56,8 @@ class ReviewApprovalTests(unittest.TestCase):
         ready, message = self.request()
         self.assertFalse(ready)
         self.assertIn("`approved`", message)
-        for prompt in ("not approved", "approved, but fix the tests", "approve it"):
+        for prompt in ("not approved", "approved, but fix the tests", "don't approve",
+                       "approved once CI passes", "disapproved", "approval pending"):
             self.assertFalse(approval.capture_prompt(
                 harness_root=ROOT, base_db=self.db, project=self.project,
                 session_id=self.session, prompt=prompt,
@@ -66,6 +67,38 @@ class ReviewApprovalTests(unittest.TestCase):
             session_id=self.session, prompt="  Approved.\n",
         ))
         self.assertEqual(self.request(), (True, "Native chat approval receipt verified."))
+
+    def test_natural_approval_replies_issue_receipt(self):
+        for prompt in ("approved, that should suffice", "Yes, approved", "approve, go ahead",
+                       "Approved - ship it"):
+            with self.subTest(prompt=prompt):
+                state = approval.receipt_path(self.db, self.session)
+                if state.exists():
+                    state.unlink()
+                self.request()
+                self.assertTrue(approval.capture_prompt(
+                    harness_root=ROOT, base_db=self.db, project=self.project,
+                    session_id=self.session, prompt=prompt,
+                ))
+
+    def test_reply_from_another_project_approves_the_pending_request(self):
+        target_db = self.db / "targets" / "other-worktree" / "db"
+        ready, _ = approval.request_or_check(
+            db_root=target_db, session_id=self.session, run_id=self.run_id,
+            findings=self.findings, project=self.project, harness_root=ROOT,
+        )
+        self.assertFalse(ready)
+        elsewhere = self.base / "elsewhere"
+        elsewhere.mkdir()
+        self.assertTrue(approval.capture_prompt(
+            harness_root=ROOT, base_db=self.db, project=elsewhere,
+            session_id=self.session, prompt="approved",
+        ))
+        ready, message = approval.request_or_check(
+            db_root=target_db, session_id=self.session, run_id=self.run_id,
+            findings=self.findings, project=self.project, harness_root=ROOT,
+        )
+        self.assertEqual((ready, message), (True, "Native chat approval receipt verified."))
 
     def test_bare_approve_review_issues_receipt(self):
         self.request()

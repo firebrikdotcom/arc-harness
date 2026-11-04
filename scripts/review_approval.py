@@ -19,12 +19,30 @@ ROOT = Path(__file__).resolve().parent.parent
 RECEIPT_NAME = "review-approval.json"
 RECEIPT_TTL_SECONDS = 1800
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
-# A session holds at most one pending request, so a bare "approve" or
-# "approved" is unambiguous; a supplied run ID must still match it.
+# A session holds at most one pending request, so a reply that opens with
+# "approve"/"approved" (optionally after "yes"/"ok") is unambiguous, such as
+# "approved, that should suffice". A supplied run ID must still match it.
 APPROVAL_PATTERN = re.compile(
-    r"(?:approved?|approve\s+review(?:\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127}))?)[.!]?\Z",
+    r"(?:(?:yes|ok|okay)[,.!]?\s+)?"
+    r"(?:approve\s+review(?:\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127}))?|approved?)"
+    r"(?=\Z|[\s,.!;:-])",
     re.IGNORECASE,
 )
+# A negated or conditional reply is not an approval.
+REJECTION_PATTERN = re.compile(
+    r"\b(?:not|no|don'?t|do\s+not|never|but|except|unless|wait|hold|until|after|once|if|before)\b",
+    re.IGNORECASE,
+)
+
+
+def approval_match(prompt):
+    if not isinstance(prompt, str):
+        return None
+    text = prompt.strip()
+    match = APPROVAL_PATTERN.match(text)
+    if not match or REJECTION_PATTERN.search(text):
+        return None
+    return match
 
 
 def sha256_file(path: Path) -> str:
@@ -189,19 +207,42 @@ def request_or_check(
     )
 
 
+def pending_request(harness_root: Path, base_db: Path, project, session_id: str):
+    """Find this session's pending request: first in the prompt's own project,
+    then in any registered target, since a session may review another worktree."""
+    db_root, project_root = target_database(harness_root, base_db, project)
+    candidates = [(db_root, project_root)]
+    base = base_db.resolve()
+    targets = base / "targets"
+    others = sorted(targets.glob("*/db")) if targets.is_dir() else []
+    candidates += [(db, None) for db in [base, *others] if db.resolve() != db_root.resolve()]
+    for db, expected_project in candidates:
+        path = receipt_path(db, session_id)
+        request = read_state(path)
+        if not request or request.get("status") != "pending":
+            continue
+        recorded = request.get("project")
+        if expected_project is not None:
+            if recorded != str(expected_project):
+                continue
+        elif not isinstance(recorded, str) or not Path(recorded).is_dir():
+            continue
+        return path, request, Path(expected_project or recorded)
+    return None
+
+
 def capture_prompt(
     *, harness_root: Path, base_db: Path, project: str | Path,
     session_id: str, prompt: str, prompt_at=None,
 ) -> bool:
     """Record approval only when called with a native prompt hook's user text."""
-    match = APPROVAL_PATTERN.fullmatch(prompt.strip()) if isinstance(prompt, str) else None
+    match = approval_match(prompt)
     if not match:
         return False
-    db_root, project_root = target_database(harness_root, base_db, project)
-    path = receipt_path(db_root, session_id)
-    request = read_state(path)
-    if not request or request.get("status") != "pending":
+    found = pending_request(harness_root, base_db, project, session_id)
+    if not found:
         return False
+    path, request, project_root = found
     approval_time = time.time() if prompt_at is None else timestamp_epoch(prompt_at)
     if approval_time is None or approval_time < float(request.get("requested_at", 0)):
         return False

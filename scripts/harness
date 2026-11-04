@@ -1046,7 +1046,9 @@ agent_runtime() {
 }
 
 approval_session_id() {
-  printf '%s\n' "${HARNESS_SESSION_ID:-${CODEX_THREAD_ID:-${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}}"
+  # Chat approval is captured under the agent's native session ID, so prefer it
+  # over a custom --session-id; otherwise the reply never meets the request.
+  printf '%s\n' "${CODEX_THREAD_ID:-${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-${HARNESS_SESSION_ID:-}}}}"
 }
 
 physical_dir() {
