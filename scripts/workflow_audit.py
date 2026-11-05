@@ -210,6 +210,41 @@ def tool_label(tool: str, tool_input) -> str | None:
     return label[:157] + "..." if len(label) > 160 else label or None
 
 
+TOUCH_TOOLS = ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit")
+TOUCH_LIMIT = 5000
+
+
+def touched_files(db: sqlite3.Connection, sid: str, tool: str, tool_input, cwd) -> None:
+    """Remember the files a session reads or edits (absolute paths) for the architecture focus view.
+    Local only: never emitted to an audit event, and never allowed to break the hook."""
+    try:
+        if not isinstance(tool_input, dict):
+            return
+        paths = []
+        if tool in TOUCH_TOOLS:
+            for key in ("file_path", "notebook_path", "path"):
+                if isinstance(tool_input.get(key), str) and tool_input[key]:
+                    paths.append(tool_input[key])
+                    break
+        elif tool == "apply_patch":
+            patch = tool_input.get("input") or tool_input.get("patch") or ""
+            if isinstance(patch, str):
+                paths = [n.strip() for n in re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.M)]
+        else:
+            return
+        base = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else os.getcwd()
+        db.execute("CREATE TABLE IF NOT EXISTS touched_files (session_id TEXT NOT NULL, path TEXT NOT NULL, tool TEXT, at TEXT, PRIMARY KEY (session_id, path))")
+        count = db.execute("SELECT COUNT(*) FROM touched_files WHERE session_id=?", (sid,)).fetchone()[0]
+        for path in paths:
+            if count >= TOUCH_LIMIT:
+                break
+            full = os.path.normpath(os.path.join(base, path))
+            if db.execute("INSERT OR IGNORE INTO touched_files VALUES (?,?,?,?)", (sid, full, tool, now())).rowcount:
+                count += 1
+    except Exception:  # noqa: BLE001
+        pass
+
+
 SHELL_TOOLS = ("Bash", "shell", "exec_command", "local_shell", "container.exec", "BashOutput")
 COMMAND_LIMIT = 1900
 
@@ -333,6 +368,7 @@ def hook(agent: str | None = None) -> int:
                 command = tool_command(tool, payload.get("tool_input"))
                 pending = context.setdefault("pending_tools", {})
                 if event == "PreToolUse":
+                    touched_files(db, sid, tool, payload.get("tool_input"), payload.get("cwd"))
                     if call_id:
                         pending[call_id] = {"started_at": now(), "clock": time.monotonic(), "task_id": context["task_id"], "todo_id": context.get("active_todo_id"), "tool_name": tool, "label": label, "command": command}
                         # Bound state when a runtime never emits completion hooks.

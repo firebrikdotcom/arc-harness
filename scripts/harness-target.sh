@@ -82,6 +82,16 @@ target_kind() {
   fi
 }
 
+# parent_root ROOT  The main checkout of a linked worktree (empty for repos, directories, and bare repos).
+parent_root() {
+  [ -f "$1/.git" ] || return 0
+  has_cmd git || return 0
+  _common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || :)
+  case "$_common" in
+    */.git) absolute_dir "${_common%/.git}" 2>/dev/null || : ;;
+  esac
+}
+
 # target_id ROOT  <basename>-<12 hex chars of the root path hash>.
 target_id() {
   _base=$(printf '%s' "$(basename "$1")" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-48)
@@ -123,6 +133,7 @@ cmd_register() {
     printf 'TARGET_ID=%s\n' "$_id"
     printf 'TARGET_ROOT=%s\n' "$_root"
     printf 'TARGET_KIND=%s\n' "$(target_kind "$_root")"
+    printf 'TARGET_PARENT_ROOT=%s\n' "$(parent_root "$_root")"
     printf 'REGISTERED_AT=%s\n' "$_registered"
     printf 'LAST_SEEN_AT=%s\n' "$(now_iso)"
   } > "$_state.tmp.$$"

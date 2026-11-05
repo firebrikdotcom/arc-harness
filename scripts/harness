@@ -657,6 +657,21 @@ latest_run_id() {
   run_ids | sort | tail -n 1
 }
 
+# brief_session_link  One line with this session's architecture view; silent on any failure.
+brief_session_link() {
+  _sid=${HARNESS_SESSION_ID:-${CODEX_THREAD_ID:-${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}}
+  [ -n "$_sid" ] && has_cmd python3 || return 0
+  _link=$(python3 - "$SCRIPT_DIR/board.py" "$TARGET_ROOT" "$_sid" "${HARNESS_DB_ROOT:-$ROOT/.harness-db}" <<'PY' 2>/dev/null || :
+import json, subprocess, sys
+r = subprocess.run([sys.executable, sys.argv[1], "--db-root", sys.argv[4], "session", "--target", sys.argv[2], "--session-id", sys.argv[3]],
+                   capture_output=True, text=True, timeout=5)
+print(json.loads(r.stdout)["url"] if r.returncode == 0 else "")
+PY
+)
+  [ -z "$_link" ] || info "Architecture for this session: $_link"
+  return 0
+}
+
 cmd_brief() {
   _mine=1
   _map="$(dirname "$DB_ROOT")/map.md"
@@ -666,6 +681,7 @@ cmd_brief() {
     if [ -z "$_latest" ] || [ ! -f "$RUNS_DIR/$_latest/state" ]; then
       info "Harness: no runs yet for $TARGET_ROOT. Agent action: run harness plan start in this session."
       [ -f "$_map" ] && info "Project map: $_map"
+      brief_session_link
       return 0
     fi
     bind_run "$_latest"
@@ -700,6 +716,7 @@ PY
     fi
   fi
   [ -f "$_map" ] && info "Project map: $_map"
+  brief_session_link
   return 0
 }
 

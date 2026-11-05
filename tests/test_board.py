@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -272,6 +273,159 @@ class BoardTests(unittest.TestCase):
         path = Path(self.tmp.name) / "in.json"
         path.write_text(json.dumps(value))
         return str(path)
+
+
+class SessionFocusTests(unittest.TestCase):
+    """Worktrees under their main folder, session links, and the per-session focus signals."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.db = base / "db"
+        self.main = base / "shop"
+        (self.main / "src").mkdir(parents=True)
+        for name in ("app.py", "store.py", "util.py", "web.py", "other.py"):
+            (self.main / "src" / name).write_text(f"# {name}\n")
+        git(self.main, "init", "-q", "-b", "main")
+        git(self.main, "add", ".")
+        git(self.main, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init")
+        self.wt = base / "shop-feature"
+        git(self.main, "worktree", "add", "-q", "-b", "feat", str(self.wt))
+        self.stale = base / "shop-old"
+        git(self.main, "worktree", "add", "-q", "-b", "old", str(self.stale))
+        self.env = dict(os.environ, HARNESS_DB_ROOT=str(self.db), HARNESS_WORKFLOW_STATE=str(base / "wf.sqlite"))
+        self.main_id = self.register(self.main)
+        self.wt_id = self.register(self.wt)
+        self.stale_id = self.register(self.stale)
+        board.DB_ROOT = self.db
+        os.environ["HARNESS_WORKFLOW_STATE"] = self.env["HARNESS_WORKFLOW_STATE"]
+        self.addCleanup(os.environ.pop, "HARNESS_WORKFLOW_STATE", None)
+        cards = [{"id": cid, "frame": "core", "owns": [path], "files": [], "tests": []}
+                 for cid, path in (("app", "src/app.py"), ("store", "src/store.py"), ("util", "src/util.py"), ("web", "src/web.py"))]
+        board_dir = self.db / "targets" / self.main_id / "board"
+        board_dir.mkdir(parents=True)
+        (board_dir / "board.json").write_text(json.dumps({"default_branch": "main", "nodes": cards}))
+
+    def register(self, path):
+        out = subprocess.run(["sh", str(ROOT / "scripts" / "harness-target.sh"), "register", str(path)], env=self.env,
+                             check=True, capture_output=True, text=True)
+        return Path(out.stdout.strip()).name
+
+    def cli(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "scripts" / "board.py"), "--db-root", str(self.db), *args],
+                              capture_output=True, text=True, env=self.env, timeout=60)
+
+    def make_run(self, run_id, goal, deliverables, status="active", age=0):
+        run = self.db / "targets" / self.wt_id / "db" / "runs" / run_id
+        run.mkdir(parents=True)
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+        (run / "run.json").write_text(json.dumps({"run_id": run_id, "status": status, "current_phase": "build", "updated_at": stamp}))
+        (run / "task.json").write_text(json.dumps({"goal": goal, "deliverables": deliverables}))
+        return run
+
+    def point_session(self, session_id, run_id):
+        from run_paths import session_key
+        pointer = self.db / "targets" / self.wt_id / "db" / "runs" / "sessions" / session_key(session_id) / "current"
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text(run_id + "\n")
+
+    def rows(self):
+        result = self.cli("list", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return {r["id"]: r for r in json.loads(result.stdout)}
+
+    def test_register_records_parent_and_list_groups_worktrees(self):
+        state = board.read_state(self.db / "targets" / self.wt_id / "target.state")
+        self.assertEqual(state["TARGET_KIND"], "worktree")
+        self.assertEqual(state["TARGET_PARENT_ROOT"], str(self.main))
+        self.assertEqual(board.id_for_root(str(self.main)), self.main_id)
+        self.make_run("r1", "Add billing", ["src/app.py"])
+        started = json.loads(self.cli("session", "--target", str(self.wt), "--session-id", "sess-a").stdout)
+        rows = self.rows()
+        self.assertEqual(rows[self.main_id]["kind"], "repo")
+        self.assertIsNone(rows[self.main_id]["parent"])
+        row = rows[self.wt_id]
+        self.assertEqual((row["kind"], row["parent"], row["branch"]), ("worktree", self.main_id, "feat"))
+        self.assertEqual(row["task"]["title"], "Add billing")
+        self.assertEqual(row["task"]["run_id"], "r1")
+        self.assertTrue(row["task"]["live"])
+        self.assertEqual(row["session_key"], started["key"])
+        self.assertEqual(set(row["owner"]), {"user", "login"})
+        self.assertNotIn(self.stale_id, rows, "a worktree with no session and no recent run is not listed")
+
+    def test_parent_is_listed_and_old_state_is_computed_then_cached(self):
+        state = self.db / "targets" / self.wt_id / "target.state"
+        state.write_text("".join(l for l in state.read_text().splitlines(True) if not l.startswith("TARGET_PARENT_ROOT")))
+        self.make_run("r1", "Task", [], status="done", age=40 * 60)
+        rows = self.rows()
+        self.assertIn(self.main_id, rows)
+        self.assertEqual(rows[self.wt_id]["parent"], self.main_id)
+        self.assertFalse(rows[self.wt_id]["task"]["live"])
+        self.assertTrue((self.db / "targets" / self.wt_id / "board" / "parent.json").exists())
+        self.assertNotIn("TARGET_PARENT_ROOT", state.read_text())
+
+    def test_session_is_idempotent_and_has_a_url(self):
+        self.env = dict(self.env, HARNESS_AUDIT_URL="http://audit.test:9/")
+        first = json.loads(self.cli("session", "--target", str(self.wt), "--session-id", "sess-a").stdout)
+        again = json.loads(self.cli("session", "--target", str(self.wt), "--session-id", "sess-a").stdout)
+        other = json.loads(self.cli("session", "--target", str(self.wt), "--session-id", "sess-b").stdout)
+        self.assertEqual(first, again)
+        self.assertNotEqual(first["key"], other["key"])
+        self.assertEqual(first["url"], f"http://audit.test:9/projects/{self.wt_id}/sessions/{first['key']}")
+        record = json.loads((self.db / "targets" / self.wt_id / "board" / "sessions" / f"{first['key']}.json").read_text())
+        self.assertEqual((record["session_id"], record["target"], record["root"]), ("sess-a", self.wt_id, str(self.wt)))
+        self.assertEqual(set(record["owner"]), {"user", "login"})
+
+    def test_focus_signals(self):
+        wt = self.wt
+        (wt / "src" / "app.py").write_text("# committed on the branch\n")
+        git(wt, "add", ".")
+        git(wt, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "branch work")
+        (wt / "src" / "store.py").write_text("# uncommitted\n")
+        (wt / "src" / "brand_new.py").write_text("# untracked\n")
+        self.make_run("mine", "Billing", ["src/util.py"])
+        newest = self.make_run("zz-newest", "Other task", ["src/web.py"])
+        os.utime(newest / "run.json", (time.time() + 60, time.time() + 60))
+        self.point_session("sess-a", "mine")
+        con = sqlite3.connect(self.env["HARNESS_WORKFLOW_STATE"])
+        con.execute("CREATE TABLE touched_files (session_id TEXT, path TEXT, tool TEXT, at TEXT, PRIMARY KEY(session_id, path))")
+        for path in (wt / "src" / "web.py", wt / "src" / "app.py", wt / "src" / "util.py", wt / "src" / "other.py", Path("/elsewhere/x.py")):
+            con.execute("INSERT INTO touched_files VALUES ('sess-a', ?, 'Read', 'now')", (str(path),))
+        con.execute("INSERT INTO touched_files VALUES ('sess-b', ?, 'Read', 'now')", (str(wt / "src" / "store.py"),))
+        con.commit()
+        con.close()
+        key = json.loads(self.cli("session", "--target", str(wt), "--session-id", "sess-a").stdout)["key"]
+        result = self.cli("focus", "--target", self.wt_id, "--session", key)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        view = json.loads(result.stdout)
+        self.assertEqual((view["target"], view["board_target"], view["parent"]), (self.wt_id, self.main_id, self.main_id))
+        self.assertEqual((view["session"]["branch"], view["session"]["base"], view["session"]["run_id"]), ("feat", "main", "mine"))
+        self.assertEqual(view["session"]["title"], "Billing")
+        self.assertEqual(view["signals"]["app"], {"edited": ["src/app.py"], "scope": [], "touched": []})
+        self.assertEqual(view["signals"]["store"]["edited"], ["src/store.py"])
+        self.assertEqual(view["signals"]["store"]["touched"], [])
+        self.assertEqual(view["signals"]["util"]["scope"], ["src/util.py"])
+        self.assertEqual(view["signals"]["web"], {"edited": [], "scope": [], "touched": ["src/web.py"]})
+        self.assertEqual(view["unmapped"], ["src/brand_new.py", "src/other.py"])
+        self.assertIn("changed 2 parts", view["summary"])
+
+    def test_audit_records_touched_files_with_absolute_paths(self):
+        import workflow_audit
+        db = sqlite3.connect(":memory:")
+        workflow_audit.touched_files(db, "s", "Read", {"file_path": "/a/b.py"}, "/cwd")
+        workflow_audit.touched_files(db, "s", "Edit", {"file_path": "rel/c.py"}, "/cwd")
+        workflow_audit.touched_files(db, "s", "Read", {"file_path": "/a/b.py"}, "/cwd")
+        patch = "*** Begin Patch\n*** Update File: d.py\n*** End Patch"
+        workflow_audit.touched_files(db, "s", "apply_patch", {"input": patch}, "/cwd")
+        workflow_audit.touched_files(db, "s", "Bash", {"command": "ls"}, "/cwd")
+        rows = sorted(r[0] for r in db.execute("SELECT path FROM touched_files WHERE session_id='s'"))
+        self.assertEqual(rows, ["/a/b.py", "/cwd/d.py", "/cwd/rel/c.py"])
+
+    def test_unknown_session_exits_3(self):
+        result = self.cli("focus", "--target", self.wt_id, "--session", "nope")
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(json.loads(result.stdout), {"error": "unknown session"})
 
 
 if __name__ == "__main__":

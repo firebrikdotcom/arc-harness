@@ -835,6 +835,12 @@ Cursor CLI can import the installed todo hooks from `~/.claude/settings.json`. T
 The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return exit 2 with guidance. Telemetry outages do not bypass it. This enforces declared plans on covered native tools, not semantic completeness or a security sandbox: specialized tools outside native hook coverage, hook timeouts, and runtime configuration can bypass enforcement. Codex hosted WebSearch has no PreToolUse; a returned process handle is not tool completion. Stop always permits the conversational turn to end without accessing policy storage or changing task/todo state, so waiting for user input cannot cause repeated hook continuations. Existing phase/denylist gates and permissions remain authoritative. Review phase completion may precede deployment todos; explicit completed outcomes enforce the full task criteria. Ending a turn does not mark the task complete.
 
 
+## Session focus (data layer)
+
+Each session can open an owner-only architecture view that highlights the cards its worktree changed, planned or read. `harness brief` prints `Architecture for this session: <url>` (it calls `board.py session`, which creates one link record per session id).
+
+How it works: registering a linked worktree records `TARGET_PARENT_ROOT`, the main checkout, and the main folder's board is reused. `board.py list --json` adds `kind`, `parent`, `branch` and, for worktrees with a session or a run in the last 14 days, `task`, `owner` and `session_key`. `board.py focus --target ID --session KEY` returns per-card signals: edited (branch diff since the default branch plus uncommitted files), scope (this session's run deliverables) and touched (files the session read or edited). The audit hook keeps the touched paths locally in the Workflow database (`touched_files`, at most 5000 per session) and never emits them.
+
 ## Unified runtime configuration
 
 All persisted TypeSafe, role-dispatch and collection toggles live in

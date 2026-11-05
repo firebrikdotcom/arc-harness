@@ -16,16 +16,21 @@ and `overlay`. The overlay also carries the error heat that harness-signals writ
   harness board show    --target ID          (board.json; exit 3 when not mapped)
   harness board state   --target ID --json
   harness board overlay --target ID --json
+  harness board session --target PATH --session-id ID   (create or reuse the session's focus link; prints key and url)
+  harness board focus   --target ID --session KEY       (signals per card for one session; exit 3 when unknown)
 """
 import argparse
 import calendar
 import contextlib
 import fnmatch
+import getpass
 import hashlib
 import json
 import os
 import re
+import secrets
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -541,6 +546,272 @@ def do_import(target, path):
     print(f"imported {len(clean['nodes'])} cards into {bd}; {len(warnings)} warnings")
 
 
+
+# ---------- worktrees, runs and sessions ----------
+
+LIVE_SECONDS = 30 * 60
+WORKTREE_DAYS = 14
+
+
+def id_for_root(root):
+    """The registry id harness-target.sh derives for a root path."""
+    base = re.sub(rb"[^A-Za-z0-9._-]", b"_", os.path.basename(root).encode())[:48].decode()
+    return f"{base}-{hashlib.sha256(root.encode()).hexdigest()[:12]}"
+
+
+def target_kind(target):
+    if target.get("TARGET_KIND"):
+        return target["TARGET_KIND"]
+    root = target["TARGET_ROOT"]
+    return "worktree" if os.path.isfile(os.path.join(root, ".git")) else "repo" if os.path.isdir(os.path.join(root, ".git")) else "dir"
+
+
+def parent_root_of(target):
+    """The main checkout of a worktree target: from target.state, else a cached git answer."""
+    if target_kind(target) != "worktree":
+        return ""
+    if "TARGET_PARENT_ROOT" in target:
+        return target["TARGET_PARENT_ROOT"]
+    cache = board_dir(target) / "parent.json"
+    cached = load_json(cache)
+    if isinstance(cached, dict) and "parent_root" in cached:
+        return cached["parent_root"] or ""
+    common = git(target["TARGET_ROOT"], "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode("utf-8", "replace").strip()
+    parent = os.path.realpath(common[:-5]) if common.endswith("/.git") else ""
+    with contextlib.suppress(OSError):
+        write_json(cache, {"parent_root": parent})
+    return parent
+
+
+def parent_id_of(target, known=None):
+    """The registered main folder's id for a worktree, or None."""
+    parent = parent_root_of(target)
+    if not parent:
+        return None
+    pid = id_for_root(parent)
+    known = known if known is not None else {t["TARGET_ID"] for t in targets()}
+    return pid if pid in known else None
+
+
+def head_branch(root):
+    """Current branch from HEAD files alone (no git process); None when detached or unreadable."""
+    try:
+        dot = os.path.join(root, ".git")
+        if os.path.isfile(dot):
+            line = Path(dot).read_text().strip()
+            gitdir = line[len("gitdir:"):].strip() if line.startswith("gitdir:") else ""
+            gitdir = gitdir if os.path.isabs(gitdir) else os.path.join(root, gitdir)
+        else:
+            gitdir = dot
+        head = Path(gitdir, "HEAD").read_text().strip()
+    except OSError:
+        return None
+    return head[len("ref: refs/heads/"):] if head.startswith("ref: refs/heads/") else None
+
+
+def parse_time(text):
+    try:
+        return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, TypeError):
+        return None
+
+
+def runs_dir(target):
+    return DB_ROOT / "targets" / target["TARGET_ID"] / "db" / "runs"
+
+
+def run_view(run_dir):
+    """What a run says about itself: id, phase, title, liveness and last activity."""
+    info = load_json(run_dir / "run.json")
+    if not isinstance(info, dict):
+        return None
+    try:
+        mtime = (run_dir / "run.json").stat().st_mtime
+    except OSError:
+        mtime = 0
+    updated = parse_time(info.get("updated_at")) or mtime
+    task = load_json(run_dir / "task.json", {}) or {}
+    return {"run_id": info.get("run_id") or run_dir.name, "phase": info.get("current_phase"), "title": task.get("goal") if isinstance(task, dict) else None,
+            "live": info.get("status") == "active" and time.time() - updated < LIVE_SECONDS,
+            "last_active": info.get("updated_at") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime)), "updated": updated, "dir": run_dir}
+
+
+def latest_run(target):
+    best = None
+    try:
+        for p in runs_dir(target).iterdir():
+            if not p.is_dir() or p.name in ("archive", "sessions"):
+                continue
+            try:
+                m = (p / "run.json").stat().st_mtime
+            except OSError:
+                continue
+            if best is None or m > best[0]:
+                best = (m, p)
+    except OSError:
+        return None
+    return run_view(best[1]) if best else None
+
+
+def session_records(target):
+    """Session records of a target, newest first."""
+    rows = []
+    for p in (board_dir(target) / "sessions").glob("*.json"):
+        rec = load_json(p)
+        if isinstance(rec, dict) and rec.get("key"):
+            try:
+                rows.append((p.stat().st_mtime, rec))
+            except OSError:
+                pass
+    return [r for _, r in sorted(rows, key=lambda x: x[0], reverse=True)]
+
+
+def tailscale_login():
+    for exe in ("tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"):
+        try:
+            out = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=2)
+            data = json.loads(out.stdout)
+            return data["User"][str(data["Self"]["UserID"])]["LoginName"] or None
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def audit_url(target_id, key):
+    base = (os.environ.get("HARNESS_AUDIT_URL") or "http://127.0.0.1:18080").rstrip("/")
+    return f"{base}/projects/{target_id}/sessions/{key}"
+
+
+def start_session(target, session_id):
+    """Create (or reuse) the focus link record for one agent session; idempotent per session id."""
+    for rec in session_records(target):
+        if rec.get("session_id") == session_id:
+            return {"key": rec["key"], "url": audit_url(target["TARGET_ID"], rec["key"])}
+    key = secrets.token_urlsafe(24)
+    rec = {"key": key, "session_id": session_id, "target": target["TARGET_ID"], "root": target["TARGET_ROOT"],
+           "owner": {"user": getpass.getuser(), "login": tailscale_login()}, "started_at": now()}
+    write_json(board_dir(target) / "sessions" / f"{key}.json", rec)
+    return {"key": key, "url": audit_url(target["TARGET_ID"], key)}
+
+
+def default_branch(root, board):
+    name = board.get("default_branch")
+    if not name:
+        ref = git(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD").stdout.decode().strip()
+        name = ref[len("refs/remotes/origin/"):] if ref.startswith("refs/remotes/origin/") else None
+    if not name:
+        for cand in ("main", "master"):
+            if git(root, "rev-parse", "--verify", "--quiet", cand).returncode == 0:
+                return cand
+    return name
+
+
+def changed_paths(root, base_name):
+    """Files changed on this branch since it left the default branch, plus uncommitted and untracked ones."""
+    paths = set()
+    for ref in (base_name, f"origin/{base_name}") if base_name else ():
+        mb = git(root, "merge-base", "HEAD", ref)
+        if mb.returncode == 0 and mb.stdout.strip():
+            out = git(root, "diff", "--name-only", "-z", mb.stdout.decode().strip()).stdout.decode("utf-8", "replace")
+            paths.update(x for x in out.split("\0") if x)
+            break
+    out = git(root, "status", "--porcelain", "-z", "--untracked-files=all").stdout.decode("utf-8", "replace").split("\0")
+    i = 0
+    while i < len(out):
+        entry_ = out[i]
+        i += 1
+        if len(entry_) < 4:
+            continue
+        code, path = entry_[:2], entry_[3:]
+        if "R" in code or "C" in code:
+            i += 1
+        paths.add(path)
+    return {p for p in paths if p not in NOTES}
+
+
+def touched_paths(session_id, root):
+    db = Path(os.environ.get("HARNESS_WORKFLOW_STATE") or SCRIPT.parent.parent / ".harness-db" / "workflow-state.sqlite")
+    if not db.exists():
+        return set()
+    prefixes = {root.rstrip("/") + "/", os.path.realpath(root).rstrip("/") + "/"}
+    found = set()
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            for (path,) in con.execute("SELECT path FROM touched_files WHERE session_id=?", (session_id,)):
+                for pre in prefixes:
+                    if path.startswith(pre):
+                        found.add(path[len(pre):])
+                        break
+        finally:
+            con.close()
+    except sqlite3.Error:
+        pass
+    return found
+
+
+def session_run(target, session_id):
+    """The run this session owns, through its run pointer; never the newest run."""
+    if str(SCRIPT.parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        from run_paths import session_key
+        key = session_key(session_id)
+    except (ValueError, ImportError):
+        return None
+    if not key:
+        return None
+    try:
+        run_id = (runs_dir(target) / "sessions" / key / "current").read_text().splitlines()[0].strip()
+    except (OSError, IndexError):
+        return None
+    return run_view(runs_dir(target) / run_id) if run_id and "/" not in run_id else None
+
+
+def plural(n, word):
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def focus(target, key):
+    rec = load_json(board_dir(target) / "sessions" / f"{key}.json") if re.fullmatch(r"[A-Za-z0-9_-]+", key or "") else None
+    if not isinstance(rec, dict) or rec.get("key") != key:
+        return None
+    root = target["TARGET_ROOT"]
+    pid = parent_id_of(target)
+    board_target = target
+    if pid:
+        parent = next(t for t in targets() if t["TARGET_ID"] == pid)
+        if (board_dir(parent) / "board.json").exists():
+            board_target = parent
+    board = load_json(board_dir(board_target) / "board.json") or {}
+    base = default_branch(root, board)
+    edited = changed_paths(root, base) if is_git(root) else set()
+    run = session_run(target, rec.get("session_id", ""))
+    scope = set()
+    if run:
+        task = load_json(run["dir"] / "task.json", {}) or {}
+        scope = {str(d.get("path", "") if isinstance(d, dict) else d) for d in task.get("deliverables") or []} - {""}
+    touched = touched_paths(rec.get("session_id", ""), root) - edited - scope
+    signals, unmapped = {}, set()
+    for kind, paths in (("edited", edited), ("scope", scope), ("touched", touched)):
+        for path in sorted(paths):
+            ids = owners(board, path)
+            if not ids:
+                unmapped.add(path)
+            for cid in ids:
+                signals.setdefault(cid, {"edited": [], "scope": [], "touched": []})[kind].append(path)
+    branch = head_branch(root)
+    count = lambda kind: sum(1 for v in signals.values() if v[kind])
+    summary = (f"This session has changed {plural(count('edited'), 'part')}, planned {plural(count('scope'), 'part')} "
+               f"and read {plural(count('touched'), 'part')}.")
+    return {"target": target["TARGET_ID"], "board_target": board_target["TARGET_ID"], "parent": pid,
+            "session": {"key": key, "owner": rec.get("owner") or {"user": None, "login": None}, "branch": branch, "base": base, "root": root,
+                        "run_id": run["run_id"] if run else None, "phase": run["phase"] if run else None,
+                        "title": (run or {}).get("title") or branch, "live": bool(run and run["live"]),
+                        "last_active": run["last_active"] if run else None},
+            "signals": signals, "unmapped": sorted(unmapped), "summary": summary}
+
+
 # ---------- live overlay (computed per request, never stored) ----------
 
 def overlay(target):
@@ -615,23 +886,51 @@ def entry(target):
         kind, label = "none", "not mapped"
     return {"id": target["TARGET_ID"], "name": os.path.basename(target["TARGET_ROOT"].rstrip("/")), "root": target["TARGET_ROOT"],
             "last_seen": target.get("LAST_SEEN_AT", ""), "state": kind, "label": label, "mapped_at": board.get("mapped_at"),
-            "cards": len(board.get("nodes", []))}
+            "cards": len(board.get("nodes", [])), "kind": target_kind(target), "parent": None, "branch": head_branch(target["TARGET_ROOT"])}
+
+
+def worktree_row(target, known):
+    """A worktree's row, or None when it is stale: no session record and no run in the last 14 days."""
+    sessions = session_records(target)
+    run = latest_run(target)
+    if not sessions and not (run and time.time() - run["updated"] < WORKTREE_DAYS * 86400):
+        return None
+    row = entry(target)
+    row["parent"] = parent_id_of(target, known)
+    owner = (sessions[0].get("owner") if sessions else None) or {"user": getpass.getuser(), "login": None}
+    row["owner"] = {"user": owner.get("user"), "login": owner.get("login")}
+    row["session_key"] = sessions[0]["key"] if sessions else None
+    row["task"] = {"title": run["title"] or row["branch"], "phase": run["phase"], "run_id": run["run_id"], "live": run["live"],
+                   "last_active": run["last_active"]} if run else None
+    return row
 
 
 def listing(limit_recent=4, removed=False):
     """Projects with a board or a mapping state first, then the most recently active others.
 
+    Worktrees are listed after their main folder, and only while active (a session record or a run in the last 14 days).
     Removed projects are left out; `removed=True` lists only them, all of them."""
     rows = [t for t in targets() if Path(t["TARGET_ROOT"]).is_dir() and t["TARGET_ROOT"].rstrip("/") not in HOME_DIRS]
     rows.sort(key=lambda t: t.get("LAST_SEEN_AT", ""), reverse=True)
     if removed:
         return [entry(t) for t in rows if is_removed(t)]
-    rows = [t for t in rows if not is_removed(t)]
+    by_id = {t["TARGET_ID"]: t for t in rows}
+    trees = [t for t in rows if target_kind(t) == "worktree" and not is_removed(t)]
+    rows = [t for t in rows if not is_removed(t) and target_kind(t) != "worktree"]
     skip = lambda t: (load_json(board_dir(t) / "check.json", {}) or {}).get("reason") in ("not a software project", "opted out")
     rows = [t for t in rows if not skip(t)]
     known = [t for t in rows if (board_dir(t) / "board.json").exists() or (board_dir(t) / "state.json").exists()]
     recent = [t for t in rows if t not in known][:limit_recent]
-    return [entry(t) for t in known + recent]
+    out = [entry(t) for t in known + recent]
+    present = {r["id"] for r in out}
+    children = [r for r in (worktree_row(t, set(by_id)) for t in trees) if r]
+    for r in children:
+        pid = r["parent"]
+        if pid and pid not in present:
+            out.append(entry(by_id[pid]))
+            present.add(pid)
+    children.sort(key=lambda r: (r["task"] or {}).get("last_active") or "", reverse=True)
+    return out + children
 
 
 def state_view(target, max_age=20):
@@ -660,7 +959,7 @@ def state_view(target, max_age=20):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db-root")
-    ap.add_argument("command", choices=["check", "map", "import", "status", "list", "show", "state", "overlay", "remove", "restore"])
+    ap.add_argument("command", choices=["check", "map", "import", "status", "list", "show", "state", "overlay", "remove", "restore", "session", "focus"])
     ap.add_argument("--target")
     ap.add_argument("--spawn", action="store_true")
     ap.add_argument("--full", action="store_true")
@@ -668,6 +967,8 @@ def main(argv=None):
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--board")
     ap.add_argument("--removed", action="store_true")
+    ap.add_argument("--session-id")
+    ap.add_argument("--session")
     a = ap.parse_args(argv)
     global DB_ROOT
     if a.db_root:
@@ -679,6 +980,18 @@ def main(argv=None):
     if not a.target:
         ap.error("--target is required")
     target = resolve_target(a.target)
+    if a.command == "session":
+        if not a.session_id:
+            ap.error("--session-id is required")
+        print(json.dumps(start_session(target, a.session_id)))
+        return 0
+    if a.command == "focus":
+        view = focus(target, a.session or "")
+        if view is None:
+            print(json.dumps({"error": "unknown session"}))
+            return 3
+        print(json.dumps(view))
+        return 0
     if a.command == "check":
         info = check(target)
         if a.spawn and info["action"] != "none":
