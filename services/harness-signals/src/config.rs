@@ -22,6 +22,98 @@ pub struct Config {
     pub listen: String,
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// Read-only Analyze agents started from board problems (docs/issue-agents.md).
+    #[serde(default)]
+    pub issue_agents: IssueAgents,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueAgents {
+    /// Jobs running at once across every project (1 to 4, default 2).
+    #[serde(default)]
+    pub global_cap: Option<u64>,
+    /// Jobs started per project per UTC day (1 to 20, default 5).
+    #[serde(default)]
+    pub daily_cap: Option<u64>,
+    /// A job running longer is stopped and marked failed (60 to 7200, default 2700).
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// How long Take over waits for a background agent to finish its current
+    /// step before stopping it anyway (5 to 120, default 30).
+    #[serde(default)]
+    pub takeover_wait_seconds: Option<u64>,
+    /// `claude` or `codex`; default claude when installed, else codex.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Start agents in a Herdr tab instead of the background.
+    #[serde(default)]
+    pub herdr: Option<HerdrSetting>,
+    /// An SSH destination for this machine, shown in the take-over commands.
+    #[serde(default)]
+    pub ssh: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HerdrSetting {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+impl IssueAgents {
+    pub fn global_cap(&self) -> u64 {
+        self.global_cap.unwrap_or(2).clamp(1, 4)
+    }
+    pub fn daily_cap(&self) -> u64 {
+        self.daily_cap.unwrap_or(5).clamp(1, 20)
+    }
+    pub fn timeout_seconds(&self) -> u64 {
+        self.timeout_seconds.unwrap_or(2700).clamp(60, 7200)
+    }
+    pub fn takeover_wait_seconds(&self) -> u64 {
+        self.takeover_wait_seconds.unwrap_or(30).clamp(5, 120)
+    }
+    /// The Herdr workspace when Herdr is explicitly enabled.
+    pub fn herdr_workspace(&self) -> Option<&str> {
+        self.herdr
+            .as_ref()
+            .filter(|h| h.enabled)
+            .and_then(|h| h.workspace.as_deref())
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Some(agent) = &self.agent {
+            if agent != "claude" && agent != "codex" {
+                bail!("issue_agents.agent must be \"claude\" or \"codex\"");
+            }
+        }
+        if let Some(herdr) = &self.herdr {
+            let workspace = herdr.workspace.as_deref().unwrap_or("");
+            if herdr.enabled
+                && (workspace.is_empty()
+                    || workspace.len() > 128
+                    || workspace.starts_with('-')
+                    || workspace.chars().any(char::is_control))
+            {
+                bail!("issue_agents.herdr.workspace must name a Herdr workspace when herdr.enabled is true");
+            }
+        }
+        if let Some(ssh) = &self.ssh {
+            let safe = !ssh.is_empty()
+                && ssh.len() <= 128
+                && !ssh.starts_with('-')
+                && ssh
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'));
+            if !safe {
+                bail!("issue_agents.ssh must be an SSH destination such as user@host");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +130,28 @@ pub struct Project {
     #[serde(default)]
     pub path_map: Vec<PathMap>,
     pub providers: Vec<Provider>,
+    /// Marks a project whose raw logs an agent reads with a skill.
+    #[serde(default)]
+    pub logs: Option<Logs>,
+}
+
+/// How raw logs are read for a project: the skill that reads them and, when the
+/// skill names environments differently, the environment it should use.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Logs {
+    /// A skill name, e.g. `lothar-nightwatch-logs`.
+    pub skill: String,
+    #[serde(default)]
+    pub environment: Option<String>,
+}
+
+/// Where a skill can be installed, in lookup order.
+pub fn skill_file(skill: &str) -> Option<PathBuf> {
+    [".agents/skills", ".claude/skills", ".codex/skills"]
+        .iter()
+        .map(|dir| home_dir().join(dir).join(skill).join("SKILL.md"))
+        .find(|path| path.is_file())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,6 +310,7 @@ impl Config {
         if !(self.half_life_minutes.is_finite() && self.half_life_minutes >= 1.0) {
             bail!("half_life_minutes must be at least 1");
         }
+        self.issue_agents.validate()?;
         let mut names = BTreeSet::new();
         for project in &self.projects {
             let name = &project.name;
@@ -207,6 +322,14 @@ impl Config {
             }
             if project.providers.is_empty() {
                 bail!("project {name:?} has no providers");
+            }
+            if let Some(logs) = &project.logs {
+                if !slug(&logs.skill) {
+                    bail!("project {name:?}: logs skill must be a skill name");
+                }
+                if logs.environment.as_deref().is_some_and(|e| !slug(e)) {
+                    bail!("project {name:?}: logs environment must use only letters, digits, '.', '_' and '-'");
+                }
             }
             if project
                 .providers
@@ -332,6 +455,19 @@ mod tests {
     }
 
     #[test]
+    fn a_project_can_name_its_logs_skill() {
+        let config = parse(
+            r#"{"projects":[{"name":"api","target":"demo-1","environment":"Production",
+              "logs":{"skill":"lothar-nightwatch-logs","environment":"production"},
+              "providers":[{"type":"command","argv":["./issues"]}]}]}"#,
+        )
+        .unwrap();
+        let logs = config.projects[0].logs.as_ref().unwrap();
+        assert_eq!(logs.skill, "lothar-nightwatch-logs");
+        assert_eq!(logs.environment.as_deref(), Some("production"));
+    }
+
+    #[test]
     fn unsafe_or_unknown_settings_are_refused() {
         for bad in [
             r#"{"poll_seconds":1}"#,
@@ -344,7 +480,60 @@ mod tests {
             r#"{"projects":[{"name":"a","target":"x","providers":[{"type":"nightwatch"}]}]}"#,
             r#"{"projects":[{"name":"a","target":"x","providers":[{"type":"nightwatch","credentials_file":"c","mcp_url":"http://evil/mcp"}]}]}"#,
             r#"{"projects":[{"name":"a","target":"x","token":"oops","providers":[{"type":"command","argv":["x"]}]}]}"#,
+            r#"{"projects":[{"name":"a","target":"x","logs":{"skill":"../x"},"providers":[{"type":"command","argv":["x"]}]}]}"#,
+            r#"{"projects":[{"name":"a","target":"x","logs":{"skill":"s","environment":"a b"},"providers":[{"type":"command","argv":["x"]}]}]}"#,
+            r#"{"projects":[{"name":"a","target":"x","logs":{"skill":"s","extra":1},"providers":[{"type":"command","argv":["x"]}]}]}"#,
             r#"{"projects":[{"name":"a","target":"x","providers":[{"type":"command","argv":["x"]}]},{"name":"a","target":"y","providers":[{"type":"command","argv":["x"]}]}]}"#,
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn issue_agent_settings_default_clamp_and_validate() {
+        let config = parse("{}").unwrap();
+        let agents = &config.issue_agents;
+        assert_eq!(
+            (
+                agents.global_cap(),
+                agents.daily_cap(),
+                agents.timeout_seconds()
+            ),
+            (2, 5, 2700)
+        );
+        assert_eq!(agents.takeover_wait_seconds(), 30);
+        assert!(agents.herdr_workspace().is_none());
+        for (given, used) in [(1, 5), (45, 45), (999, 120)] {
+            let config = parse(&format!(
+                r#"{{"issue_agents":{{"takeover_wait_seconds":{given}}}}}"#
+            ))
+            .unwrap();
+            assert_eq!(config.issue_agents.takeover_wait_seconds(), used);
+        }
+        let config = parse(
+            r#"{"issue_agents":{"global_cap":9,"daily_cap":0,"timeout_seconds":5,"agent":"codex",
+                "herdr":{"enabled":true,"workspace":"w1"},"ssh":"me@build-box"}}"#,
+        )
+        .unwrap();
+        let agents = &config.issue_agents;
+        assert_eq!(
+            (
+                agents.global_cap(),
+                agents.daily_cap(),
+                agents.timeout_seconds()
+            ),
+            (4, 1, 60)
+        );
+        assert_eq!(agents.herdr_workspace(), Some("w1"));
+        let disabled =
+            parse(r#"{"issue_agents":{"herdr":{"enabled":false,"workspace":"w1"}}}"#).unwrap();
+        assert!(disabled.issue_agents.herdr_workspace().is_none());
+        for bad in [
+            r#"{"issue_agents":{"agent":"gemini"}}"#,
+            r#"{"issue_agents":{"herdr":{"enabled":true}}}"#,
+            r#"{"issue_agents":{"ssh":"-oProxyCommand=x"}}"#,
+            r#"{"issue_agents":{"ssh":"a b"}}"#,
+            r#"{"issue_agents":{"argv":["x"]}}"#,
         ] {
             assert!(parse(bad).is_err(), "{bad}");
         }

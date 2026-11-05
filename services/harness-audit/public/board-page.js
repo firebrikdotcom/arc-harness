@@ -10,7 +10,11 @@
   const host = page.querySelector('[data-board-root]');
   const statusText = page.querySelector('[data-board-status]');
   const statusDot = page.querySelector('[data-board-dot]');
+  const csrf = page.dataset.csrf || '';
   const POLL_MS = 5000;
+  const FINGERPRINT = /^[0-9a-f]{64}$/;
+  const deepLink = (new URLSearchParams(location.search).get('job') || '').toLowerCase();
+  let deepLinkDone = !FINGERPRINT.test(deepLink);
   let api = null;
   let mappedAt = null;
   let emptyKey = null;
@@ -23,6 +27,48 @@
     let body = null;
     try { body = await response.json(); } catch { body = null; }
     return {status: response.status, ok: response.ok, body};
+  }
+
+  /* POST a form with the session token; a refused request throws its server message. */
+  async function postForm(url, fields) {
+    const form = new URLSearchParams(Object.assign({csrf_token: csrf}, fields));
+    const response = await fetch(url, {method: 'POST', cache: 'no-store', headers: {Accept: 'application/json'}, body: form});
+    let body = null;
+    try { body = await response.json(); } catch { body = null; }
+    if (!response.ok) throw new Error((body && body.error && body.error.message) || `HTTP ${response.status}`);
+    return body;
+  }
+
+  /* Issue agents: the board renders the job panel; these calls are the only way it reaches the server. */
+  const agents = {
+    async act(request) {
+      const fp = request.fingerprint;
+      if (request.act === 'analyze' || request.act === 'reanalyze') {
+        await postForm(base + '/agents', {issue_key: request.issue, card_id: request.card, reanalyze: request.act === 'reanalyze' ? 'true' : 'false'});
+      } else {
+        const path = {stop: 'stop', takeover: 'takeover', handback: 'handback', 'difit-start': 'difit/start', 'difit-stop': 'difit/stop'}[request.act];
+        if (!path) throw new Error('unknown action');
+        const body = await postForm(`${base}/agents/${fp}/${path}`, {});
+        if (api && body && body.job && body.resume_commands) api.setJob(fp, body);
+      }
+      await Promise.all([loadJob(fp), loadAgents()]);
+    },
+    load(fp) { loadJob(fp); },
+    difitHref: fp => `${base}/agents/${fp}/difit`,
+  };
+
+  async function loadJob(fp) {
+    if (!api || !FINGERPRINT.test(fp)) return;
+    const response = await getJson(`${base}/agents/${fp}.json`);
+    if (response.ok && response.body) api.setJob(fp, response.body);
+  }
+
+  async function loadAgents() {
+    if (!api) return;
+    const response = await getJson('/agents.json?target=' + encodeURIComponent(id));
+    if (!response.ok || !response.body) return;
+    api.setAgents(response.body.jobs || [], {generated_at: response.body.generated_at, runner: response.body.runner || null});
+    if (!deepLinkDone) deepLinkDone = api.openJob(deepLink);
   }
 
   function ago(iso) {
@@ -106,7 +152,7 @@
     const canvas = document.createElement('div');
     canvas.className = 'board-canvas';
     host.appendChild(canvas);
-    api = window.ArchitectureBoard.mount(canvas, response.body);
+    api = window.ArchitectureBoard.mount(canvas, response.body, {agents, target: id});
     mappedAt = response.body.mapped_at || null;
     emptyKey = null;
     return true;
@@ -132,6 +178,8 @@
           api.setStatus({kind, text: kind});
           const overlay = await getJson(base + '/overlay.json');
           if (overlay.ok && overlay.body) api.setOverlay(overlay.body);
+          await loadAgents();
+          await Promise.all(api.watched().map(loadJob));
         }
       } else {
         if (!api) showEmpty(null);
@@ -146,7 +194,7 @@
   }
 
   host.addEventListener('click', event => {
-    const button = event.target.closest('[data-copy]');
+    const button = event.target.closest('.board-message [data-copy]');
     if (!button) return;
     const text = button.dataset.copy;
     const done = () => { button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy'; }, 1500); };

@@ -86,6 +86,28 @@ class BoardTests(unittest.TestCase):
         return subprocess.run([sys.executable, str(ROOT / "scripts" / "board.py"), "--db-root", str(self.db), *args],
                               capture_output=True, text=True, env=env or self.env, timeout=60)
 
+    def test_concurrent_writes_to_one_file_do_not_collide(self):
+        # The dashboard runs several board queries at once, each rewriting check.json.
+        import threading
+        path = self.db / "targets" / "demo-1" / "board" / "check.json"
+        errors = []
+
+        def write(n):
+            try:
+                for i in range(50):
+                    board.write_json(path, {"writer": n, "i": i})
+            except Exception as error:  # noqa: BLE001
+                errors.append(error)
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertIn("writer", json.loads(path.read_text()))
+        self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
     def test_resolve_by_path_inside_target(self):
         self.assertEqual(board.resolve_target(str(self.project / "src"))["TARGET_ID"], self.target_id)
 

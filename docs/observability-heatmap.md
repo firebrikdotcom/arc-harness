@@ -55,6 +55,7 @@ Another machine needs the same steps of its own: the code, the installed service
       "target": "DollarWise-Prototype-5173076eded4",  // or a path inside the project
       "environment": "Production",                    // only errors from this environment count
       "path_map": [{"from": "/var/www/html/", "to": ""}],
+      "logs": {"skill": "lothar-nightwatch-logs", "environment": "production"},  // optional
       "providers": [
         {"type": "nightwatch", "application": "Dollarwise",
          "credentials_file": "~/.config/harness/signals/nightwatch.oauth"},
@@ -68,6 +69,10 @@ Another machine needs the same steps of its own: the code, the installed service
 ```
 
 The Nightwatch provider takes `application` (name or id; optional when the account has one application), `limit` (most open issues read per poll, default 50) and, for webhooks, `secret_file`. The project's `environment` is matched against Nightwatch's environment names, ignoring case.
+
+### Optional: mark a project whose logs a skill can read
+
+Add `"logs": {"skill": "lothar-nightwatch-logs", "environment": "production"}` to a project to say that an agent reads its raw logs with that skill. `environment` is the skill's own name for the environment, when it differs from the project's. Each Nightwatch issue of a marked project then gets a **Logs ↗** link on the board (in a card's Problems list and in the issue sheet) that opens Nightwatch's Logs page for the issue's environment, with a period that covers the issue's first sighting and a search for text from its title. `scripts/signals-service.sh check` reports whether the skill is installed under `~/.agents/skills`, `~/.claude/skills` or `~/.codex/skills`. The service itself never reads logs: Nightwatch serves them only to a signed-in browser.
 
 ### Optional: Nightwatch webhooks for instant updates
 
@@ -89,7 +94,7 @@ Nightwatch ──push──┘    (one issue      (path_map, then the         (l
                                                               board.py overlay ─► dashboard Heat layer
 ```
 
-**Storage.** Everything lives under `<db>/targets/<id>/signals/`: `issues.json` (the current issues of every source), `poll.json` (each source's last poll: ok, time, count, error) and `heat.json` (per-card scores). Only short summaries are kept: a one-line title of at most 200 characters with UUIDs and email addresses replaced by `<id>` and `<email>`, level, counts, first and last seen, the link, and file/line stack frames. Messages beyond the title, request data, queries, logs and user identifiers are dropped.
+**Storage.** Everything lives under `<db>/targets/<id>/signals/`: `issues.json` (the current issues of every source), `poll.json` (each source's last poll: ok, time, count, error), `heat.json` (per-card scores, plus an `issues` list of every open issue in compact form for the board's ticker: key, title, level, counts, first and last seen, link, source, the card that raised it, its Analyze fingerprint, and up to 12 stack frames as repository paths), `jobs/` (issue agent records, locks, and logs), and `analyses/` (rendered Markdown diagnoses). Only short summaries are kept: a one-line title of at most 200 characters with UUIDs and email addresses replaced by `<id>` and `<email>`, level, counts, first and last seen, the link, and file/line stack frames. Messages beyond the title, request data, queries, logs and user identifiers are dropped.
 
 **Nightwatch polling.** Each poll calls only Nightwatch's read tools: `list_applications` and `list_environments` (to resolve the names in the config), `list_issues` (open issues, most recently seen first, up to `limit`), and `get_issue` for issues that are new or have recurred since the last poll, at most 15 per poll. It never calls the tools that comment on or change issues. `get_issue` supplies the stack trace (repository paths, `vendor/` frames marked as not in the app), occurrences in the last 24 hours and users affected. Exceptions count as errors (`FatalError` as fatal); route, job, command and scheduled-task issues, which are threshold alerts, count as warnings. Access tokens are refreshed with the stored refresh token, which is rotated and saved back; if Nightwatch refuses it, the poll records the error and you sign in again.
 
@@ -98,6 +103,10 @@ Nightwatch ──push──┘    (one issue      (path_map, then the         (l
 **Scoring.** `level weight × ln(1 + recent events) × (1 + ln(1 + users))`, with weights fatal 8, error 5, warning 1, info 0.2. Recent events decay with `half_life_minutes`: Sentry's hourly buckets are decayed one by one; other sources decay their count by the time since the issue was last seen. A card's heat is its total divided by the hottest card's, so the worst card on each board is 100%. Issues first seen in the last 24 hours are marked new.
 
 **On the board.** The Heat button (shown when the project has heat) tints cards by heat and adds an "errors · N" badge; it is remembered per browser. The overview lists the five hottest cards, the number of unmapped issues, sources whose last poll failed, and a stale warning when `heat.json` is more than 15 minutes old. A card's details gain a Problems list: level, title, events, users, last seen, whether the card raised it or is on its call path, and an Open link.
+
+**The issue ticker.** With Heat on, the newest open issues run along the top of the diagram: level (error, slow or warn), a "new" tag for issues first seen in the last 24 hours, how long ago, the title, the card that raised it (or "No card owns it"), and a dot until you have opened it. Step with ◂ ▸ or the keys `n` and `p`, filter by All, Errors, Slow or New today, and fold it into a small "Live" pill with –. Issues that arrive while you read do not shuffle the list: they wait behind "↑ N new" (or "+N new" on the pill) until you click it. Picking an issue lights its card and opens an issue sheet over the lower diagram with Overview, Stack, Card and Agent tabs; the side panel then shows only a short summary, with "Card details" for the full card. The sheet folds into a tab in the corner. Which issues you have read, and whether the ticker is folded, are remembered in this browser only; an issue counts as unread again when it happens again.
+
+**Investigating problems.** Click **Analyze** next to an issue in the Problems list to start a read-only agent that investigates the failure in its own worktree and reports back with a diagnosis. See [issue-agents.md](issue-agents.md).
 
 **Command output.** A JSON array, or `{"issues": [...]}`, of objects with `id` and `title`, and optionally `level` (`fatal|error|warning|info`), `status` (`open|resolved|ignored`), `count`, `users`, `first_seen`, `last_seen` (RFC 3339), `url`, and `frames` (`[{"path": "...", "line": 12, "in_app": true}]`, innermost first). Its output is capped at 8 MB and it is killed after `timeout_seconds`.
 
@@ -111,6 +120,7 @@ Nightwatch ──push──┘    (one issue      (path_map, then the         (l
 | `scripts/signals-service.sh login nightwatch` | One-time browser sign-in for polling Nightwatch. |
 | `scripts/signals-service.sh tools nightwatch` | Lists the Nightwatch MCP tools, for diagnosis. |
 | `scripts/signals-service.sh prune` | Removes stored heat of projects no longer configured. |
+| `scripts/signals-service.sh jobs ...` | Issue-agent commands: list, show, analyze, stop, takeover, handback, cleanup, difit, run (see docs/issue-agents.md). |
 | `scripts/signals-service.sh install`, `status` | Install or inspect the background service. |
 
 `HARNESS_SIGNALS_CONFIG` overrides the configuration file path. The binary also takes `--config FILE`, `--db-root DIR` and, for `login`/`tools`, `--credentials FILE` and `--mcp-url URL`.

@@ -4,6 +4,7 @@
 //! event and selected-session lookups. Templates and the stylesheet are embedded at compile
 //! time, so the service needs no working directory or asset build to serve them.
 
+use crate::agents::{self, Action, Agents, Fingerprint, Reply};
 use crate::boards::{Boards, Outcome, Query, TargetId};
 use crate::reports::{EventFilter, ReportStore};
 use crate::routes::read_report;
@@ -88,6 +89,10 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
         name: TemplateName("audit/board.html"),
         source: include_str!("../resources/views/audit/board.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/agents.html"),
+        source: include_str!("../resources/views/audit/agents.html"),
     },
     TemplateDef {
         name: TemplateName("audit/partials/prompt-items.html"),
@@ -186,6 +191,10 @@ const NAVIGATION: &[NavItem] = &[
     NavItem {
         label: "Architecture",
         href: "/projects",
+    },
+    NavItem {
+        label: "Agents",
+        href: "/agents",
     },
 ];
 
@@ -2456,6 +2465,366 @@ async fn board_query(request: &HttpRequest, raw_id: &str, query: Query) -> HttpR
     }
 }
 
+// ---------- issue agents ----------
+
+fn agents_error(status: StatusCode, code: &str, message: &str) -> HttpResponse {
+    no_store_json(
+        status,
+        &json!({"error": {"code": code, "message": message}}),
+    )
+}
+
+fn unknown_job() -> HttpResponse {
+    agents_error(StatusCode::NOT_FOUND, "not_found", "unknown project or job")
+}
+
+fn csrf_rejected() -> HttpResponse {
+    agents_error(
+        StatusCode::FORBIDDEN,
+        "csrf",
+        "The form expired; reload the page and try again.",
+    )
+}
+
+fn agents_reply(reply: Reply, ok: StatusCode) -> HttpResponse {
+    match reply {
+        Reply::Json(document) => no_store_json(ok, &document),
+        Reply::Error(status, body) => {
+            if status == StatusCode::BAD_GATEWAY {
+                tracing::warn!(%body, "signals job CLI failed");
+            }
+            no_store_json(status, &body)
+        }
+    }
+}
+
+/// `(state label, chip class)` for a job, the same on the board and the Agents page.
+fn job_chip(job: &Value) -> (&'static str, &'static str) {
+    match (job["status"].as_str(), job["owner"].as_str()) {
+        (Some("running"), _) if job["stopping"].is_string() => ("Stopping", "run"),
+        // Observation closes taken-over jobs too; how they ended matters more than who held them.
+        (Some("ended"), _) => ("Ended", "end"),
+        (Some("diagnosed"), _) => ("Diagnosis ready", "ok"),
+        (Some(_), Some("you")) => ("Yours", "you"),
+        (Some("queued"), _) => ("Queued", ""),
+        (Some("running"), _) => ("Analyzing", "run"),
+        (Some("stopped"), _) => ("Stopped", "warn"),
+        (Some("failed"), _) => ("Failed", "hot"),
+        (Some("detached"), _) => ("Detached", "hot"),
+        _ => ("Unknown", ""),
+    }
+}
+
+/// An unfinished job whose session has been quiet longer than this is flagged.
+const ACTIVITY_STALE_SECONDS: i64 = 10 * 60;
+/// The signals service ticks at least every 30 s; past this it is called stale.
+const TICK_STALE_SECONDS: i64 = 2 * 60;
+
+fn stamp(value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// The CLI's own clock for a `jobs list` document, so ages do not depend on this process.
+fn listed_at(document: &Value) -> chrono::DateTime<chrono::Utc> {
+    stamp(&document["generated_at"]).unwrap_or_else(chrono::Utc::now)
+}
+
+fn unfinished(job: &Value) -> bool {
+    matches!(job["status"].as_str(), Some("queued" | "running"))
+}
+
+/// "no activity for N min" for an unfinished job quiet past the limit.
+fn quiet_note(job: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let quiet = (now - stamp(&job["last_activity_at"])?).num_seconds();
+    (unfinished(job) && quiet > ACTIVITY_STALE_SECONDS)
+        .then(|| format!("no activity for {} min", quiet / 60))
+}
+
+/// The banner shown when the signals service has stopped observing jobs.
+fn runner_stale(document: &Value) -> Option<String> {
+    let now = listed_at(document);
+    match stamp(&document["runner"]["ticked_at"]) {
+        Some(at) => {
+            let age = (now - at).num_seconds();
+            (age > TICK_STALE_SECONDS).then(|| format!(
+                "The signals service has not checked issue agents for {} min, so job states may be out of date. Is harness-signals running?",
+                age / 60
+            ))
+        }
+        None => document["jobs"]
+            .as_array()
+            .is_some_and(|jobs| jobs.iter().any(unfinished))
+            .then(|| "The signals service has never checked issue agents on this machine, so unfinished jobs are not being observed. Is harness-signals running?".to_owned()),
+    }
+}
+
+/// One Agents page row: display strings only, every id re-validated before it goes in a link.
+fn agent_row(job: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<Value> {
+    let target = TargetId::parse(job["target_id"].as_str()?)?;
+    let fingerprint = Fingerprint::parse(job["fingerprint"].as_str()?)?;
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    let (label, class) = job_chip(job);
+    let session = text(&job["session_id"]);
+    let short = |value: &str, keep: usize| {
+        if value.chars().count() > keep {
+            format!("{}…", value.chars().take(keep).collect::<String>())
+        } else {
+            value.to_owned()
+        }
+    };
+    let worktree = text(&job["worktree"]["path"]);
+    let tail: String = worktree
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(12)
+        .collect();
+    Some(json!({
+        "target": target.as_str(),
+        "project": display_name(target.as_str()),
+        "fingerprint": fingerprint.as_str(),
+        "fp8": &fingerprint.as_str()[..8],
+        "card": text(&job["card_id"]),
+        "issue": text(&job["issue_title"]),
+        "issue_key": text(&job["issue_key"]),
+        "state_label": label,
+        "state_class": class,
+        "agent": text(&job["agent"]),
+        "session": if session.is_empty() { "—".to_owned() } else { short(&session, 8) },
+        "session_full": session,
+        "worktree": if worktree.is_empty() { "—".to_owned() } else { format!("…/{tail}") },
+        "worktree_full": worktree,
+        "branch": text(&job["worktree"]["branch"]),
+        "machine": text(&job["machine"]),
+        "launcher": text(&job["launcher"]),
+        "updated_at": text(&job["updated_at"]),
+        "has_diagnosis": job["has_diagnosis"] == true,
+        "error": text(&job["error"]),
+        "quiet": quiet_note(job, now),
+    }))
+}
+
+/// `GET /agents`: this machine's issue-agent jobs across every project.
+#[get("/agents")]
+async fn agents_page(
+    request: HttpRequest,
+    session: Session,
+    registry: web::Data<UiRegistry>,
+) -> impl Responder {
+    let (rows, error, stale) = match Agents::for_request(&request).list(None).await {
+        Reply::Json(document) => {
+            let now = listed_at(&document);
+            (
+                document["jobs"]
+                    .as_array()
+                    .map(|jobs| {
+                        jobs.iter()
+                            .filter_map(|j| agent_row(j, now))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                None,
+                runner_stale(&document),
+            )
+        }
+        Reply::Error(status, body) => {
+            tracing::warn!(%status, %body, "agents list failed");
+            let message = body["error"]["message"]
+                .as_str()
+                .unwrap_or("the signals job CLI failed")
+                .to_owned();
+            (Vec::new(), Some(message), None)
+        }
+    };
+    let mut context = Context::new();
+    context.insert("jobs", &rows);
+    context.insert("agents_error", &error);
+    context.insert("runner_stale", &stale);
+    render(
+        &registry,
+        &request,
+        &session,
+        "audit/agents.html",
+        "Agents",
+        context,
+        vec![
+            Breadcrumb::link("Workbench", "/"),
+            Breadcrumb::current("Agents"),
+        ],
+    )
+    .await
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct AgentsQuery {
+    target: Option<String>,
+}
+
+/// `GET /agents.json`: `{jobs, generated_at}`, optionally for one project.
+#[get("/agents.json")]
+async fn agents_json(request: HttpRequest, query: web::Query<AgentsQuery>) -> impl Responder {
+    let target = match query.target.as_deref() {
+        None | Some("") => None,
+        Some(raw) => match TargetId::parse(raw) {
+            Some(id) => Some(id),
+            None => return unknown_job(),
+        },
+    };
+    agents_reply(
+        Agents::for_request(&request).list(target).await,
+        StatusCode::OK,
+    )
+}
+
+/// `GET /projects/{id}/agents/{fingerprint}.json`: the job, its diagnosis and viewer state.
+#[get("/projects/{id}/agents/{file}")]
+async fn agent_job_json(request: HttpRequest, path: web::Path<(String, String)>) -> impl Responder {
+    let (raw_id, file) = path.into_inner();
+    let (Some(id), Some(job)) = (
+        TargetId::parse(&raw_id),
+        file.strip_suffix(".json").and_then(Fingerprint::parse),
+    ) else {
+        return unknown_job();
+    };
+    agents_reply(
+        Agents::for_request(&request).show(id, job).await,
+        StatusCode::OK,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnalyzeForm {
+    #[serde(default)]
+    csrf_token: String,
+    #[serde(default)]
+    issue_key: String,
+    #[serde(default)]
+    card_id: String,
+    #[serde(default)]
+    reanalyze: Option<String>,
+}
+
+/// `POST /projects/{id}/agents`: queue Analyze for one issue on one card.
+/// 202 when this request queued it, 200 when the job already existed.
+#[post("/projects/{id}/agents")]
+async fn analyze_issue(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    form: web::Form<AnalyzeForm>,
+) -> impl Responder {
+    if !arc_web::helpers::csrf::validate_csrf_token(&session, &form.csrf_token) {
+        return csrf_rejected();
+    }
+    let Some(id) = TargetId::parse(&path) else {
+        return unknown_job();
+    };
+    let (Some(issue), Some(card)) = (
+        agents::form_word(&form.issue_key),
+        agents::form_word(&form.card_id),
+    ) else {
+        return agents_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid",
+            "issue_key and card_id are required",
+        );
+    };
+    let reanalyze = matches!(form.reanalyze.as_deref(), Some("1" | "true" | "on" | "yes"));
+    match Agents::for_request(&request)
+        .analyze(id, issue, card, reanalyze)
+        .await
+    {
+        Reply::Json(document) => {
+            let status = if document["created"] == true {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::OK
+            };
+            no_store_json(status, &document)
+        }
+        other => agents_reply(other, StatusCode::OK),
+    }
+}
+
+async fn job_action(
+    request: &HttpRequest,
+    session: &Session,
+    raw_id: &str,
+    raw_job: &str,
+    action: Option<Action>,
+    csrf_token: &str,
+) -> HttpResponse {
+    if !arc_web::helpers::csrf::validate_csrf_token(session, csrf_token) {
+        return csrf_rejected();
+    }
+    let (Some(id), Some(job), Some(action)) =
+        (TargetId::parse(raw_id), Fingerprint::parse(raw_job), action)
+    else {
+        return unknown_job();
+    };
+    agents_reply(
+        Agents::for_request(request).act(action, id, job).await,
+        StatusCode::OK,
+    )
+}
+
+/// `POST /projects/{id}/agents/{fingerprint}/stop|takeover|handback`.
+#[post("/projects/{id}/agents/{job}/{action}")]
+async fn agent_action(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<(String, String, String)>,
+    form: web::Form<CsrfForm>,
+) -> impl Responder {
+    let (id, job, action) = path.into_inner();
+    let action = Action::parse(&action)
+        .filter(|a| matches!(a, Action::Stop | Action::Takeover | Action::Handback));
+    job_action(&request, &session, &id, &job, action, &form.csrf_token).await
+}
+
+/// `POST /projects/{id}/agents/{fingerprint}/difit/start|stop`.
+#[post("/projects/{id}/agents/{job}/difit/{verb}")]
+async fn agent_difit(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<(String, String, String)>,
+    form: web::Form<CsrfForm>,
+) -> impl Responder {
+    let (id, job, verb) = path.into_inner();
+    let action = Action::parse(&format!("difit/{verb}"));
+    job_action(&request, &session, &id, &job, action, &form.csrf_token).await
+}
+
+/// `GET /projects/{id}/agents/{fingerprint}/difit`: to the job's diff viewer on
+/// loopback, only while the service reports it running.
+#[get("/projects/{id}/agents/{job}/difit")]
+async fn agent_difit_open(
+    request: HttpRequest,
+    path: web::Path<(String, String)>,
+) -> impl Responder {
+    let (raw_id, raw_job) = path.into_inner();
+    let (Some(id), Some(job)) = (TargetId::parse(&raw_id), Fingerprint::parse(&raw_job)) else {
+        return unknown_job();
+    };
+    match Agents::for_request(&request).show(id, job).await {
+        Reply::Json(shown) => match agents::difit_url(&shown) {
+            Some(url) => HttpResponse::SeeOther()
+                .insert_header(("Location", url))
+                .insert_header(("Cache-Control", "no-store"))
+                .finish(),
+            None => agents_error(
+                StatusCode::NOT_FOUND,
+                "not_running",
+                "The diff viewer is not running; start it from the job panel.",
+            ),
+        },
+        other => agents_reply(other, StatusCode::OK),
+    }
+}
+
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(orchestration_page);
     cfg.service(workbench)
@@ -2469,6 +2838,13 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(board_json)
         .service(board_state_json)
         .service(board_overlay_json)
+        .service(agents_page)
+        .service(agents_json)
+        .service(agent_difit_open)
+        .service(agent_job_json)
+        .service(analyze_issue)
+        .service(agent_difit)
+        .service(agent_action)
         .service(stylesheet)
         .service(board_script)
         .service(board_stylesheet)
@@ -4251,6 +4627,463 @@ mod tests {
             assert!(content_type.starts_with(kind), "{uri}: {content_type}");
             assert!(body.contains(needle), "{uri}");
         }
+    }
+
+    const FP: &str = "9f3c1a0000000000000000000000000000000000000000000000000000000001";
+
+    /// A stand-in for `scripts/signals-service.sh`: records each argv and answers
+    /// like the signals job CLI, choosing the outcome from the issue key.
+    struct AgentsFixture {
+        directory: std::path::PathBuf,
+        calls: std::path::PathBuf,
+        agents: std::sync::Arc<Agents>,
+    }
+
+    impl AgentsFixture {
+        fn new() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("audit-agents-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let calls = directory.join("calls");
+            let job = json!({
+                "fingerprint": FP, "target_id": "demo-1", "card_id": "app", "issue_key": "nw#1",
+                "issue_title": "<script>alert(1)</script> renew", "status": "running", "owner": "runner",
+                "agent": "claude", "session_id": "3b1e6f0c-8d2a-4c57-9a41-72e5d0b9c8aa",
+                "worktree": {"path": "/db/worktrees/9f3c1a", "branch": "nw/9f3c1a000000", "base_branch": "main"},
+                "machine": "box", "launcher": "background", "updated_at": "2026-10-25T15:33:40Z",
+                "last_activity_at": "2026-10-25T15:10:00Z", "observed_at": "2026-10-25T15:33:40Z",
+                "difit": {"port": 41234, "pid": 7, "started_at": "2026-10-25T15:33:40Z"},
+                "has_diagnosis": false, "error": null
+            });
+            let script = directory.join("signals.sh");
+            let error = |code: &str, exit: u8| {
+                format!(
+                    "echo '{{\"error\":{{\"code\":\"{code}\",\"message\":\"m\"}}}}'; exit {exit}"
+                )
+            };
+            std::fs::write(
+                &script,
+                format!(
+                    r#"printf '%s\n' "$*" >> '{calls}'
+case "$*" in
+  *"--issue quota"*) {quota} ;;
+  *"--issue conflict"*) {conflict} ;;
+  *"--issue bad"*) {bad} ;;
+  *"--issue gone"*) {gone} ;;
+  *"--issue crash"*) echo boom >&2; exit 1 ;;
+  *" analyze "*"--issue old"*) echo '{{"job":{job},"created":false}}' ;;
+  *" analyze "*) echo '{{"job":{job},"created":true}}' ;;
+  *" list"*) echo '{{"jobs":[{job}],"generated_at":"2026-10-25T15:34:00Z","runner":{{"ticked_at":"2026-10-25T15:20:00Z","pid":9}}}}' ;;
+  *" show "*"{FP}"*) echo '{{"job":{job},"diagnosis":null,"difit_running":true,"resume_commands":null}}' ;;
+  *" show "*) echo '{{"job":{job},"diagnosis":null,"difit_running":false,"resume_commands":null}}' ;;
+  *" takeover "*) echo '{{"job":{job},"resume_commands":{{"local":"cd x && claude --resume y"}}}}' ;;
+  *) echo '{{"job":{job}}}' ;;
+esac
+"#,
+                    calls = calls.display(),
+                    quota = error("quota", 6),
+                    conflict = error("conflict", 4),
+                    bad = error("invalid", 5),
+                    gone = error("not_found", 3),
+                ),
+            )
+            .unwrap();
+            let agents = std::sync::Arc::new(Agents::new(&script, directory.join("db")));
+            Self {
+                directory,
+                calls,
+                agents,
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.calls)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    impl Drop for AgentsFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[actix_web::test]
+    async fn the_agents_page_and_job_json_come_from_the_signals_cli() {
+        use actix_web::{test, App};
+        let fixture = AgentsFixture::new();
+        let app = test::init_service(
+            App::new()
+                .app_data(page_registry())
+                .app_data(web::Data::from(fixture.agents.clone()))
+                .app_data(web::Data::new(Boards::new(
+                    "/nonexistent/board.py",
+                    "/nonexistent/db",
+                )))
+                .configure(config),
+        )
+        .await;
+
+        let (status, _, html) = get_body!(&app, "/agents");
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert!(html.contains("<h1>Agents</h1>"));
+        assert!(html.contains("<a href=\"&#x2F;agents\" title=\"Agents\" aria-current=\"page\">"));
+        let architecture = html.find("title=\"Architecture\"").unwrap();
+        assert!(
+            html.find("title=\"Agents\"").unwrap() > architecture,
+            "Agents sits after Architecture"
+        );
+        assert!(html.contains("ia-chip--run"), "{html}");
+        assert!(html.contains(">Analyzing<"));
+        assert!(html.contains("claude · 3b1e6f0c…"));
+        assert!(html.contains("nw&#x2F;9f3c1a000000"));
+        assert!(html.contains(&format!("href=\"/projects/demo-1/board?job={FP}\"")));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;&#x2F;script&gt; renew"));
+        assert!(!html.contains("<script>alert(1)"));
+        assert!(
+            html.contains("<small class=\"ia-quiet\">no activity for 24 min</small>"),
+            "an unfinished job quiet past ten minutes is flagged: {html}"
+        );
+        assert!(
+            html.contains(
+                "data-runner-stale>The signals service has not checked issue agents for 14 min"
+            ),
+            "a runner that has not ticked for over two minutes is called out"
+        );
+
+        let (status, content_type, body) = get_body!(&app, "/agents.json?target=demo-1");
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("application/json"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap()["jobs"][0]["fingerprint"],
+            FP
+        );
+        assert!(fixture
+            .calls()
+            .last()
+            .unwrap()
+            .ends_with("list --target demo-1"));
+
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/projects/demo-1/agents/{FP}.json"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let shown: Value = test::read_body_json(response).await;
+        assert_eq!(shown["difit_running"], true);
+        assert_eq!(
+            fixture.calls().last().unwrap(),
+            &format!(
+                "jobs --db-root {} show --target demo-1 --job {FP}",
+                fixture.directory.join("db").display()
+            )
+        );
+
+        // The viewer link goes to loopback only while it runs.
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/projects/demo-1/agents/{FP}/difit"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers().get("location").unwrap(),
+            "http://127.0.0.1:41234/"
+        );
+        let other = "b".repeat(64);
+        let (status, _, _) = get_body!(&app, &format!("/projects/demo-1/agents/{other}/difit"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Malformed ids never reach the CLI.
+        let before = fixture.calls().len();
+        for uri in [
+            "/agents.json?target=..%2Fx",
+            "/projects/..%2Fx/agents/9f3c1a.json",
+            "/projects/demo-1/agents/9f3c1a.json",
+            &format!("/projects/demo-1/agents/{FP}"),
+            &format!("/projects/-rf/agents/{FP}.json"),
+            "/projects/demo-1/agents/..%2F..%2Fetc/difit",
+        ] {
+            assert_eq!(get_body!(&app, uri).0, StatusCode::NOT_FOUND, "{uri}");
+        }
+        assert_eq!(
+            fixture.calls().len(),
+            before,
+            "an invalid id reached the CLI"
+        );
+    }
+
+    #[actix_web::test]
+    async fn agent_actions_need_the_session_token_and_map_cli_errors_to_statuses() {
+        use actix_session::{storage::CookieSessionStore, SessionMiddleware};
+        use actix_web::cookie::Key;
+        use actix_web::{test, App};
+        let fixture = AgentsFixture::new();
+        let app = test::init_service(
+            App::new()
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .app_data(page_registry())
+                .app_data(web::Data::from(fixture.agents.clone()))
+                .app_data(web::Data::new(Boards::new(
+                    "/nonexistent/board.py",
+                    "/nonexistent/db",
+                )))
+                .configure(config),
+        )
+        .await;
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/projects/demo-1/board")
+                .to_request(),
+        )
+        .await;
+        let cookie = response.response().cookies().next().unwrap().into_owned();
+        let html = String::from_utf8(test::read_body(response).await.to_vec()).unwrap();
+        let token = html
+            .split("data-csrf=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap()
+            .to_owned();
+        assert!(!token.is_empty());
+        let post = |uri: &str, form: Vec<(&str, &str)>| {
+            test::TestRequest::post()
+                .uri(uri)
+                .cookie(cookie.clone())
+                .set_form(form)
+                .to_request()
+        };
+
+        let before = fixture.calls().len();
+        for (uri, form) in [
+            (
+                "/projects/demo-1/agents".to_owned(),
+                vec![
+                    ("csrf_token", "forged"),
+                    ("issue_key", "nw#1"),
+                    ("card_id", "app"),
+                ],
+            ),
+            (
+                format!("/projects/demo-1/agents/{FP}/stop"),
+                vec![("csrf_token", "forged")],
+            ),
+            (format!("/projects/demo-1/agents/{FP}/difit/start"), vec![]),
+        ] {
+            let response = test::call_service(&app, post(&uri, form)).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        assert_eq!(
+            fixture.calls().len(),
+            before,
+            "a forged form reached the CLI"
+        );
+
+        let analyze = |issue: &'static str| {
+            vec![
+                ("csrf_token", token.as_str()),
+                ("issue_key", issue),
+                ("card_id", "app"),
+            ]
+        };
+        let response =
+            test::call_service(&app, post("/projects/demo-1/agents", analyze("nw#1"))).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(body["job"]["fingerprint"], FP);
+        assert!(fixture
+            .calls()
+            .last()
+            .unwrap()
+            .ends_with("analyze --target demo-1 --issue nw#1 --card app"));
+        let response =
+            test::call_service(&app, post("/projects/demo-1/agents", analyze("old"))).await;
+        assert_eq!(response.status(), StatusCode::OK, "an existing job");
+        let mut again = analyze("old");
+        again.push(("reanalyze", "1"));
+        test::call_service(&app, post("/projects/demo-1/agents", again)).await;
+        assert!(fixture
+            .calls()
+            .last()
+            .unwrap()
+            .ends_with("--card app --reanalyze"));
+        for (issue, status) in [
+            ("quota", StatusCode::TOO_MANY_REQUESTS),
+            ("conflict", StatusCode::CONFLICT),
+            ("bad", StatusCode::UNPROCESSABLE_ENTITY),
+            ("gone", StatusCode::NOT_FOUND),
+            ("crash", StatusCode::BAD_GATEWAY),
+        ] {
+            let response =
+                test::call_service(&app, post("/projects/demo-1/agents", analyze(issue))).await;
+            assert_eq!(response.status(), status, "{issue}");
+            let body: Value = test::read_body_json(response).await;
+            assert!(body["error"]["code"].is_string(), "{issue}: {body}");
+        }
+        let response = test::call_service(
+            &app,
+            post("/projects/demo-1/agents", analyze("--reanalyze")),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an option is not an issue key"
+        );
+
+        let token_only = || vec![("csrf_token", token.as_str())];
+        let response = test::call_service(
+            &app,
+            post(
+                &format!("/projects/demo-1/agents/{FP}/takeover"),
+                token_only(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = test::read_body_json(response).await;
+        assert_eq!(
+            body["resume_commands"]["local"],
+            "cd x && claude --resume y"
+        );
+        for (path, words) in [
+            ("stop", "stop"),
+            ("handback", "handback"),
+            ("difit/start", "difit start"),
+            ("difit/stop", "difit stop"),
+        ] {
+            let response = test::call_service(
+                &app,
+                post(
+                    &format!("/projects/demo-1/agents/{FP}/{path}"),
+                    token_only(),
+                ),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                fixture
+                    .calls()
+                    .last()
+                    .unwrap()
+                    .ends_with(&format!("{words} --target demo-1 --job {FP}")),
+                "{path}"
+            );
+        }
+        let before = fixture.calls().len();
+        for uri in [
+            format!("/projects/demo-1/agents/{FP}/fix"),
+            format!("/projects/demo-1/agents/{FP}/difit/open"),
+            "/projects/demo-1/agents/nothex/stop".to_owned(),
+            format!("/projects/..%2Fx/agents/{FP}/stop"),
+        ] {
+            let response = test::call_service(&app, post(&uri, token_only())).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+        assert_eq!(
+            fixture.calls().len(),
+            before,
+            "an unknown action reached the CLI"
+        );
+    }
+
+    #[test]
+    fn job_chips_name_who_holds_the_job() {
+        for (status, owner, label, class) in [
+            ("queued", "runner", "Queued", ""),
+            ("running", "runner", "Analyzing", "run"),
+            ("running", "you", "Yours", "you"),
+            ("stopped", "you", "Yours", "you"),
+            ("diagnosed", "runner", "Diagnosis ready", "ok"),
+            ("diagnosed", "you", "Diagnosis ready", "ok"),
+            ("ended", "you", "Ended", "end"),
+            ("ended", "runner", "Ended", "end"),
+            ("stopped", "runner", "Stopped", "warn"),
+            ("failed", "runner", "Failed", "hot"),
+            ("detached", "runner", "Detached", "hot"),
+        ] {
+            assert_eq!(
+                job_chip(&json!({"status": status, "owner": owner})),
+                (label, class),
+                "{status} {owner}"
+            );
+        }
+        assert_eq!(
+            job_chip(
+                &json!({"status": "running", "owner": "runner", "stopping": "2026-10-26T10:00:00Z"})
+            ),
+            ("Stopping", "run")
+        );
+        assert_eq!(
+            job_chip(
+                &json!({"status": "running", "owner": "you", "stopping": "2026-10-26T10:00:00Z"})
+            ),
+            ("Stopping", "run"),
+            "a take-over waiting for the agent's step boundary"
+        );
+        let now = chrono::Utc::now();
+        assert!(agent_row(&json!({"target_id": "../x", "fingerprint": FP}), now).is_none());
+        assert!(agent_row(&json!({"target_id": "demo-1", "fingerprint": "x"}), now).is_none());
+    }
+
+    #[test]
+    fn stale_jobs_and_a_stale_runner_are_flagged() {
+        let at = |s: &str| stamp(&json!(s)).unwrap();
+        let now = at("2026-10-25T16:00:00Z");
+        let job =
+            |status: &str, activity: &str| json!({"status": status, "last_activity_at": activity});
+        assert_eq!(
+            quiet_note(&job("running", "2026-10-25T15:45:00Z"), now).as_deref(),
+            Some("no activity for 15 min")
+        );
+        assert_eq!(
+            quiet_note(&job("running", "2026-10-25T15:51:00Z"), now),
+            None,
+            "nine minutes is fine"
+        );
+        assert_eq!(
+            quiet_note(&job("ended", "2026-10-25T10:00:00Z"), now),
+            None,
+            "only unfinished jobs"
+        );
+        assert_eq!(quiet_note(&json!({"status": "running"}), now), None);
+
+        let listed = |ticked: Value, status: &str| json!({"generated_at": "2026-10-25T16:00:00Z", "runner": ticked, "jobs": [{"status": status}]});
+        assert_eq!(
+            runner_stale(&listed(
+                json!({"ticked_at": "2026-10-25T15:58:30Z"}),
+                "running"
+            )),
+            None
+        );
+        assert!(runner_stale(&listed(
+            json!({"ticked_at": "2026-10-25T15:57:00Z"}),
+            "diagnosed"
+        ))
+        .unwrap()
+        .contains("for 3 min"));
+        assert!(runner_stale(&listed(Value::Null, "running"))
+            .unwrap()
+            .contains("never checked"));
+        assert_eq!(
+            runner_stale(&listed(Value::Null, "diagnosed")),
+            None,
+            "nothing waits on it"
+        );
     }
 
     // `UiRegistry` keeps its Tera private; render the same template set directly

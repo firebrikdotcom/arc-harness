@@ -19,6 +19,7 @@ and `overlay`. The overlay also carries the error heat that harness-signals writ
 """
 import argparse
 import calendar
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -27,6 +28,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -99,9 +101,17 @@ def load_json(path, default=None):
 
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(value, indent=1) + "\n")
-    os.replace(tmp, path)
+    # A temporary name of its own: the dashboard runs several board queries at
+    # once, and a shared name let one rename another's file away.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(value, indent=1) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def is_removed(target):

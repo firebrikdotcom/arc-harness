@@ -1,0 +1,30 @@
+{
+  "goal": "Behind an amp.enabled switch (off by default), let role dispatch send read-only workers to Amp orb threads with a bounded packet, collect each thread's terminal report plus its exported tool calls as audit evidence, and have installs and updates add or remove the Claude Code permission rule for amp -ox.",
+  "deliverables": [
+    "scripts/harness_config.py",
+    "scripts/role_dispatch.py",
+    "scripts/install-hooks.sh",
+    "tests/test_unified_config.py",
+    "tests/test_role_dispatch.py",
+    "tests/amp-orb.sh",
+    "docs/orchestration.md",
+    "docs/setup.md"
+  ],
+  "constraints": [
+    "No new dependencies.",
+    "amp.enabled defaults to false; with it off no orb is ever started and installs remove the permission rule.",
+    "Orb workers are read-only; an amp profile on an editing worker is rejected.",
+    "Never bypass amp or Claude Code permissions; no dangerously flags."
+  ],
+  "non_goals": [
+    {"description": "Leave the pre-existing arc upgrade and launcher edits untouched.", "paths": ["services/", "bin/", "AGENTS.md", "task.json"]},
+    {"description": "No editing orb workers or branch integration from orbs in this task."},
+    {"description": "No dashboard UI for the new switch."}
+  ],
+  "acceptance": [
+    {"id": "config", "criterion": "Config accepts the amp section, defaults it off, and rejects invalid values", "command": ["python3", "tests/test_unified_config.py"]},
+    {"id": "dispatch", "criterion": "Dispatcher tests pass, including amp orb workers driven by a fake amp CLI", "command": ["python3", "tests/test_role_dispatch.py"]},
+    {"id": "installer", "criterion": "Installer adds the amp -ox allow rule only when amp is enabled, never duplicates it, and removes it when disabled or uninstalled", "command": ["sh", "tests/amp-orb.sh"]},
+    {"id": "live", "criterion": "A real orb read worker dispatched through the harness completes with a report and an exported audit record"}
+  ]
+}

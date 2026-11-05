@@ -6,10 +6,12 @@
 //!   harness-signals [--config FILE] [--db-root DIR] check | once | serve | prune
 //!   harness-signals login nightwatch [--credentials FILE] [--mcp-url URL]
 //!   harness-signals tools nightwatch [--credentials FILE] [--call TOOL [--args JSON]]
+//!   harness-signals [--config FILE] [--db-root DIR] jobs ...   (issue agents; docs/issue-agents.md)
 
 mod config;
 mod glob;
 mod heat;
+mod jobs;
 mod mcp;
 mod model;
 mod oauth;
@@ -30,8 +32,11 @@ use std::time::Duration;
 
 const USAGE: &str = "Usage: harness-signals [--config FILE] [--db-root DIR] check|once|serve|prune
        harness-signals login nightwatch [--credentials FILE] [--mcp-url URL]
-       harness-signals tools nightwatch [--credentials FILE] [--call TOOL [--args JSON]]";
+       harness-signals tools nightwatch [--credentials FILE] [--call TOOL [--args JSON]]
+       harness-signals [--config FILE] [--db-root DIR] jobs ...  (harness-signals jobs --help)";
 const NIGHTWATCH_MCP: &str = "https://nightwatch.laravel.com/mcp";
+/// The dashboard calls the service stale after two minutes without a tick.
+const JOBS_TICK: Duration = Duration::from_secs(30);
 
 fn main() {
     if let Err(error) = run(std::env::args().skip(1).collect()) {
@@ -58,6 +63,22 @@ fn run(args: Vec<String>) -> Result<()> {
             "--mcp-url" => mcp_url = args.next().unwrap_or_default(),
             "--call" => tool = args.next(),
             "--args" => tool_args = args.next().unwrap_or_default(),
+            "jobs" if command.is_none() => {
+                // `--db-root` and `--config` may also follow `jobs`, as scripts/signals-service.sh needs.
+                let mut rest = Vec::new();
+                while let Some(arg) = args.next() {
+                    match arg.as_str() {
+                        "--config" => config_path = PathBuf::from(args.next().unwrap_or_default()),
+                        "--db-root" => db_root = PathBuf::from(args.next().unwrap_or_default()),
+                        "-h" | "--help" => {
+                            println!("Usage:\n{}", jobs::cli::USAGE);
+                            return Ok(());
+                        }
+                        _ => rest.push(arg),
+                    }
+                }
+                std::process::exit(jobs::cli::main(&db_root, &config_path, rest));
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -170,15 +191,47 @@ fn check(config_path: &Path, db_root: &Path) -> Result<Value> {
                 },
                 "board": board,
                 "providers": providers,
+                "logs": project.logs.as_ref().map(|logs| {
+                    let skill = config::skill_file(&logs.skill);
+                    ok &= skill.is_some();
+                    json!({"skill": logs.skill, "environment": logs.environment, "installed": skill})
+                }),
                 "webhook": project.providers.iter().any(|p| matches!(p, config::Provider::Nightwatch { secret_file: Some(_), .. }))
                     .then(|| format!("http://{}/hooks/nightwatch/{}", config.listen, project.name)),
             })
         })
         .collect();
+    let agents = issue_agents_check(&config);
+    ok &= agents["ok"] == true;
     Ok(
         json!({"ok": ok, "config": config_path, "db_root": db_root, "listen": config.listen,
-              "poll_seconds": config.poll_seconds, "projects": projects}),
+              "poll_seconds": config.poll_seconds, "projects": projects, "issue_agents": agents}),
     )
+}
+
+/// The issue-agent limits in force, which agents are installed, and, when Herdr
+/// is enabled, the absolute path of an executable herdr.
+fn issue_agents_check(config: &config::Config) -> Value {
+    let settings = jobs::settings::Settings::from_config(Some(config));
+    let first = |argv: &Option<Vec<String>>| argv.as_ref().map(|a| a[0].clone());
+    let herdr = settings.herdr_workspace.as_ref().map(|workspace| {
+        json!({"workspace": workspace, "executable": first(&settings.herdr), "ok": settings.herdr.is_some()})
+    });
+    let agent = settings.pick_agent();
+    let installed = settings.exe(agent).is_some();
+    json!({
+        "ok": herdr.as_ref().is_none_or(|h| h["ok"] == true),
+        "agent": agent.name(),
+        "agent_installed": installed,
+        "claude": first(&settings.claude),
+        "codex": first(&settings.codex),
+        "launcher": if herdr.is_some() { "herdr" } else { "background" },
+        "herdr": herdr,
+        "global_cap": settings.global_cap,
+        "daily_cap": settings.daily_cap,
+        "timeout_seconds": settings.timeout.as_secs(),
+        "takeover_wait_seconds": settings.takeover_wait.as_secs(),
+    })
 }
 
 /// Drop the signals of targets a loaded configuration no longer names. When
@@ -242,6 +295,13 @@ fn serve(config_path: &Path, db_root: &Path) -> Result<()> {
         let (db_root, shared) = (db_root.to_owned(), shared.clone());
         std::thread::spawn(move || server::run(http, db_root, shared, poll_now));
     }
+    {
+        let config = shared
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        jobs::runner::start_up(db_root, config.as_ref());
+    }
     loop {
         match config::load(config_path) {
             Ok(fresh) => {
@@ -263,11 +323,21 @@ fn serve(config_path: &Path, db_root: &Path) -> Result<()> {
                 log(&format!("{}: {error:#}", project.name));
             }
         }
+        jobs::runner::tick(db_root, config_path, config.as_ref());
         // Wait for the next cycle, polling a project early when a webhook asks.
+        // Jobs are observed at least every JOBS_TICK, however long the poll interval.
         let deadline = std::time::Instant::now() + Duration::from_secs(wait);
+        let mut jobs_due = std::time::Instant::now() + JOBS_TICK;
         while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-            let Ok(name) = requested.recv_timeout(left) else {
-                break;
+            let until_jobs = jobs_due.saturating_duration_since(std::time::Instant::now());
+            let name = match requested.recv_timeout(left.min(until_jobs)) {
+                Ok(name) => name,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if until_jobs < left => {
+                    jobs::runner::tick(db_root, config_path, config.as_ref());
+                    jobs_due = std::time::Instant::now() + JOBS_TICK;
+                    continue;
+                }
+                Err(_) => break,
             };
             let config = shared
                 .read()

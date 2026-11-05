@@ -145,8 +145,12 @@ pub fn resolve(db_root: &Path, reference: &str) -> Result<Target> {
     bail!("no registered harness target for {reference}")
 }
 
+/// What issue agents keep under `signals/`: pruning a target's heat never removes them.
+const KEPT: &[&str] = &["jobs", "analyses", "worktrees"];
+
 /// Remove the signals of every target this machine no longer tracks, so a
-/// project dropped from the configuration stops showing heat. Returns their ids.
+/// project dropped from the configuration stops showing heat. Issue-agent jobs,
+/// diagnoses and worktrees stay. Returns the ids whose heat was removed.
 pub fn prune(db_root: &Path, tracked: &std::collections::BTreeSet<String>) -> Vec<String> {
     let mut removed = Vec::new();
     let Ok(entries) = std::fs::read_dir(db_root.join("targets")) else {
@@ -155,7 +159,25 @@ pub fn prune(db_root: &Path, tracked: &std::collections::BTreeSet<String>) -> Ve
     for entry in entries.flatten() {
         let id = entry.file_name().to_string_lossy().into_owned();
         let signals = entry.path().join("signals");
-        if !tracked.contains(&id) && signals.is_dir() && std::fs::remove_dir_all(&signals).is_ok() {
+        if tracked.contains(&id) || !signals.is_dir() {
+            continue;
+        }
+        let mut changed = false;
+        for item in std::fs::read_dir(&signals).into_iter().flatten().flatten() {
+            let name = item.file_name().to_string_lossy().into_owned();
+            if KEPT.contains(&name.as_str()) {
+                continue;
+            }
+            let path = item.path();
+            let gone = if path.is_dir() && !path.is_symlink() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            changed |= gone.is_ok();
+        }
+        let _ = std::fs::remove_dir(&signals);
+        if changed {
             removed.push(id);
         }
     }
@@ -174,6 +196,48 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+/// A directory only this user can enter (where the platform supports it).
+pub fn private_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Atomic and owner-only: a temporary file in the same directory, then a rename.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path.parent().context("path has no parent")?;
+    private_dir(dir)?;
+    let tmp = path.with_extension(
+        format!(
+            "tmp{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        )
+        .replace(['(', ')'], ""),
+    );
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&tmp)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    drop(file);
     std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
@@ -255,6 +319,20 @@ mod tests {
         assert!(prune(&db, &tracked).is_empty());
         assert_eq!(prune(&db, &Default::default()), ["demo-1"]);
         assert!(!target.signals().exists());
+
+        // Jobs, diagnoses and worktrees outlive the heat of an untracked target.
+        target.replace_source("a", vec![issue("a", "4")]).unwrap();
+        for kept in ["jobs/x.json", "analyses/x.md", "worktrees/x/f"] {
+            let path = target.signals().join(kept);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "k").unwrap();
+        }
+        assert_eq!(prune(&db, &Default::default()), ["demo-1"]);
+        assert!(!target.signals().join("issues.json").exists());
+        assert!(target.signals().join("jobs/x.json").exists());
+        assert!(target.signals().join("analyses/x.md").exists());
+        assert!(target.signals().join("worktrees/x/f").exists());
+        assert!(prune(&db, &Default::default()).is_empty());
         assert!(
             target.dir.join("board/board.json").exists(),
             "only signals are pruned"

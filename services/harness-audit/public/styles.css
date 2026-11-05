@@ -542,3 +542,17 @@ details[open] > .row-summary::after { content:"\2212"; }
   .rail-collapsed .rail nav a { justify-content: center; padding-inline: 0; }
   .rail-collapsed .rail__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
+/* Issue agents: the Agents page. The board's job panel is styled in board.css. */
+.agents-table td { vertical-align: top; }
+.agents-table .mono { font-size: .72rem; text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
+.ia-chip { --ia: var(--ink-muted); display: inline-flex; align-items: center; gap: .4rem; padding: .1rem .55rem; border-radius: 99px; color: var(--ia); background: color-mix(in srgb, var(--ia) 12%, transparent); font-size: .75rem; font-weight: 700; white-space: nowrap; }
+.ia-chip i { width: .45rem; aspect-ratio: 1; border-radius: 50%; background: currentColor; }
+.ia-chip--run { --ia: #7a5bc0; } .ia-chip--you { --ia: #2f6fd0; } .ia-chip--ok { --ia: var(--success); }
+.ia-chip--warn { --ia: var(--warning); } .ia-chip--hot { --ia: var(--error); }
+.ia-chip--run i { animation: ia-pulse 1.4s ease-in-out infinite; }
+@keyframes ia-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .ia-chip--run i { animation: none; } }
+.ia-alert { border: 2px solid var(--error); background: color-mix(in srgb, var(--error) 8%, var(--panel)); padding: .6rem .8rem; }
+.ia-alert--stale { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--panel)); }
+.ia-chip--end { --ia: var(--ink-muted); }
+.ia-quiet { color: var(--warning); font-weight: 600; }

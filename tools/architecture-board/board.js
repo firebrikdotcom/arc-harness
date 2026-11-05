@@ -1,6 +1,8 @@
 /* Architecture board renderer: fixed cards in frames, typed edges, pan/zoom, details panel.
    Data comes from board.json (see docs/architecture-board.md §3); nothing project-specific lives here.
-   Usage: ArchitectureBoard.mount(rootElement, board, {status}) -> {setOverlay, setStatus} */
+   Usage: ArchitectureBoard.mount(rootElement, board, {status, agents, target}) -> {setOverlay, setStatus, setAgents, setJob, openJob}
+   `agents` (dashboard only) turns on issue agents: {act(request) -> Promise, load(fingerprint), difitHref(fingerprint)}.
+   `target` names the project for per-browser state (which issues were read). */
 (function(){
 "use strict";
 const CW=320,RH=204,W=240,H=112,FP=20,FH=46,MINK=.2,MAXK=2.5;
@@ -68,6 +70,7 @@ function mount(root,data,opts={}){
       <button class="ab-tbtn" data-r="theme" title="Switch light / dark" aria-label="Switch light or dark theme"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></svg></button>
     </div>
     <nav class="ab-frames" data-r="frames" aria-label="Jump to a section"></nav>
+    <p class="ab-banner" data-r="banner" role="alert" hidden></p>
   </div>
   <div class="ab-main">
     <div class="ab-vp" data-r="vp" tabindex="0" aria-label="Architecture board. Drag to pan, wheel or pinch to zoom.">
@@ -86,6 +89,8 @@ function mount(root,data,opts={}){
   let view={x:0,y:0,k:1},selected=null,activeFlow=null,bounds={x:0,y:0,w:1,h:1};
   let overlay={edited:{},inScope:[],refreshing:[],unownedEdited:[],heat:null},lastOverlay={};
   let heatOn=true;try{heatOn=localStorage.getItem("ab-heat")!=="off"}catch{}
+  const AG=opts.agents||null,jobs=new Map(),details=new Map(),openJobs=new Set(),notes=new Map(),cmdTab=new Map(),ovBadges=new Map(),painted=new WeakMap();
+  let confirming=null,overlaySig=null;
   const px=col=>col*CW,py=row=>row*RH+FH;
   const colorOf=fid=>tone((frameById.get(fid)||{}).tone);
   const kindColor=k=>tone((kinds[k]||{}).tone);
@@ -193,15 +198,20 @@ function mount(root,data,opts={}){
   }
   function zoomAt(k,cx,cy){k=Math.max(MINK,Math.min(MAXK,k));view.x=cx-(cx-view.x)*(k/view.k);view.y=cy-(cy-view.y)*(k/view.k);view.k=k;apply()}
   const isNarrow=()=>matchMedia("(max-width:820px)").matches;
+  /* The board area left visible between the issue ticker (top) and the open issue sheet or phone drawer (bottom). */
   function visibleBox(){
-    const r=vp.getBoundingClientRect();let h=r.height;
-    if(isNarrow())h-=panel.classList.contains("open")?panel.getBoundingClientRect().height:46;
-    return {w:r.width,h:Math.max(120,h)};
+    const r=vp.getBoundingClientRect();let top=0,bot=r.height;
+    if(isNarrow())bot-=panel.classList.contains("open")?panel.getBoundingClientRect().height:46;
+    // offsetTop ignores the sheet's slide-in transform, so a sheet that is still animating counts at its final place.
+    const tkEl=$("ticker"),shEl=$("sheet");
+    if(tkEl&&!tkEl.hidden)top=tkEl.offsetTop+tkEl.offsetHeight;
+    if(shEl&&!shEl.hidden&&!shEl.classList.contains("min"))bot=Math.min(bot,shEl.offsetTop);
+    return {y:top,w:r.width,h:Math.max(60,bot-top)};
   }
   function fitRect(x,y,w,h,maxK=1.15,animate=true,minK=MINK){
     const b=visibleBox(),pad=24;
     const k=Math.max(minK,Math.min(maxK,(b.w-pad*2)/w,(b.h-pad*2)/h));
-    animateTo({k,x:(b.w-w*k)/2-x*k,y:(b.h-h*k)/2-y*k},animate);
+    animateTo({k,x:(b.w-w*k)/2-x*k,y:b.y+(b.h-h*k)/2-y*k},animate);
   }
   function fitAll(animate=true){fitRect(bounds.x,bounds.y,bounds.w,bounds.h,1.15,animate)}
   let anim=0;
@@ -220,11 +230,14 @@ function mount(root,data,opts={}){
     return {x:x-30,y:y-30,w:Math.max(...rs.map(r=>r.x+r.w))-x+60,h:Math.max(...rs.map(r=>r.y+r.h))-y+60};
   }
   /* Show a component with everything it connects to; stay put if that is already on screen at a readable size. */
-  function frameNeighbourhood(ids){
-    const r=boxOf(ids),b=visibleBox();
-    const inView=r.x*view.k+view.x>=0&&(r.x+r.w)*view.k+view.x<=b.w&&r.y*view.k+view.y>=0&&(r.y+r.h)*view.k+view.y<=b.h;
+  function frameNeighbourhood(ids,focus){
+    const r=boxOf(ids),b=visibleBox(),pad=24,minK=isNarrow()?.4:.5;
+    const inView=r.x*view.k+view.x>=0&&(r.x+r.w)*view.k+view.x<=b.w&&r.y*view.k+view.y>=b.y&&(r.y+r.h)*view.k+view.y<=b.y+b.h;
     if(inView&&view.k>=.5)return;
-    fitRect(r.x,r.y,r.w,r.h,1,true,isNarrow()?.4:.5);
+    const k=Math.max(minK,Math.min(1,(b.w-pad*2)/r.w,(b.h-pad*2)/r.h));
+    // Too large to show whole at a readable size: centre on the component itself so it is never left off screen.
+    if(focus&&(r.w*k>b.w-pad*2+1||r.h*k>b.h-pad*2+1)){const c=nodeRect(nodeById.get(focus));animateTo({k,x:b.w/2-(c.x+c.w/2)*k,y:b.y+b.h/2-(c.y+c.h/2)*k},true);return}
+    fitRect(r.x,r.y,r.w,r.h,1,true,minK);
   }
 
   /* A press that moves less than 5px is a click on whatever is under it; anything more pans the board. */
@@ -274,18 +287,19 @@ function mount(root,data,opts={}){
     for(const [id,el] of cardEl){el.classList.toggle("lit",!!nodeIds&&nodeIds.has(id));el.classList.toggle("sel",id===selected)}
     for(const [id,el] of edgeEl){const on=!!edgeIds&&edgeIds.has(id);el.classList.toggle("lit",on);labelEl.get(id).classList.toggle("lit",on)}
   }
-  function select(id){
+  function select(id,keep){
     const n=nodeById.get(id);if(!n)return;
+    if(!keep)dropIssue();
     selected=id;activeFlow=null;
     const es=neighbours(id),ns=new Set([id]);es.forEach(e=>{ns.add(e.from);ns.add(e.to)});
     highlight(ns,new Set(es.map(e=>e.id)));
     renderNode(n,es);openPanel();
     history.replaceState(null,"","#"+encodeURIComponent(id));
-    frameNeighbourhood(ns);
+    frameNeighbourhood(ns,id);
   }
   function selectEdge(eid){
     const e=B.edges.find(x=>x.id===eid);if(!e)return;
-    selected=null;activeFlow=null;
+    dropIssue();selected=null;activeFlow=null;
     highlight(new Set([e.from,e.to]),new Set([eid]));
     const a=nodeById.get(e.from),b=nodeById.get(e.to);
     panel.style.setProperty("--c",kindColor(e.kind));
@@ -309,12 +323,158 @@ function mount(root,data,opts={}){
     const m=Math.round((Date.now()-t)/60000);
     return m<1?"just now":m<60?`${m}m ago`:m<2880?`${Math.round(m/60)}h ago`:`${Math.round(m/1440)}d ago`;
   }
-  function issueItem(i){
+  // A link to the source's logs around the issue, set only for projects marked with a logs skill.
+  const logsUrl=i=>typeof i.logs_url==="string"&&/^https:\/\//.test(i.logs_url)?i.logs_url:null;
+  function issueItem(i,card){
     const lv=LEVELS.includes(i.level)?i.level:"error",n=+i.count||0,u=+i.users||0;
     const url=typeof i.url==="string"&&/^https?:\/\//.test(i.url)?i.url:null;
     return `<li class="lv-${lv}"><span class="lv">${lv}</span><b>${esc(i.title)}</b>
       <small>${n} event${n===1?"":"s"}${u?` · ${u} user${u===1?"":"s"}`:""}${i.last_seen?` · last ${esc(ago(i.last_seen))}`:""}${i.share==="caller"?" · on the call path":""}${i.new?" · <em>new</em>":""}${i.source?` · ${esc(String(i.source).split(":")[0])}`:""}</small>
-      ${url?`<a class="ab-ibtn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`:""}</li>`;
+      ${url?`<a class="ab-ibtn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open ↗</a>`:""}${logsUrl(i)?`<a class="ab-ibtn" href="${esc(logsUrl(i))}" target="_blank" rel="noopener noreferrer" title="Logs around this issue">Logs ↗</a>`:""}${jobSlot(i,card)}</li>`;
+  }
+
+  /* ---------- Issue agents (only with opts.agents) ---------- */
+  const FPRINT=/^[0-9a-f]{64}$/;
+  const isLive=j=>j.status==="queued"||j.status==="running";
+  const QUIET_MS=10*60000,TICK_STALE_MS=2*60000;
+  function chipOf(j){
+    if(j.status==="running"&&j.stopping)return ["Stopping","run"];
+    // Observation closes taken-over jobs too: how a job ended matters more than who held it.
+    if(j.status==="ended")return ["Ended","end"];
+    if(j.status==="diagnosed")return ["Diagnosis ready","ok"];
+    if(j.owner==="you")return ["Yours","you"];
+    return {queued:["Queued",""],running:["Analyzing","run"],stopped:["Stopped","warn"],failed:["Failed","hot"],detached:["Detached","hot"]}[j.status]||["Unknown",""];
+  }
+  /* Minutes an unfinished job's session has been quiet, once past ten. */
+  function quietMinutes(j){
+    const t=new Date(j.last_activity_at||NaN).getTime();
+    if(!isLive(j)||!Number.isFinite(t))return 0;
+    const q=Date.now()-t;return q>QUIET_MS?Math.floor(q/60000):0;
+  }
+  const jobOf=fp=>((details.get(fp)||{}).job)||jobs.get(fp)||null;
+  // Analyze exists only for a problem with a root cause (a fingerprint); there is no Fix in this phase.
+  function jobSlot(i,card){
+    if(!AG||!FPRINT.test(i.fingerprint||""))return "";
+    return `<div class="ab-jobslot" data-slot="${i.fingerprint}" data-issue="${esc(i.key||"")}" data-card="${esc(card)}">${slotHtml(i.fingerprint)}</div>`;
+  }
+  function slotHtml(fp){
+    const j=jobOf(fp),note=notes.get(fp);
+    const noteHtml=note?`<p class="ab-jnote" role="alert">${esc(note)}</p>`:"";
+    if(!j)return `<div class="ab-jrow"><button type="button" class="ab-jbtn" data-agent="analyze" data-fp="${fp}">Analyze</button><small>A read-only agent investigates in its own worktree.</small></div>${noteHtml}`;
+    const [label,cls]=chipOf(j),open=openJobs.has(fp);
+    const toggle=open?"Hide job":j.status==="diagnosed"?"Read diagnosis":"Job details";
+    return `<div class="ab-jrow"><span class="ab-jchip ${cls}"><i aria-hidden="true"></i>${esc(label)}</span><button type="button" class="ab-jbtn" data-agent="toggle" data-fp="${fp}" aria-expanded="${open}" aria-controls="ab-job-${fp}">${toggle}</button></div>${noteHtml}${open?jobPanel(fp,j,details.get(fp)||{}):""}`;
+  }
+  function kv(label,value,copyText,extra){
+    const copy=copyText?`<button type="button" class="ab-jcopy" data-copy="${esc(copyText)}" aria-label="Copy ${esc(label.toLowerCase())}">Copy</button>`:"";
+    return `<dt>${esc(label)}</dt><dd>${value}</dd><dd>${extra||copy}</dd>`;
+  }
+  function jobPanel(fp,j,d){
+    const fp8=fp.slice(0,8),s=j.session_id||"",wt=j.worktree||{},tab=j.herdr_tab,mine=j.owner==="you",live=isLive(j),settling=mine&&j.status==="running"&&!!j.stopping,wait=+d.takeover_wait_seconds||30;
+    const port=j.difit&&j.difit.port,on=!!(d.difit_running!=null?d.difit_running:j.difit_running);
+    const difitCtl=on?`<span class="ab-jbtns"><a class="ab-jbtn" href="${esc(AG.difitHref(fp))}" target="_blank" rel="noopener noreferrer">Open</a><button type="button" class="ab-jbtn" data-agent="difit-stop" data-fp="${fp}">Stop</button></span>`
+      :`<button type="button" class="ab-jbtn" data-agent="difit-start" data-fp="${fp}">Run difit</button>`;
+    const rows=kv("Session",s?esc(s):`<span class="ab-jfaint">assigned when the agent starts</span>`,s)
+      +kv("Worktree",esc(wt.path||""),wt.path)
+      +kv("Branch",`${esc(wt.branch||"")} <span class="ab-jfaint">from ${esc(wt.base_branch||"")}</span>`,wt.branch)
+      +kv("Diff viewer",on&&port?`running on 127.0.0.1:${+port}`:"not running","",difitCtl)
+      +kv("Machine",esc(j.machine||""),"")
+      +kv("Runs in",tab?`Herdr tab ${esc(tab.tab_id)}`:"background",tab?tab.tab_id:"");
+    const events=(j.events||[]).slice(-5).map(e=>`<div><span class="tm">${esc(String(e.at||"").slice(11,19))}</span>${esc(e.summary)}</div>`).join("");
+    const btn=(act,text,cls)=>`<button type="button" class="ab-jbtn ${cls||""}" data-agent="${act}" data-fp="${fp}">${text}</button>`;
+    const closed=j.status==="ended"||j.status==="diagnosed";
+    const buttons=settling?""
+      :closed?btn("reanalyze","Analyze again")+(s&&!mine?btn("takeover","Take over","primary"):"")
+      :mine?btn("handback","Hand back to runner")
+      :live?btn("stop","Stop","danger")+(s?btn("takeover","Take over","primary"):"")
+      :btn("reanalyze","Analyze again")+(s?btn("takeover","Take over","primary"):"");
+    const footNote=settling?`Stopping: the agent finishes its current step (at most ${wait} s), then its session is yours to resume.`
+      :j.status==="ended"?"Ended: the agent is gone or went quiet after its last reply without a diagnosis; the events say how it was seen."
+      :mine&&!closed?"Yours: the runner only watches this job, and never stops it, until you hand it back.":"The agent stays read-only until you take over.";
+    const quiet=quietMinutes(j);
+    const confirm=confirming===fp?`<div class="ab-jconfirm"><p><b>Take over job ${fp8}?</b> ${j.launcher==="herdr"?"The runner stops supervising it; nothing is stopped and the agent keeps running in its Herdr tab.":`The background agent stops after its current step (at most ${wait} s), then its session is yours to resume.`} The runner won't touch this job again unless you hand it back.</p><span class="ab-jbtns">${btn("takeover-no","Cancel")}${btn("takeover-yes",j.launcher==="herdr"?"Take over":"Stop after this step and take over","primary")}</span></div>`:"";
+    const last=[j.last_activity_at?`last activity ${esc(ago(j.last_activity_at))}`:"",j.observed_at?`checked ${esc(ago(j.observed_at))}`:""].filter(Boolean).join(" · ");
+    return `<div class="ab-job" id="ab-job-${fp}">
+      <div class="ab-jhead"><span><b>Analyze job ${fp8}</b> <span class="ab-jchip">${esc(j.agent==="codex"?"Codex":"Claude")}</span></span><small>${last}</small></div>
+      ${quiet?`<p class="ab-jquiet" role="status">No activity for ${quiet} min: the session has not been written to since ${esc(ago(j.last_activity_at))}.</p>`:""}
+      <dl class="ab-kv">${rows}</dl>
+      ${j.error?`<p class="ab-jerr">${esc(j.error)}</p>`:""}
+      ${events?`<div class="ab-feed" aria-label="Recent job events">${events}</div>`:""}
+      ${mine&&!settling?resumeBox(fp,d.resume_commands):""}
+      ${diagnosisBox(fp8,d.diagnosis)}
+      <div class="ab-jfoot"><small>${footNote}</small><span class="ab-jbtns">${buttons}</span></div>${confirm}</div>`;
+  }
+  function resumeBox(fp,rc){
+    if(!rc||typeof rc!=="object")return "";
+    const {local,ssh,herdr}=rc;
+    const tabs=[["local","On this machine",local],["ssh","From another machine",ssh],["herdr","In a Herdr tab",herdr&&herdr.command]];
+    let cur=cmdTab.get(fp)||"local";if(!(tabs.find(t=>t[0]===cur)||[])[2])cur="local";
+    const cmd=(tabs.find(t=>t[0]===cur)||[])[2]||"";
+    const note=cur==="ssh"?"Run it on the machine you are viewing from.":cur==="herdr"?(rc.herdr&&rc.herdr.note)||"":"Run it in any terminal on this machine.";
+    return `<div class="ab-resume"><div class="ab-tabs" role="tablist" aria-label="Where you are">${tabs.map(([k,l,c])=>`<button type="button" role="tab" aria-selected="${k===cur}" data-agent="tab" data-tab="${k}" data-fp="${fp}"${c?"":` disabled title="${k==="ssh"?"Set issue_agents.ssh in signals.json":"Not available"}"`}>${l}</button>`).join("")}</div>
+      <pre class="ab-cmd">${esc(cmd)}</pre><div class="ab-jrow"><small>${esc(note)}</small><button type="button" class="ab-jbtn" data-copy="${esc(cmd)}">Copy command</button></div></div>`;
+  }
+  function diagnosisBox(fp8,dg){
+    const sections=dg&&Array.isArray(dg.sections)?dg.sections:[];
+    if(!sections.length)return "";
+    const conf=sections.find(x=>x.heading==="Confidence");
+    return `<div class="ab-diag"><div class="kicker">Diagnosis · job ${fp8}${conf?` · confidence ${esc(conf.text)}`:""}</div><dl>${sections.filter(x=>x.heading!=="Confidence").map(x=>`<dt>${esc(x.heading)}</dt><dd>${esc(x.text)}</dd>`).join("")}</dl></div>`;
+  }
+  function agentBadge(id){
+    if(!AG)return "";
+    let n=0;for(const j of jobs.values())if(j.card_id===id&&isLive(j))n++;
+    return n?`<span class="ab-badge ab-badge--agent" title="${n} issue agent${n>1?"s":""} on this card">agent · ${n}</span>`:"";
+  }
+  function paintBadges(){for(const [id,el] of cardEl)el.querySelector(".ab-badges").innerHTML=(ovBadges.get(id)||"")+agentBadge(id)}
+  /* Repaint only the job slots whose content changed, keeping keyboard focus on the same control. */
+  function paintSlots(){
+    for(const slot of root.querySelectorAll("[data-slot]")){
+      const html=slotHtml(slot.dataset.slot);
+      if(painted.get(slot)===html)continue;
+      const f=slot.contains(document.activeElement)?document.activeElement:null;
+      const key=f&&f.dataset?[f.dataset.agent||"",f.dataset.tab||"",f.dataset.copy||""]:null;
+      slot.innerHTML=html;painted.set(slot,html);
+      if(key){const again=[...slot.querySelectorAll("button,a")].find(b=>[b.dataset.agent||"",b.dataset.tab||"",b.dataset.copy||""].join("\0")===key.join("\0"));if(again)again.focus()}
+    }
+  }
+  async function agentAct(b){
+    const fp=b.dataset.fp,act=b.dataset.agent;if(!FPRINT.test(fp||""))return;
+    if(act==="toggle"){if(openJobs.has(fp))openJobs.delete(fp);else{openJobs.add(fp);AG.load(fp)}paintSlots();return}
+    if(act==="takeover"){confirming=fp;paintSlots();return}
+    if(act==="takeover-no"){confirming=null;paintSlots();return}
+    if(act==="tab"){cmdTab.set(fp,b.dataset.tab);paintSlots();return}
+    const slot=b.closest("[data-slot]");
+    const req={act:act==="takeover-yes"?"takeover":act,fingerprint:fp,issue:slot?slot.dataset.issue:"",card:slot?slot.dataset.card:""};
+    b.disabled=true;b.setAttribute("aria-busy","true");notes.delete(fp);
+    try{await AG.act(req);confirming=null;if(req.act==="analyze"||req.act==="reanalyze"||req.act==="takeover")openJobs.add(fp)}
+    catch(err){notes.set(fp,(err&&err.message)||String(err))}
+    paintSlots();b.disabled=false;b.removeAttribute("aria-busy");
+  }
+  /* `meta` is the rest of /agents.json: {generated_at, runner: {ticked_at}|null}. */
+  function setAgents(list,meta){
+    if(!AG||!Array.isArray(list))return;
+    jobs.clear();for(const j of list)if(j&&FPRINT.test(j.fingerprint||""))jobs.set(j.fingerprint,j);
+    paintBadges();paintSlots();
+    if(meta)paintBanner(meta);
+  }
+  function paintBanner(meta){
+    const el=$("banner"),now=new Date(meta.generated_at||NaN).getTime(),ticked=new Date((meta.runner||{}).ticked_at||NaN).getTime();
+    const ref=Number.isFinite(now)?now:Date.now();
+    let text="";
+    if(Number.isFinite(ticked)){if(ref-ticked>TICK_STALE_MS)text=`The signals service has not checked issue agents for ${Math.floor((ref-ticked)/60000)} min, so job states may be out of date. Is harness-signals running?`}
+    else if([...jobs.values()].some(isLive))text="The signals service has never checked issue agents on this machine, so unfinished jobs are not being observed. Is harness-signals running?";
+    el.textContent=text;el.hidden=!text;
+  }
+  function setJob(fp,shown){
+    if(!AG||!FPRINT.test(fp||"")||!shown||!shown.job)return;
+    details.set(fp,Object.assign({},details.get(fp)||{},shown));jobs.set(fp,shown.job);
+    paintBadges();paintSlots();
+  }
+  /* Open a job's card and its panel, e.g. from the Agents page link. */
+  function openJob(fp){
+    const j=jobOf(fp);if(!j||!nodeById.has(j.card_id))return false;
+    openJobs.add(fp);if(selected!==j.card_id)select(j.card_id);else paintSlots();
+    AG.load(fp);return true;
   }
   function renderNode(n,es){
     const f=frameById.get(n.frame)||{title:"",tag:""};
@@ -322,7 +482,7 @@ function mount(root,data,opts={}){
     const out=es.filter(e=>e.from===n.id),inn=es.filter(e=>e.to===n.id);
     const edited=overlay.edited[n.id]||[],editedSet=new Set(edited);
     const hc=heatOn&&overlay.heat&&overlay.heat.cards[n.id];
-    const problems=hc&&Array.isArray(hc.top)&&hc.top.length?`<h4>Problems</h4><ul class="ab-issues">${hc.top.map(issueItem).join("")}</ul>${hc.issues>hc.top.length?`<p class="ab-note">${hc.issues-hc.top.length} more issue${hc.issues-hc.top.length>1?"s":""} touch this component.</p>`:""}`:"";
+    const problems=hc&&Array.isArray(hc.top)&&hc.top.length?`<h4>Problems</h4><ul class="ab-issues">${hc.top.map(i=>issueItem(i,n.id)).join("")}</ul>${hc.issues>hc.top.length?`<p class="ab-note">${hc.issues-hc.top.length} more issue${hc.issues-hc.top.length>1?"s":""} touch this component.</p>`:""}`:"";
     const live=[
       edited.length?`<div class="live"><b>Edited now:</b> ${edited.length} uncommitted file${edited.length>1?"s":""} in this component.<ul class="files" style="margin-top:6px">${edited.map(p=>fileItem(p,"",true)).join("")}</ul></div>`:"",
       overlay.inScope.includes(n.id)?`<div class="live scope"><b>In scope</b> for the active harness run.</div>`:"",
@@ -339,6 +499,8 @@ function mount(root,data,opts={}){
       ${n.files.length?`<h4>Source files</h4><ul class="files">${n.files.map(x=>fileItem(x.path,x.note,editedSet.has(x.path))).join("")}</ul>`:""}
       ${n.tests.length?`<h4>Tests</h4><ul class="files">${n.tests.map(t=>fileItem(t,"",editedSet.has(t))).join("")}</ul>`:""}
       ${!n.files.length&&!n.tests.length?`<p class="ab-note">Outside this repository: nothing to open here.</p>`:""}`;
+    issueSummary();
+    for(const slot of panel.querySelectorAll("[data-slot]"))painted.set(slot,slotHtml(slot.dataset.slot));
     panel.scrollTop=0;
   }
   function renderOverview(){
@@ -370,16 +532,18 @@ function mount(root,data,opts={}){
       ${B.flows.length?`<h4>Walk through a flow</h4><div class="ab-flows">${B.flows.map(fl=>`<button class="ab-flow" data-flow="${esc(fl.id)}" aria-pressed="${activeFlow===fl.id}"><b>${esc(fl.title)}</b><small>${esc(fl.sub)}</small></button>`).join("")}</div><div data-r="flowtext"></div>`:""}
       <p class="ab-note">${esc(B.footer||"Static architecture plus your working state. Dashed cards are outside the code.")}<br>Keys: <b>/</b> search · <b>+</b> / <b>−</b> zoom · <b>0</b> fit · arrows pan · <b>Esc</b> clear.</p>`;
     if(activeFlow){const fl=B.flows.find(f=>f.id===activeFlow);$("flowtext").innerHTML=`<ol class="ab-steps">${fl.text.map(t=>`<li>${esc(t)}</li>`).join("")}</ol>`}
+    issueSummary();
   }
   function runFlow(id){
     if(activeFlow===id){clearSelection();return}
-    selected=null;activeFlow=id;
+    dropIssue();selected=null;activeFlow=id;
     const fl=B.flows.find(f=>f.id===id),ns=new Set(),es=new Set();
     for(const [a,b] of fl.steps){if(!nodeById.has(a)||!nodeById.has(b))continue;ns.add(a);ns.add(b);const e=B.edges.find(x=>(x.from===a&&x.to===b)||(x.from===b&&x.to===a));if(e)es.add(e.id)}
     highlight(ns,es);renderOverview();openPanel();
     if(ns.size){const r=boxOf(ns);fitRect(r.x,r.y,r.w,r.h,1.1)}
   }
-  function clearSelection(){
+  function clearSelection(keep){
+    if(keep!==true)dropIssue();
     const had=selected||activeFlow;
     selected=null;activeFlow=null;highlight(null,null);renderOverview();
     if(location.hash)history.replaceState(null,"",location.pathname+location.search);
@@ -387,9 +551,12 @@ function mount(root,data,opts={}){
   }
   function openPanel(){panel.classList.add("open")}
   panel.addEventListener("click",e=>{
+    if(e.target.closest("[data-isheet]")){const i=byKey(tk.sel);if(i)openSheet(i);return}
+    const ic=e.target.closest("[data-icard]");if(ic){tk.cardOpen=!tk.cardOpen;ic.textContent="Card details "+(tk.cardOpen?"▴":"▾");ic.setAttribute("aria-expanded",tk.cardOpen);panel.classList.toggle("ab-compact",!tk.cardOpen);return}
     const go=e.target.closest("[data-go]");if(go){select(go.dataset.go);return}
     if(e.target.closest("[data-act=clear]")){clearSelection();return}
     const fl=e.target.closest("[data-flow]");if(fl){runFlow(fl.dataset.flow);return}
+    const ag=AG&&e.target.closest("[data-agent]");if(ag){agentAct(ag);return}
     const cp=e.target.closest("[data-copy]");if(cp){copy(cp.dataset.copy);return}
     if(isNarrow()&&!panel.classList.contains("open")&&!e.target.closest("a,input,label"))openPanel();
   });
@@ -431,7 +598,7 @@ function mount(root,data,opts={}){
   /* ---------- Toolbar, keyboard, theme ---------- */
   $("frames").innerHTML=B.frames.map(f=>`<button class="ab-chip" data-frame="${esc(f.id)}" style="--c:${tone(f.tone)}"><i></i>${esc(f.title)}</button>`).join("");
   $("frames").addEventListener("click",e=>{const b=e.target.closest("[data-frame]");if(!b)return;const r=frameRect(frameById.get(b.dataset.frame));fitRect(r.x,r.y,r.w,r.h,1.2)});
-  const zc=()=>{const b=visibleBox();return [b.w/2,b.h/2]};
+  const zc=()=>{const b=visibleBox();return [b.w/2,b.y+b.h/2]};
   $("zin").onclick=()=>zoomAt(view.k*1.25,...zc());
   $("zout").onclick=()=>zoomAt(view.k/1.25,...zc());
   $("fit").onclick=()=>fitAll();
@@ -439,15 +606,185 @@ function mount(root,data,opts={}){
   addEventListener("keydown",e=>{
     if(e.target.closest&&e.target.closest("input,textarea,select"))return;
     if(e.metaKey||e.ctrlKey||e.altKey)return;
+    // Inside the ticker or the issue sheet, arrows scroll them and + - 0 stay theirs: the board neither pans nor zooms.
+    const own=e.target.closest&&e.target.closest(".ab-ticker,.ab-sheet");
+    if(own&&(e.key.startsWith("Arrow")||["+","=","-","_","0"].includes(e.key)))return;
     const s=60;
     if(e.key==="/"){e.preventDefault();q.focus()}
     else if(e.key==="Escape")clearSelection();
     else if(e.key==="+"||e.key==="=")zoomAt(view.k*1.25,...zc());
     else if(e.key==="-"||e.key==="_")zoomAt(view.k/1.25,...zc());
     else if(e.key==="0")fitAll();
+    else if((e.key==="n"||e.key==="p")&&!ticker.hidden&&!tk.min)tkStep(e.key==="n"?1:-1);
     else if(e.key.startsWith("Arrow")&&!(e.target.closest&&e.target.closest(".ab-panel"))){e.preventDefault();view.x+=e.key==="ArrowLeft"?s:e.key==="ArrowRight"?-s:0;view.y+=e.key==="ArrowUp"?s:e.key==="ArrowDown"?-s:0;apply()}
   });
   let rT;addEventListener("resize",()=>{clearTimeout(rT);rT=setTimeout(()=>{if(!selected&&!activeFlow)fitAll(false)},120)});
+
+  /* ---------- Issue ticker and issue sheet (heat.issues, dashboard and export alike) ---------- */
+  /* Newest issues run along the top of the diagram. Arrivals wait behind "↑ N new" so the list never moves under the reader;
+     picking one lights its card and opens a sheet over the lower diagram. Read state and the folded ticker live in this browser only. */
+  const TK_MIN="ab-ticker-min",READ_TTL=14*864e5,READ_KEY="ab-read:"+(opts.target||B.title);
+  const tk={list:[],pend:[],f:"all",cur:0,ck:null,min:false,scroll:false,fresh:new Set(),html:"",sel:null,cardOpen:false,sheet:null,sheetMin:false,tab:"overview",sheetSig:""};
+  try{tk.min=localStorage.getItem(TK_MIN)==="1"}catch{}
+  // Read marks: key -> {s: last_seen when read, t: when read}. Older plain strings count as read now.
+  let readMap={};try{const r=JSON.parse(localStorage.getItem(READ_KEY)||"{}");if(r&&typeof r==="object")for(const [k,v] of Object.entries(r))readMap[k]=v&&typeof v==="object"?v:{s:v,t:Date.now()}}catch{}
+  const tms=t=>{const v=new Date(t||NaN).getTime();return Number.isFinite(v)?v:0};
+  const isSlow=i=>i.level==="warning"&&/exceeded [\d,.]+ ?ms threshold/i.test(i.title||"");
+  const isNew=i=>i.first_seen?Date.now()-tms(i.first_seen)<864e5:!!i.new;
+  const isRead=i=>Object.prototype.hasOwnProperty.call(readMap,i.key)&&tms((readMap[i.key]||{}).s)>=tms(i.last_seen);
+  const lvTag=i=>{const sl=isSlow(i),w=!sl&&(i.level==="warning"||i.level==="info");return `<span class="ab-lvl ${sl?"slow":w?"warn":"err"}">${sl?"slow":w?"warn":"error"}</span>`};
+  const newTag=i=>isNew(i)?'<span class="ab-new">new</span>':"";
+  const inum=i=>"#"+String(i.key||"").split("#").pop();
+  const cardOf=i=>typeof i.card==="string"&&nodeById.has(i.card)?i.card:null;
+  const cardName=i=>cardOf(i)?nodeById.get(i.card).title:"No card owns it";
+  const byKey=k=>k==null?null:tk.list.find(i=>i.key===k)||tk.pend.find(i=>i.key===k)||null;
+  const srcName=i=>{const x=String(i.source||"").split(":")[0];return x?x[0].toUpperCase()+x.slice(1):""};
+  const day=t=>{const d=new Date(t||NaN);return Number.isFinite(d.getTime())?d.toLocaleString(undefined,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"unknown"};
+  const plural=(n,w)=>`${n} ${w}${n===1?"":"s"}`;
+  const byNewest=a=>a.sort((x,y)=>tms(y.last_seen)-tms(x.last_seen));
+  vp.insertAdjacentHTML("beforeend",'<div class="ab-ticker" data-r="ticker" hidden></div><section class="ab-sheet" data-r="sheet" aria-label="Issue details" hidden></section>');
+  const ticker=$("ticker"),sheet=$("sheet");
+  // The ticker and sheet are controls, not board: presses and wheels on them never pan, zoom or select.
+  for(const el of [ticker,sheet])for(const ev of ["pointerdown","mousedown","wheel","dblclick"])el.addEventListener(ev,e=>e.stopPropagation());
+  const filtered=()=>tk.list.filter(i=>tk.f==="all"||(tk.f==="err"&&!isSlow(i))||(tk.f==="slow"&&isSlow(i))||(tk.f==="new"&&isNew(i)));
+  function setIssues(list){
+    list=(Array.isArray(list)?list:[]).filter(i=>i&&typeof i==="object"&&typeof i.key==="string");
+    const now=new Map(list.map(i=>[i.key,i])),shown=new Map(tk.list.map(i=>[i.key,i]));
+    // Shown issues update in place; a new key or a later last_seen waits in pend until the reader merges it.
+    tk.list=tk.list.filter(i=>now.has(i.key)).map(i=>{const n=now.get(i.key);return tms(n.last_seen)>tms(i.last_seen)?i:n});
+    // Nothing is shown (first poll, or every shown issue went away): nothing can move under the reader, so take the list as is.
+    if(!tk.list.length){tk.list=byNewest(list.slice());tk.pend=[];return}
+    tk.pend=byNewest(list.filter(n=>{const o=shown.get(n.key);return !o||tms(n.last_seen)>tms(o.last_seen)}));
+  }
+  function flush(){
+    const keys=new Set(tk.pend.map(i=>i.key));
+    tk.list=tk.pend.concat(tk.list.filter(i=>!keys.has(i.key)));
+    tk.fresh=keys;tk.pend=[];tk.ck=null;tk.scroll=true;
+  }
+  function markRead(i){
+    const t=Date.now();readMap[i.key]={s:i.last_seen||"",t};
+    // Prune by age, not by absence: one failed source poll must not make its issues unread again.
+    for(const [k,v] of Object.entries(readMap))if(!(t-(+v.t||0)<READ_TTL))delete readMap[k];
+    try{localStorage.setItem(READ_KEY,JSON.stringify(readMap))}catch{}
+  }
+  function ping(id){
+    for(const el of world.querySelectorAll(".ab-card.ab-ping"))el.classList.remove("ab-ping");
+    if(id&&cardEl.has(id))cardEl.get(id).classList.add("ab-ping");
+  }
+  function dropIssue(){tk.sel=null;tk.cardOpen=false;ping(null);panel.classList.remove("ab-compact")}
+  function renderTicker(){
+    const on=heatOn&&!!overlay.heat&&tk.list.length+tk.pend.length>0;
+    ticker.hidden=!on;
+    if(!on){tk.html="";ticker.innerHTML="";return}
+    // The current item is tracked by key: a poll that drops earlier issues must not move it onto another one.
+    const L=filtered();tk.cur=tk.ck==null?0:L.findIndex(i=>i.key===tk.ck);
+    const unread=tk.list.filter(i=>!isRead(i)).length,np=tk.pend.length;
+    ticker.classList.toggle("min",tk.min);
+    const html=tk.min?`<button type="button" class="ab-pill${np?" alert":""}" data-tk="restore" title="Show the issue ticker"><span class="ab-live">Live</span><b>${plural(tk.list.length,"issue")}</b>${unread?`<span class="ab-count">${unread} unread</span>`:""}${np?`<span class="ab-count">+${np} new</span>`:""}<span aria-hidden="true">▾</span></button>`
+      :`<div class="ab-tnav"><div class="ab-trow"><span class="ab-live">Live · newest issues</span><button type="button" class="ab-icon" data-tk="min" title="Minimise the ticker" aria-label="Minimise the ticker">–</button></div>
+      <div class="ab-trow"><button type="button" class="ab-sbtn" data-step="-1" title="Newer (p)" aria-label="Newer issue">◂</button><button type="button" class="ab-sbtn" data-step="1" title="Older (n)" aria-label="Older issue">▸</button><span class="ab-m" data-r="tkpos">${L.length&&tk.cur>=0?tk.cur+1:"–"} / ${L.length}</span></div>
+      <div class="ab-trow"><select class="ab-sbtn" data-tk="filter" aria-label="Show issues">${[["all","All"],["err","Errors"],["slow","Slow"],["new","New today"]].map(([v,l])=>`<option value="${v}"${tk.f===v?" selected":""}>${l}</option>`).join("")}</select>${np?`<button type="button" class="ab-sbtn primary" data-tk="flush">↑ ${np} new</button>`:""}</div></div>
+      <div class="ab-track">${L.map((i,k)=>`<div class="ab-tk${k===tk.cur?" cur":""}${tk.fresh.has(i.key)?" fresh":""}${isRead(i)?" read":""}" data-k="${k}" data-key="${esc(i.key)}" role="button" tabindex="0"><div class="ab-tkh"><span class="ab-dot" title="Unread"></span>${lvTag(i)}${newTag(i)}<span class="ab-m">${esc(ago(i.last_seen))}</span></div><div class="ab-t">${esc(i.title)}</div><div class="ab-m ab-one">${esc(cardName(i))}</div></div>`).join("")}</div>`;
+    if(html===tk.html)return;
+    const tr=ticker.querySelector(".ab-track"),sx=tr?tr.scrollLeft:0,f=ticker.contains(document.activeElement)?document.activeElement:null;
+    const fkey=f&&f.dataset?["tk","step","k"].map(a=>f.dataset[a]||"").join("\0"):null;
+    ticker.innerHTML=html;tk.html=html;tk.fresh=new Set();
+    const t2=ticker.querySelector(".ab-track");
+    if(t2){t2.scrollLeft=sx;const c=t2.querySelector(".ab-tk.cur");if(c&&tk.scroll){const a=c.offsetLeft-t2.offsetLeft;if(a<t2.scrollLeft||a+c.offsetWidth>t2.scrollLeft+t2.clientWidth)t2.scrollLeft=Math.max(0,a-8)}}
+    tk.scroll=false;
+    if(fkey){const again=[...ticker.querySelectorAll("button,select,[data-k]")].find(b=>["tk","step","k"].map(a=>b.dataset[a]||"").join("\0")===fkey);if(again)again.focus()}
+  }
+  function tkGo(k,deeper=true){
+    const L=filtered();if(!L.length)return;
+    tk.cur=(k+L.length)%L.length;tk.scroll=true;
+    // Open the sheet first so the card is framed in the space the sheet leaves.
+    const i=L[tk.cur];tk.ck=i.key;if(deeper)openSheet(i);pickIssue(i);
+    renderTicker();
+  }
+  // With no current item (it left the list), "next" starts at the first and "previous" at the last.
+  const tkStep=d=>tkGo(tk.cur<0?(d>0?0:-1):tk.cur+d);
+  /* Light the issue's card with the board's own selection; the panel shows only a summary until "Card details". */
+  function pickIssue(i){
+    markRead(i);tk.sel=i.key;tk.cardOpen=false;
+    const c=cardOf(i);
+    if(c){select(c,true);ping(c)}else{ping(null);clearSelection(true);openPanel()}
+    if(isNarrow())panel.classList.remove("open");
+  }
+  function issueSummary(){
+    const i=byKey(tk.sel),c=i&&cardOf(i);
+    if(!i||(c&&selected!==c)||(!c&&(selected||activeFlow))){panel.classList.remove("ab-compact");return}
+    const x=panel.querySelector(":scope>.ab-close");
+    (x||panel).insertAdjacentHTML(x?"afterend":"afterbegin",`<div class="ab-isum"><div class="kicker">Selected issue ${esc(inum(i))}</div><div class="ab-t ab-clamp">${esc(i.title)}</div>
+      <div class="ab-irow">${lvTag(i)}${newTag(i)}<span class="ab-m">${esc(ago(i.last_seen))} · ${+i.count||0} ev · ${plural(+i.users||0,"user")}</span></div>
+      <div class="ab-irow"><button type="button" class="ab-sbtn primary" data-isheet>Open details ▴</button>${c?`<button type="button" class="ab-sbtn" data-icard aria-expanded="${tk.cardOpen}">Card details ${tk.cardOpen?"▴":"▾"}</button>`:""}</div></div>`);
+    panel.classList.toggle("ab-compact",!tk.cardOpen);
+  }
+  function openSheet(i){tk.sheet=i.key;tk.sheetMin=false;tk.tab="overview";renderSheet(true)}
+  function framesHtml(i,list){
+    if(!(i.frames||[]).length)return `<p class="ab-m">${isSlow(i)?`No stack trace: this is a slow ${/job/i.test(i.title)?"job":"request"} threshold alert, not an exception, so there is no stack to show.`:"No stack frames were reported for this issue."}</p>`;
+    return `<ol class="ab-stack">${list.map(f=>`<li class="${f.in_app?"":"vendor"}"><code>${esc(f.path)}${+f.line?":"+(+f.line):""}</code>${f.in_app?"":' <span class="ab-m">vendor</span>'}</li>`).join("")}</ol>`;
+  }
+  function cardHtml(i){
+    const c=cardOf(i);if(!c)return `<p class="ab-m">No card on this board owns the code in this issue.</p>`;
+    const n=nodeById.get(c);
+    return `<div class="ab-cardref"><b>${esc(n.title)}</b><div class="ab-m">${esc(n.sub)}</div><p>${esc(n.summary)}</p>
+      <div class="ab-irow"><button type="button" class="ab-sbtn" data-sh="showcard">Show on board</button><span class="ab-m">${plural(n.files.length,"file")} · ${plural(n.owns.length,"owned path")}</span></div></div>`;
+  }
+  const canAnalyze=i=>!!AG&&FPRINT.test(i.fingerprint||"");
+  function factsHtml(i){
+    const row=(k,v)=>`<dt>${k}</dt><dd>${v}</dd>`;
+    return `<dl class="ab-ikv">${row("Level",lvTag(i)+" "+newTag(i))+row("Events",+i.count||0)+row("Users",+i.users||0)+row("First seen",esc(day(i.first_seen)))
+      +row("Last seen",`${esc(day(i.last_seen))} (${esc(ago(i.last_seen))})`)+row("Card",esc(cardName(i)))+row("Source",`${esc(srcName(i))} ${esc(inum(i))}`.trim())}</dl>`;
+  }
+  function actionsHtml(i){
+    const url=typeof i.url==="string"&&/^https?:\/\//.test(i.url)?i.url:null;
+    return `<div class="ab-irow">${canAnalyze(i)?`<button type="button" class="ab-sbtn primary" data-sh="tab" data-stab="agent">Analyze</button>`:""}${url?`<a class="ab-sbtn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${srcName(i)?`Open in ${esc(srcName(i))}`:"Open the issue"} ↗</a>`:""}${logsUrl(i)?`<a class="ab-sbtn" href="${esc(logsUrl(i))}" target="_blank" rel="noopener noreferrer" title="Logs around this issue">Logs ↗</a>`:""}</div>`;
+  }
+  function agentHtml(i){
+    if(!AG)return `<p class="ab-m">Issue agents run from the harness dashboard, not from an exported board.</p>`;
+    if(!canAnalyze(i))return `<p class="ab-m">Analyze needs a root cause: an in-app stack frame, with a line, in code a card owns. This issue has none, so no agent can start for it.</p>`;
+    return `<p class="ab-m">Analyze starts a read-only agent in its own worktree; its diagnosis appears here, on the card, and on the Agents page.</p>${jobSlot(i,i.card)}`;
+  }
+  function renderSheet(force){
+    const i=heatOn&&byKey(tk.sheet);
+    if(!i){tk.sheet=null;sheet.hidden=true;sheet.innerHTML="";tk.sheetSig="";return}
+    const sig=JSON.stringify([i,tk.sheetMin,tk.tab]);if(!force&&sig===tk.sheetSig)return;
+    const keepTab=tk.sheetSig&&JSON.parse(tk.sheetSig)[2]===tk.tab,old=sheet.querySelector(".ab-sbody"),sy=keepTab&&old?old.scrollTop:0;
+    tk.sheetSig=sig;sheet.hidden=false;sheet.classList.toggle("min",tk.sheetMin);
+    const close=`<button type="button" class="ab-icon" data-sh="close" title="Close" aria-label="Close the issue">×</button>`;
+    if(tk.sheetMin){sheet.innerHTML=`<button type="button" class="ab-sheettab" data-sh="restore" title="Show the issue">${lvTag(i)}<span class="ab-t ab-one">${esc(i.title)}</span><span aria-hidden="true">▴</span></button>${close}`;return}
+    const body=tk.tab==="stack"?framesHtml(i,i.frames||[]):tk.tab==="card"?cardHtml(i):tk.tab==="agent"?agentHtml(i)
+      :`<div class="ab-cols"><div>${factsHtml(i)}${actionsHtml(i)}</div><div><h4 class="ab-h">Top of the stack</h4>${framesHtml(i,(i.frames||[]).slice(0,4))}</div></div>`;
+    sheet.innerHTML=`<header><div class="ab-shead"><div class="kicker">Issue ${esc(inum(i))} · ${esc(cardName(i))}</div><div class="ab-t ab-stitle">${esc(i.title)}</div></div>
+      <button type="button" class="ab-icon" data-sh="min" title="Minimise" aria-label="Minimise the issue">–</button>${close}</header>
+      <nav class="ab-stabs" role="tablist" aria-label="Issue details">${[["overview","Overview"],["stack","Stack"],["card","Card"],["agent","Agent"]].map(([k,l])=>`<button type="button" role="tab" data-sh="tab" data-stab="${k}" aria-selected="${tk.tab===k}">${l}</button>`).join("")}</nav>
+      <div class="ab-sbody">${body}</div>`;
+    sheet.querySelector(".ab-sbody").scrollTop=sy;
+    for(const slot of sheet.querySelectorAll("[data-slot]"))painted.set(slot,slotHtml(slot.dataset.slot));
+  }
+  ticker.addEventListener("click",e=>{
+    const t=e.target,a=(t.closest("[data-tk]")||{dataset:{}}).dataset.tk;
+    const save=()=>{try{localStorage.setItem(TK_MIN,tk.min?"1":"0")}catch{}};
+    if(a==="min"){tk.min=true;save();renderTicker();return}
+    if(a==="restore"){tk.min=false;save();if(tk.pend.length)flush();renderTicker();return}
+    if(a==="flush"){flush();tkGo(0,false);return}
+    const st=t.closest("[data-step]");if(st){tkStep(+st.dataset.step);return}
+    const c=t.closest("[data-k]");if(c)tkGo(+c.dataset.k);
+  });
+  ticker.addEventListener("keydown",e=>{const c=e.target.closest&&e.target.closest("[data-k]");if(c&&(e.key==="Enter"||e.key===" ")){e.preventDefault();tkGo(+c.dataset.k)}});
+  ticker.addEventListener("change",e=>{if(e.target.dataset.tk==="filter"){tk.f=e.target.value;tk.ck=null;renderTicker()}});
+  sheet.addEventListener("click",e=>{
+    const ag=AG&&e.target.closest("[data-agent]");if(ag){agentAct(ag);return}
+    const cp=e.target.closest("[data-copy]");if(cp){copy(cp.dataset.copy);return}
+    const b=e.target.closest("[data-sh]");if(!b)return;
+    const a=b.dataset.sh;
+    if(a==="min")tk.sheetMin=true;
+    else if(a==="restore")tk.sheetMin=false;
+    else if(a==="close")tk.sheet=null;
+    else if(a==="tab")tk.tab=b.dataset.stab;
+    else if(a==="showcard"){tk.sheetMin=true;renderSheet(true);const i=byKey(tk.sheet);if(i)pickIssue(i);return}
+    renderSheet(true);
+  });
 
   /* ---------- Live overlay and status ---------- */
   function setOverlay(ov){
@@ -460,10 +797,17 @@ function mount(root,data,opts={}){
       const hc=heatOn&&heat&&heat.cards[id],hv=hc?Math.max(0,Math.min(1,+hc.heat||0)):0;
       el.classList.toggle("ov-edited",!!ed);el.classList.toggle("ov-scope",sc);el.classList.toggle("ov-refreshing",rf);
       el.classList.toggle("ov-heat",hv>0);el.style.setProperty("--heat",hv.toFixed(3));
-      el.querySelector(".ab-badges").innerHTML=(hv>0?`<span class="ab-badge" style="--b:var(--hot);color:#fff">errors · ${+hc.issues||0}</span>`:"")+(ed?`<span class="ab-badge" style="--b:var(--edited)">edited · ${ed}</span>`:"")+(sc?`<span class="ab-badge" style="--b:var(--scope);color:#fff">in scope</span>`:"")+(rf?`<span class="ab-badge" style="--b:var(--refresh);color:#fff">refreshing</span>`:"");
+      ovBadges.set(id,(hv>0?`<span class="ab-badge" style="--b:var(--hot);color:#fff">errors · ${+hc.issues||0}</span>`:"")+(ed?`<span class="ab-badge" style="--b:var(--edited)">edited · ${ed}</span>`:"")+(sc?`<span class="ab-badge" style="--b:var(--scope);color:#fff">in scope</span>`:"")+(rf?`<span class="ab-badge" style="--b:var(--refresh);color:#fff">refreshing</span>`:""));
     }
+    paintBadges();
+    setIssues(heat&&heat.issues);
+    // The picked issue left the list, or Heat is off: drop the selection, ping and summary, and redraw the panel as normal.
+    if(tk.sel!=null&&!(heatOn&&heat&&byKey(tk.sel))){dropIssue();overlaySig=null}
+    renderTicker();renderSheet();
     const editedFrames=new Set(Object.keys(overlay.edited).map(id=>(nodeById.get(id)||{}).frame));
     root.querySelectorAll(".ab-chip").forEach(c=>c.classList.toggle("ov",editedFrames.has(c.dataset.frame)));
+    // An unchanged overlay leaves the open panel (and any job panel in it) alone.
+    const sig=JSON.stringify([ov,heatOn]);if(sig===overlaySig)return;overlaySig=sig;
     if(selected)renderNode(nodeById.get(selected),neighbours(selected));else renderOverview();
   }
   $("heat").onclick=()=>{heatOn=!heatOn;try{localStorage.setItem("ab-heat",heatOn?"on":"off")}catch{}setOverlay(lastOverlay)};
@@ -475,7 +819,7 @@ function mount(root,data,opts={}){
   if(opts.status)setStatus(opts.status);
   if(!B.nodes.length)vp.insertAdjacentHTML("beforeend",`<div class="ab-empty"><div><b>No cards yet</b>The board for this project has not been mapped.</div></div>`);
   const start=decodeURIComponent(location.hash.slice(1));if(nodeById.has(start))select(start);
-  return {setOverlay,setStatus,select,fitAll};
+  return {setOverlay,setStatus,select,fitAll,setAgents,setJob,openJob,watched:()=>[...openJobs]};
 }
 
 /* Fill defaults and drop anything that would break rendering; the harness validates strictly before writing. */

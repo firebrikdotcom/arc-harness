@@ -402,9 +402,17 @@ def prepare(run, w):
     # Build an allowlisted index from current files, never checkout or stage secrets.
     git(destination, 'read-tree', '--empty')
     candidates = git(project, 'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')
+    ignored = subprocess.run(
+        ['git', '-C', str(project), 'check-ignore', '--no-index', '-z', '--stdin'],
+        input=b''.join(raw + b'\0' for raw in candidates if raw),
+        capture_output=True,
+    )
+    if ignored.returncode not in (0, 1):
+        ignored.check_returncode()
+    ignored_paths = set(ignored.stdout.split(b'\0'))
     copied = []
     for raw in candidates:
-        if not raw:
+        if not raw or raw in ignored_paths:
             continue
         relative = os.fsdecode(raw)
         if not snapshot_allowed(project, relative):

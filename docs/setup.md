@@ -69,6 +69,7 @@ Every software project the harness touches gets a whiteboard of its components i
 - **Removing a project.** **Remove** on the dashboard's Architecture page (or `harness board remove --target ID`) hides the project from Architecture and stops mapping it; its stored board is kept. **Restore** in the page's **Removed** section (or `harness board restore`) brings it back.
 - **Commands.** `harness board check|map|status|list|show|state|overlay|import|remove|restore --target ID|PATH`. `map --full` remaps from scratch; `import --board FILE` installs a hand-made board (`tools/architecture-board/import-explorer.mjs` converts an explorer page into one).
 - **Error heat.** `harness-signals` colours cards by the errors each project reports to Sentry, Nightwatch or a custom command, for the projects listed in this machine's `~/.config/harness/signals.json`. Nightwatch is polled after a one-time `scripts/signals-service.sh login nightwatch`; check the setup with `scripts/signals-service.sh check`, then `install`. See [observability-heatmap.md](observability-heatmap.md).
+- **Issue agents.** An **Analyze** action on problems in a card's drawer starts a read-only investigation in an isolated git worktree and displays a structured diagnosis on the dashboard. Configured via `issue_agents` in `~/.config/harness/signals.json` with support for Herdr tabs, session takeover, and a local diff viewer. See [issue-agents.md](issue-agents.md).
 - **Live highlights** are computed per request and never stored: cards owning uncommitted files are marked *edited*, cards owning the active run's contract deliverables *in scope*, and cards being re-described *refreshing*.
 
 ### Automatic initialisation at session start
@@ -142,6 +143,7 @@ Optional harness variables:
 - `HARNESS_JEV_TIMEOUT`, `HARNESS_JEV_ATTEMPTS`: per-attempt timeout in seconds and attempt count for `advise` calls; automatic checkpoints default to `10` and `1` so gates and hooks stay bounded.
 - `HARNESS_JEV_REPEAT_THRESHOLD`: how many identical shell commands in one run trigger the hook's `progress_assessment` checkpoint; default `3`.
 - `TYPESAFE_HOME` or `TYPESAFE_LOG_DIR`: optional TypeSafe outcome-log location used when checking eligibility for active routing.
+- `HARNESS_ISSUE_AGENTS_TEST_MODE`: set to `1` to run issue agent tests with deterministic mock agents and fake diff viewer processes, bypassing external model CLI calls.
 
 When environment variables are introduced, document each one here:
 

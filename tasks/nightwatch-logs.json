@@ -1,0 +1,45 @@
+{
+  "goal": "Mark projects that read raw logs with a logs skill (lothar-nightwatch-logs), mark Dollarwise, and give each of their Nightwatch issues a prefiltered Logs link on the architecture board.",
+  "deliverables": [
+    "services/harness-signals/src/config.rs",
+    "services/harness-signals/src/heat.rs",
+    "services/harness-signals/src/main.rs",
+    "tools/architecture-board/board.js",
+    "docs/observability-heatmap.md",
+    "~/.config/harness/signals.json (Dollarwise marked; machine-local)"
+  ],
+  "constraints": [
+    "No new dependencies.",
+    "Projects without a logs setting behave exactly as before."
+  ],
+  "non_goals": [
+    {
+      "description": "Analyze agents do not get browser access or run the skill (held for the user's approval); the issue-agent code under services/harness-signals/src/jobs/ is earlier uncommitted work and is not changed by this run."
+    },
+    {
+      "description": "Log volume does not change card heat."
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "signals-tests",
+      "criterion": "harness-signals unit tests pass, including logs config and link tests",
+      "command": [
+        "cargo",
+        "test",
+        "--quiet",
+        "--manifest-path",
+        "services/harness-signals/Cargo.toml"
+      ]
+    },
+    {
+      "id": "board-js-syntax",
+      "criterion": "board script parses",
+      "command": [
+        "node",
+        "--check",
+        "tools/architecture-board/board.js"
+      ]
+    }
+  ]
+}

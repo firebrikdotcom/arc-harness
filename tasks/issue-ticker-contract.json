@@ -1,0 +1,22 @@
+{
+  "goal": "On the Architecture board, incoming issues run in a live ticker over the diagram that can be minimised to a pill; picking an issue lights its card, keeps the side panel to a compact summary, and opens a large issue sheet (Overview, Stack, Card, Agent tabs) that folds into a bottom tab.",
+  "deliverables": ["services/harness-signals/src/heat.rs", "tools/architecture-board/board.js", "tools/architecture-board/board.css", "services/harness-audit/public/board-page.js", "tests/", "docs/observability-heatmap.md", "docs/issue-agents.md"],
+  "constraints": [
+    "Follow the approved mockup B1: scratchpad issue-ux/site/mx/mx.js and mx.css, opt=b1.",
+    "The overlay (board.py overlay, polled every 5 s) is the only data path; heat.json gains a compact list of every open issue.",
+    "Clicking a card directly keeps today's full panel; only issue navigation uses the compact summary.",
+    "The ticker and sheet never pan or zoom the board; browser storage is wrapped in try/catch.",
+    "Reuse the existing Analyze and job flow for the Agent tab; no new job endpoints."
+  ],
+  "non_goals": [
+    {"description": "No changes to the guard or its rules.", "paths": ["scripts/hooks/", "scripts/permit.py", "scripts/permit.sh", "schemas/denylist.default"]},
+    {"description": "No new dashboard pages or menu entries; no changes to job runner behaviour.", "paths": ["services/harness-signals/src/jobs/"]}
+  ],
+  "acceptance": [
+    {"id": "signals-tests", "criterion": "harness-signals tests pass, including the issue list in heat.json", "command": ["cargo", "test", "--manifest-path", "services/harness-signals/Cargo.toml"]},
+    {"id": "audit-tests", "criterion": "harness-audit tests pass", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml"]},
+    {"id": "board-dom", "criterion": "Board DOM tests pass, including ticker, minimise, new-issue pill, compact summary and sheet tabs", "command": ["sh", "tests/board-agents.sh"]},
+    {"id": "board-py", "criterion": "Board Python tests pass", "command": ["python3", "-m", "unittest", "tests.test_board", "-q"]},
+    {"id": "live", "criterion": "Verified in Chrome on the running dashboard against real Nightwatch data"}
+  ]
+}

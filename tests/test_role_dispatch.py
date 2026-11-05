@@ -160,6 +160,19 @@ class DispatcherTest(unittest.TestCase):
         for workers in cases:
             with self.assertRaises(ValueError):
                 d.validate({'workers': workers, 'assessment': self.assessment()}, self.project, self.config)
+    def test_editing_snapshot_skips_tracked_ignored_files(self):
+        self.init_git()
+        (self.project / '.gitignore').write_text('ignored/\n')
+        (self.project / 'ignored').mkdir()
+        (self.project / 'ignored' / 'tracked.txt').write_text('ignored\n')
+        d.git(self.project, 'add', '-f', '--', 'ignored/tracked.txt')
+        d.git(self.project, 'add', '--', '.gitignore')
+        d.git(self.project, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'Add ignored fixture')
+        run = self.create(self.worker(access='edit'))
+        workspace = Path(d.next_workers(run)['workers'][0]['workspace'])
+        self.assertFalse((workspace / 'ignored' / 'tracked.txt').exists())
+        self.assertTrue((workspace / 'source.txt').exists())
+
     def test_editing_snapshot_and_patch_excludes_parent_changes(self):
         d.git(self.project, 'init')
         (self.project / 'source.txt').write_text('base\n')

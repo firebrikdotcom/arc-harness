@@ -1,0 +1,70 @@
+{
+  "goal": "Add harness-signals, a Rust background service that, per machine-local configuration, pulls errors and warnings from each tracked project's observability tools (Sentry polling, Nightwatch polling through its MCP server after a one-time OAuth sign-in, Nightwatch signed webhooks, or a custom command), maps them to architecture board cards, and feeds a live Heat layer on the dashboard board.",
+  "deliverables": [
+    "services/harness-signals/",
+    "scripts/signals-service.sh",
+    "ops/harness-signals.service",
+    "ops/harness-signals.launchd.plist",
+    "scripts/board.py",
+    "tests/test_board.py",
+    "tests/signals-service.sh",
+    "tools/architecture-board/board.js",
+    "tools/architecture-board/board.css",
+    "docs/observability-heatmap.md",
+    "docs/setup.md",
+    "docs/architecture-board.md",
+    "AGENTS.md",
+    ".gitignore",
+    "scripts/slim_session_logs.py",
+    ".harness-required-tools"
+  ],
+  "constraints": [
+    "Each machine decides which projects it tracks through its own config file (HARNESS_CONFIG_HOME/signals.json); nothing is written into tracked projects.",
+    "Tokens and webhook secrets are read from files named in the config and never logged or stored in the harness DB.",
+    "Only minimal issue summaries are stored: titles truncated, no messages beyond the title, no request data or user identifiers.",
+    "The dashboard keeps holding no logic: the heat reaches it through the existing board.py overlay.",
+    "Nightwatch OAuth credentials live only in a 0600 file named in the config; access tokens are refreshed by the service and never logged or stored in the harness DB."
+  ],
+  "non_goals": [
+    {
+      "description": "No changes to the audit service's Rust code or routes.",
+      "paths": [
+        "services/harness-audit/src/"
+      ]
+    },
+    {
+      "description": "No public exposure (tunnels) of the webhook port; that is the operator's choice."
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "signals",
+      "criterion": "The signals crate builds cleanly and its tests (config, adapters, mapping, scoring, webhook signature, end-to-end poll against a fake Sentry) pass",
+      "command": [
+        "sh",
+        "tests/signals-service.sh"
+      ]
+    },
+    {
+      "id": "overlay",
+      "criterion": "board.py overlay passes the heat layer through",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "tests.test_board",
+        "-q"
+      ]
+    },
+    {
+      "id": "dashboard",
+      "criterion": "The dashboard suite still passes",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "services/harness-audit/Cargo.toml"
+      ]
+    }
+  ]
+}

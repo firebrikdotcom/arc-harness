@@ -20,6 +20,15 @@ fn fake_sentry() -> (String, Requests) {
     let base = format!("http://{}", http.server_addr());
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = seen.clone();
+    // Sentry's hourly buckets are Unix seconds; they move with the timestamps.
+    let mut issues = recent(fixtures::ISSUES);
+    for bucket in [1792744800_i64, 1792748400] {
+        issues = issues.replace(
+            &bucket.to_string(),
+            &(bucket + shift().num_seconds()).to_string(),
+        );
+    }
+    let event = recent(fixtures::EVENT);
     std::thread::spawn(move || {
         for request in http.incoming_requests() {
             let auth = request
@@ -33,9 +42,9 @@ fn fake_sentry() -> (String, Requests) {
             let body = if auth != format!("Bearer {TOKEN}") {
                 None
             } else if url.starts_with("/api/0/projects/acme/api/issues/") {
-                Some(fixtures::ISSUES)
+                Some(issues.as_str())
             } else if url == "/api/0/organizations/acme/issues/101/events/latest/" {
-                Some(fixtures::EVENT)
+                Some(event.as_str())
             } else {
                 Some("{}")
             };
@@ -47,6 +56,49 @@ fn fake_sentry() -> (String, Requests) {
         }
     });
     (base, seen)
+}
+
+/// The fixtures were captured on 2026-10-23. Shift every timestamp in them by the time since
+/// then, in whole minutes, so the newest stays minutes old; otherwise heat decays to nothing
+/// as the calendar moves on.
+/// Computed once, so every fixture in a run moves by the same amount.
+fn shift() -> chrono::Duration {
+    static SHIFT: std::sync::OnceLock<chrono::Duration> = std::sync::OnceLock::new();
+    *SHIFT.get_or_init(|| {
+        let captured = chrono::NaiveDate::from_ymd_opt(2026, 10, 23)
+            .unwrap()
+            .and_hms_opt(16, 0, 0)
+            .unwrap();
+        chrono::Duration::minutes(
+            (chrono::Utc::now().naive_utc() - captured)
+                .num_minutes()
+                .max(0),
+        )
+    })
+}
+
+fn recent(text: &str) -> String {
+    let shift = shift();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("20") {
+        let stamp = rest
+            .get(at..at + 19)
+            .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok());
+        out.push_str(&rest[..at]);
+        match stamp {
+            Some(time) => {
+                out.push_str(&(time + shift).format("%Y-%m-%dT%H:%M:%S").to_string());
+                rest = &rest[at + 19..];
+            }
+            None => {
+                out.push_str("20");
+                rest = &rest[at + 2..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn write_config(dir: &Path, body: Value) -> std::path::PathBuf {
@@ -150,7 +202,10 @@ fn signed_nightwatch_deliveries_update_the_heat_and_forgeries_are_refused() {
         std::thread::spawn(move || server::run(http, db, shared, poll_now));
     }
 
-    let body = nightwatch::fixtures::delivery("issue.opened", "production");
+    let body = recent(&nightwatch::fixtures::delivery(
+        "issue.opened",
+        "production",
+    ));
     let mut mac = Hmac::<Sha256>::new_from_slice(b"whsec").unwrap();
     mac.update(body.as_bytes());
     let signature = hex::encode(mac.finalize().into_bytes());
@@ -254,11 +309,11 @@ fn fake_nightwatch() -> (String, Arc<Mutex<Vec<String>>>) {
                         "list_applications" => nightwatch_poll::fixtures::APPS.to_owned(),
                         "list_environments" => nightwatch_poll::fixtures::ENVS.to_owned(),
                         "list_issues" if args.get("cursor").is_some() => {
-                            nightwatch_poll::fixtures::LIST_2.to_owned()
+                            recent(nightwatch_poll::fixtures::LIST_2)
                         }
-                        "list_issues" => nightwatch_poll::fixtures::LIST_1.to_owned(),
+                        "list_issues" => recent(nightwatch_poll::fixtures::LIST_1),
                         "get_issue" if args["identifier"] == "509" => {
-                            nightwatch_poll::fixtures::DETAIL.to_owned()
+                            recent(nightwatch_poll::fixtures::DETAIL)
                         }
                         "get_issue" => {
                             "## Exception Summary\n\n- File: `app/Services/Quiltt/Api.php:1`\n"
@@ -402,7 +457,10 @@ fn a_signed_webhook_triggers_an_immediate_poll_when_polling_is_configured() {
     let shared = Arc::new(RwLock::new(config::load(&config_path).unwrap()));
     let (poll_now, requested) = std::sync::mpsc::channel();
     std::thread::spawn(move || server::run(http, db, shared, poll_now));
-    let body = nightwatch::fixtures::delivery("issue.opened", "production");
+    let body = recent(&nightwatch::fixtures::delivery(
+        "issue.opened",
+        "production",
+    ));
     let mut mac = Hmac::<Sha256>::new_from_slice(b"whsec").unwrap();
     mac.update(body.as_bytes());
     let response = ureq::post(&format!("{base}/hooks/nightwatch/api"))

@@ -1,0 +1,25 @@
+{
+  "goal": "Make Architecture a regular dashboard navigation item like Orchestration, Workbench, Workflow and Events, drop the per-project list from the sidebar, and reach each project's board through the Architecture page and breadcrumbs.",
+  "deliverables": [
+    "services/harness-audit/src/ui.rs",
+    "services/harness-audit/resources/views/layouts/admin.html",
+    "services/harness-audit/resources/views/audit/projects.html",
+    "services/harness-audit/resources/views/audit/board.html",
+    "services/harness-audit/public/board-page.js",
+    "services/harness-audit/public/styles.css",
+    "docs/architecture-board.md",
+    "docs/setup.md"
+  ],
+  "constraints": [
+    "No new dependencies.",
+    "Keep the /projects and /projects/{id}/board URLs and the Remove/Restore actions."
+  ],
+  "non_goals": [
+    {"description": "No changes to the board CLI or its tests.", "paths": ["scripts/", "tests/"]},
+    {"description": "Leave the pre-existing arc upgrade and workbench edits in services/ as they are."}
+  ],
+  "acceptance": [
+    {"id": "dashboard", "criterion": "Architecture is a nav item, the sidebar lists no projects, and board pages carry Workbench / Architecture / project breadcrumbs", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "architecture"]},
+    {"id": "suite", "criterion": "The whole service test suite passes", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml"]}
+  ]
+}

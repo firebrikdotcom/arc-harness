@@ -1,0 +1,25 @@
+{
+  "goal": "Let a person remove a project from the dashboard's Architecture list (sidebar and Projects page) and restore it, through new `harness board remove` / `restore` CLI commands that the dashboard calls.",
+  "deliverables": [
+    "scripts/board.py",
+    "tests/test_board.py",
+    "services/harness-audit/src/boards.rs",
+    "services/harness-audit/src/ui.rs",
+    "services/harness-audit/resources/views/audit/projects.html",
+    "services/harness-audit/public/styles.css",
+    "docs/architecture-board.md"
+  ],
+  "constraints": [
+    "No new dependencies.",
+    "Removal is reversible: it hides the project and stops background mapping, but keeps its stored board.",
+    "Mutations are POST forms checked against the session CSRF token."
+  ],
+  "non_goals": [
+    {"description": "Do not delete board files or harness target registrations."},
+    {"description": "Leave the pre-existing arc upgrade and workbench edits in services/ as they are."}
+  ],
+  "acceptance": [
+    {"id": "cli", "criterion": "board remove hides a project from list and stops mapping; restore brings it back", "command": ["python3", "-m", "unittest", "tests.test_board", "-q"]},
+    {"id": "dashboard", "criterion": "Dashboard remove and restore routes work end to end", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "architecture"]}
+  ]
+}

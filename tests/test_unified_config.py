@@ -56,6 +56,20 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(value["telemetry"]["workflow_prompts"])
         self.assertIn("_doc", value["telemetry"])
 
+    def test_section_from_a_newer_version_is_kept_not_refused(self):
+        # One config.json serves every checkout; a newer one may add a section.
+        config.update()
+        value = json.loads(config.path().read_text())
+        value["future"] = {"enabled": True, "_doc": "added by a newer version"}
+        config.path().write_text(json.dumps(value))
+        self.assertEqual(config.load()["future"], value["future"])
+        config.update("typesafe", {"mode": "off"})
+        self.assertEqual(json.loads(config.path().read_text())["future"], value["future"])
+        value["future"] = "not a section"
+        config.path().write_text(json.dumps(value))
+        with self.assertRaises(config.ConfigError):
+            config.load()
+
     def test_disabled_typesafe_never_calls_router_even_with_active_flag(self):
         config.update("typesafe", {"mode": "off", "model": "fixture"})
         task = self.home / "task.json"

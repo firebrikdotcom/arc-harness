@@ -1,0 +1,42 @@
+{
+  "goal": "Let each session open an owner-only architecture view focused on the cards its worktree changed, planned or read; group worktrees under their repo's main folder, which owns the one map.",
+  "deliverables": [
+    "services/harness-signals/src/jobs/process.rs",
+    "scripts/harness-target.sh",
+    "scripts/board.py",
+    "scripts/harness",
+    "scripts/workflow_audit.py",
+    "tests/test_board.py",
+    "tests/board.sh",
+    "services/harness-audit/src/ui.rs",
+    "services/harness-audit/src/boards.rs",
+    "services/harness-audit/src/owner.rs",
+    "services/harness-audit/src/main.rs",
+    "services/harness-audit/resources/views/audit/projects.html",
+    "services/harness-audit/resources/views/audit/board.html",
+    "services/harness-audit/public/board-page.js",
+    "services/harness-audit/public/styles.css",
+    "tools/architecture-board/board.js",
+    "tools/architecture-board/board.css",
+    "tests/test_board_session.py",
+    "docs/setup.md"
+  ],
+  "constraints": [
+    "No new dependencies.",
+    "Do not edit scripts/hooks/, scripts/permit.*, schemas/denylist.default or .claude/settings.json.",
+    "A session view answers 404 to anyone but its owner: loopback requests count as the machine owner; tailnet requests are checked with tailscale whois.",
+    "Worktrees reuse their main folder's board; they are not mapped separately when the main folder has a board.",
+    "Defaults: read-only files count (weakest signal); a finished session keeps a read-only view until its worktree is gone; no sharing."
+  ],
+  "non_goals": [
+    {"description": "No sharing links or teammate access."},
+    {"description": "No change to the mapper prompt or board.json schema.", "paths": ["schemas/"]},
+    {"description": "No migration or deletion of existing per-worktree boards."}
+  ],
+  "acceptance": [
+    {"id": "board-cli", "criterion": "board.py list groups worktrees under their main folder, and focus returns changed, planned and read signals for a session", "command": ["bash", "tests/board.sh"]},
+    {"id": "audit-service", "criterion": "Session routes answer 404 to a non-owner and serve the owner", "command": ["cargo", "test", "--quiet", "--manifest-path", "services/harness-audit/Cargo.toml"]},
+    {"id": "dom", "criterion": "The sidebar shows main folders with worktree tasks beneath them, and the session view folds untouched cards", "command": ["python3", "-m", "unittest", "tests/test_board_session.py"]},
+    {"id": "signals", "criterion": "A stopped job's process is gone when stop returns", "command": ["cargo", "test", "--quiet", "--manifest-path", "services/harness-signals/Cargo.toml"]}
+  ]
+}

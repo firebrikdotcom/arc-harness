@@ -6,6 +6,7 @@ set -eu
 # board's heat layer. See docs/observability-heatmap.md.
 #
 #   scripts/signals-service.sh serve|once|check|prune   run the service (cargo builds it first)
+#   scripts/signals-service.sh jobs ...                  issue-agent jobs (docs/issue-agents.md)
 #   scripts/signals-service.sh login nightwatch          one-time browser sign-in for polling Nightwatch
 #   scripts/signals-service.sh tools nightwatch          list Nightwatch's MCP tools (diagnostics)
 #   scripts/signals-service.sh install|status     install or inspect the background service
@@ -89,12 +90,12 @@ fi
 
 [ "$#" -gt 0 ] || set -- serve
 case "$1" in
-  serve|once|check|prune|login|tools)
+  serve|once|check|prune|login|tools|jobs)
     cd "$SERVICE_ROOT"
     exec "$CARGO_BIN" run --quiet --release -- "$@"
     ;;
   *)
-    printf '%s\n' 'Usage: scripts/signals-service.sh [serve|once|check|prune|login nightwatch|tools nightwatch|install|status|render systemd|launchd]' >&2
+    printf '%s\n' 'Usage: scripts/signals-service.sh [serve|once|check|prune|jobs ...|login nightwatch|tools nightwatch|install|status|render systemd|launchd]' >&2
     exit 2
     ;;
 esac

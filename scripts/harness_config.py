@@ -119,8 +119,10 @@ def read_json(file: Path) -> dict[str, Any]:
 def validate(value: dict[str, Any]) -> dict[str, Any]:
     if type(value.get("version")) is not int or value["version"] != 1:
         raise ConfigError("configuration version must be 1")
-    allowed = {"version", *SECTIONS}
-    if any(k not in allowed and not k.startswith("_doc") for k in value):
+    # One config.json serves every checkout on the machine, so a section added by
+    # a newer version is kept as written (that version validates it) instead of
+    # making every harness command here fail.
+    if any(k != "version" and k not in SECTIONS and not k.startswith("_doc") and not isinstance(v, dict) for k, v in value.items()):
         raise ConfigError("unknown configuration section")
     fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence",
                            "context_request_limit", "read_only_commands", "read_only_tools"},
