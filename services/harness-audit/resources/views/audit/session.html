@@ -1,0 +1,7 @@
+{% extends "layouts/admin.html" %}{% block head %}<link rel="stylesheet" href="/public/board.css">{% endblock head %}{% block content %}
+<div class="board-page" data-board-page data-session data-target="{{ board_target }}" data-session-target="{{ session_target }}" data-session-key="{{ session_key }}" data-repo="{{ repo_id }}" data-csrf="{{ csrf_token }}">
+<div class="board-strip"><nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a href="/">Workbench</a></li><li><a href="/projects">Architecture</a></li><li><a href="/projects/{{ repo_id }}/board" data-session-repo>{{ repo_name }}</a></li><li><span aria-current="page" data-session-branch>{{ branch }}</span>{% if is_worktree %} <span class="tag tag--worktree">worktree</span>{% endif %}</li></ol></nav><p class="board-strip__status" role="status" aria-live="polite"><span class="state-dot state-dot--ready" data-board-dot aria-hidden="true"></span><span data-board-status>Loading the session…</span></p></div>
+<div class="board-host" data-board-root><div class="board-message"><p class="muted">Loading the board…</p></div></div>
+</div>
+<script src="/public/board.js"></script><script src="/public/board-page.js"></script>
+{% endblock content %}

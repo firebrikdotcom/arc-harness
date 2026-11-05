@@ -510,6 +510,16 @@ details[open] > .row-summary::after { content:"\2212"; }
 .project-table__root { font-size: .72rem; overflow-wrap: anywhere; }
 .project-table__action { width: 1%; text-align: right; }
 .project-table__action form { margin: 0; }
+.tag { display: inline-block; padding: .05rem .45rem; border: 1px solid var(--border-subtle); border-radius: 99px; font: 700 .6rem/1.5 var(--mono); letter-spacing: .03em; text-transform: uppercase; vertical-align: middle; white-space: nowrap; }
+.tag--main { color: var(--success); border-color: var(--success); }
+.tag--worktree { color: #2f6fd0; border-color: #2f6fd0; }
+.tag--phase { color: var(--ink-muted); }
+.tag--phase-build { color: var(--warning); border-color: var(--warning); }
+.tag--phase-review { color: #7a5bc0; border-color: #7a5bc0; }
+.live-dot { display: inline-block; width: .5rem; aspect-ratio: 1; border-radius: 50%; background: #3fae74; vertical-align: middle; margin-left: .2rem; }
+.project-table__wt .project-table__wt-name { padding-left: 1.75rem; }
+.project-table__task { display: block; margin-top: .15rem; color: var(--ink-muted); font-size: .72rem; font-weight: 500; }
+.project-table__note td { font-size: .72rem; padding-left: 1.75rem; }
 .button--quiet { min-height: 2rem; padding: .35rem .7rem; font-size: .68rem; }
 .workspace--board { display: flex; flex-direction: column; height: calc(100vh - 3.5rem); height: calc(100dvh - 3.5rem); min-height: 0; padding: 0; overflow: hidden; }
 .board-page { display: flex; flex: 1; flex-direction: column; min-height: 0; }

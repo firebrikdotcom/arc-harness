@@ -51,6 +51,25 @@ impl TargetId {
     }
 }
 
+/// A session key, checked against `^[A-Za-z0-9_-]{16,128}$` before it reaches the CLI
+/// (the CLI mints 32-character URL-safe tokens).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionKey(String);
+
+impl SessionKey {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let valid = (16..=128).contains(&raw.len())
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+        valid.then(|| Self(raw.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The per-target read commands the dashboard may run.
 #[derive(Debug, Clone, Copy)]
 pub enum Query {
@@ -175,6 +194,13 @@ impl Boards {
     /// Run one per-target query off the executor.
     pub async fn query(self: Arc<Self>, query: Query, id: TargetId) -> Outcome {
         web::block(move || self.run(&query.args(&id)))
+            .await
+            .unwrap_or_else(|error| Outcome::Failed(error.to_string()))
+    }
+
+    /// The focus document of one session. An unknown key (the CLI exits 3) is `NotMapped`.
+    pub async fn focus(self: Arc<Self>, id: TargetId, key: SessionKey) -> Outcome {
+        web::block(move || self.run(&["focus", "--target", id.as_str(), "--session", key.as_str()]))
             .await
             .unwrap_or_else(|error| Outcome::Failed(error.to_string()))
     }
@@ -326,7 +352,42 @@ fn sidebar_row(row: &Value) -> Option<Value> {
         "label": label,
         "mapped_at": row.get("mapped_at").and_then(Value::as_str),
         "cards": row.get("cards").and_then(Value::as_u64).unwrap_or(0),
+        "kind": Some(text("kind"))
+            .filter(|kind| matches!(*kind, "repo" | "worktree" | "dir"))
+            .unwrap_or("repo"),
+        "parent": row
+            .get("parent")
+            .and_then(Value::as_str)
+            .and_then(TargetId::parse)
+            .map(|parent| parent.as_str().to_owned()),
+        "branch": row.get("branch").and_then(Value::as_str).filter(|b| !b.is_empty()),
+        "session_key": row
+            .get("session_key")
+            .and_then(Value::as_str)
+            .and_then(SessionKey::parse)
+            .map(|key| key.as_str().to_owned()),
+        "owner": row.get("owner").and_then(crate::owner::Owner::from_json).map(|owner| {
+            serde_json::json!({"user": owner.user, "login": owner.login})
+        }),
+        "task": row.get("task").and_then(task_summary),
     }))
+}
+
+/// What the project list shows of a worktree's task.
+fn task_summary(task: &Value) -> Option<Value> {
+    let text = |key: &str| task.get(key).and_then(Value::as_str).unwrap_or_default();
+    let phase = Some(text("phase"))
+        .filter(|phase| matches!(*phase, "plan" | "build" | "review" | "done"))
+        .unwrap_or_default();
+    task.is_object().then(|| {
+        serde_json::json!({
+            "title": text("title"),
+            "phase": phase,
+            "run_id": text("run_id"),
+            "live": task.get("live").and_then(Value::as_bool).unwrap_or(false),
+            "last_active": text("last_active"),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -361,6 +422,43 @@ mod tests {
                 .unwrap();
         assert_eq!(row["state"], "mapping");
         assert_eq!(row["cards"], 3);
+    }
+
+    #[test]
+    fn session_keys_are_restricted_to_a_safe_alphabet() {
+        assert!(SessionKey::parse("Zk3_-Zk3_-Zk3_-Zk3_-Zk3_-Zk3_-ab").is_some());
+        for invalid in [
+            "",
+            "short",
+            "a/b/a/b/a/b/a/b/a/b/",
+            "../../../../../../..",
+            "abcdefghijklmnop qrst",
+            "-----------------\n",
+        ] {
+            assert!(SessionKey::parse(invalid).is_none(), "{invalid:?}");
+        }
+        assert!(SessionKey::parse(&"a".repeat(129)).is_none());
+    }
+
+    #[test]
+    fn sidebar_rows_carry_worktree_facts() {
+        let row = sidebar_row(&json!({
+            "id": "wt-1", "kind": "worktree", "parent": "main-1", "branch": "eng-1-x",
+            "session_key": "Zk3_-Zk3_-Zk3_-Zk3_-Zk3_-Zk3_-ab",
+            "owner": {"user": "savior", "login": null},
+            "task": {"title": "T", "phase": "weird", "run_id": "r", "live": true, "last_active": "2026-11-05T10:00:00Z"},
+        })).unwrap();
+        assert_eq!(row["kind"], "worktree");
+        assert_eq!(row["parent"], "main-1");
+        assert_eq!(row["owner"]["user"], "savior");
+        assert_eq!(row["task"]["phase"], "");
+        assert_eq!(row["task"]["live"], true);
+        let plain =
+            sidebar_row(&json!({"id": "p-1", "parent": "../x", "session_key": "x"})).unwrap();
+        assert_eq!(plain["kind"], "repo");
+        assert!(
+            plain["parent"].is_null() && plain["session_key"].is_null() && plain["task"].is_null()
+        );
     }
 
     #[test]

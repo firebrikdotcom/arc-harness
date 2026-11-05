@@ -2,7 +2,9 @@
    Data comes from board.json (see docs/architecture-board.md §3); nothing project-specific lives here.
    Usage: ArchitectureBoard.mount(rootElement, board, {status, agents, target}) -> {setOverlay, setStatus, setAgents, setJob, openJob}
    `agents` (dashboard only) turns on issue agents: {act(request) -> Promise, load(fingerprint), difitHref(fingerprint)}.
-   `target` names the project for per-browser state (which issues were read). */
+   `target` names the project for per-browser state (which issues were read).
+   `session` (dashboard session page only) turns on session focus: view modes, neighbours, a session panel; feed it with api.setFocus(focusDocument).
+   Without it the board renders exactly as a plain project board. */
 (function(){
 "use strict";
 const CW=320,RH=204,W=240,H=112,FP=20,FH=46,MINK=.2,MAXK=2.5;
@@ -50,12 +52,22 @@ const base=p=>p.replace(/\/$/,"").split("/").pop()+(p.endsWith("/")?"/":"");
 function mount(root,data,opts={}){
   const B=normalise(data);
   const kinds=B.edge_kinds;
+  const SESS=!!opts.session;
   root.classList.add("ab");
   try{const t=localStorage.getItem("ab-theme");if(t)root.dataset.theme=t}catch{}
   root.innerHTML=`
   <div class="ab-bar">
     <h1>${esc(B.title)} <span>· architecture board</span></h1>
     <span class="ab-status" data-r="status"><i></i><span></span></span>
+    ${SESS?`<div class="ab-sess" data-r="sess" role="toolbar" aria-label="Board view">
+      <div class="ab-seg" role="group" aria-label="What to show">
+        <button type="button" data-mode="focus" aria-pressed="true">This session</button>
+        <button type="button" data-mode="highlight" aria-pressed="false">Highlight on full map</button>
+        <button type="button" data-mode="full" aria-pressed="false">Whole system</button>
+      </div>
+      <label class="ab-nb"><input type="checkbox" data-r="nb"> Show neighbors</label>
+      <span class="ab-lock" data-r="lock">Only you can open this task</span>
+    </div>`:""}
     <div class="ab-search">
       <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input data-r="q" type="search" placeholder="Find a component or file  ( / )" autocomplete="off" aria-label="Find a component or file">
@@ -75,6 +87,7 @@ function mount(root,data,opts={}){
   <div class="ab-main">
     <div class="ab-vp" data-r="vp" tabindex="0" aria-label="Architecture board. Drag to pan, wheel or pinch to zoom.">
       <div class="ab-world" data-r="world"><svg class="ab-edges" data-r="edges" aria-hidden="true"><defs data-r="defs"></defs></svg></div>
+      ${SESS?'<div class="ab-rest" data-r="rest" hidden></div>':""}
       <div class="ab-hint">Drag to pan · wheel or pinch to zoom · click a card for details · <b>Esc</b> clears</div>
     </div>
     <aside class="ab-panel" data-r="panel" aria-live="polite"></aside>
@@ -86,6 +99,9 @@ function mount(root,data,opts={}){
   const nodeById=new Map(B.nodes.map(n=>[n.id,n]));
   const cardEl=new Map(),edgeEl=new Map(),labelEl=new Map();
   const hiddenKinds=new Set();
+  /* Session focus: which cards, frames and edges are drawn (all of them unless the focus view hides some). */
+  let curNodes=B.nodes,curFrames=B.frames,curEdges=B.edges,focus=null,vmode="focus",showNb=false,sessSig="";
+  const nodeHome=new Map(B.nodes.map(n=>[n.id,{col:n.col,row:n.row}])),frameHome=new Map(B.frames.map(f=>[f.id,{col:f.col,row:f.row,cols:f.cols,rows:f.rows}]));
   let view={x:0,y:0,k:1},selected=null,activeFlow=null,bounds={x:0,y:0,w:1,h:1};
   let overlay={edited:{},inScope:[],refreshing:[],unownedEdited:[],heat:null},lastOverlay={};
   let heatOn=true;try{heatOn=localStorage.getItem("ab-heat")!=="off"}catch{}
@@ -104,14 +120,14 @@ function mount(root,data,opts={}){
 
   function buildBoard(){
     let minX=Infinity,minY=Infinity,maxX=0,maxY=0;
-    for(const f of B.frames){
+    for(const f of curFrames){
       const r=frameRect(f),el=document.createElement("div");
       el.className="ab-frame"+(f.external?" external":"");el.style.cssText=`left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px;--c:${tone(f.tone)}`;
       el.innerHTML=`<header><h2>${esc(f.title)}</h2><span>${esc(f.tag)}</span></header>`;
       world.insertBefore(el,svg);
       minX=Math.min(minX,r.x);minY=Math.min(minY,r.y);maxX=Math.max(maxX,r.x+r.w);maxY=Math.max(maxY,r.y+r.h);
     }
-    for(const n of B.nodes){
+    for(const n of curNodes){
       const r=nodeRect(n),el=document.createElement("button");
       el.className="ab-card"+(n.external?" external":"");el.dataset.id=n.id;
       el.style.cssText=`left:${r.x}px;top:${r.y}px;--c:${colorOf(n.frame)}`;
@@ -124,7 +140,7 @@ function mount(root,data,opts={}){
     svg.setAttribute("width",maxX+40);svg.setAttribute("height",maxY+40);
     $("defs").innerHTML=Object.keys(kinds).map(k=>`<marker id="ab-arr-${esc(k)}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 9 5 0 9z" style="fill:${kindColor(k)}"/></marker>`).join("");
     routeEdges();
-    bounds=B.nodes.length||B.frames.length?{x:minX,y:minY,w:maxX-minX,h:maxY-minY}:{x:0,y:0,w:1,h:1};
+    bounds=curNodes.length||curFrames.length?{x:minX,y:minY,w:maxX-minX,h:maxY-minY}:{x:0,y:0,w:1,h:1};
   }
 
   /* Each edge leaves and enters through the card side facing the other card; several edges on one side are spread out. */
@@ -133,7 +149,7 @@ function mount(root,data,opts={}){
   function routeEdges(){
     const ports=new Map();
     const add=(key,e,end,other)=>{if(!ports.has(key))ports.set(key,[]);ports.get(key).push({e,end,other})};
-    for(const e of B.edges){
+    for(const e of curEdges){
       const a=nodeById.get(e.from),b=nodeById.get(e.to),s=side(a,b);
       /* Along a row or column with cards in between: leave and enter on the same outer side so the line arcs around them. */
       if(a.row===b.row&&Math.abs(a.col-b.col)>1){e.sa=e.sb="b";e.arc=true}
@@ -146,7 +162,7 @@ function mount(root,data,opts={}){
       list.sort((p,q)=>horiz?(p.other.col-q.other.col)||(p.other.row-q.other.row):(p.other.row-q.other.row)||(p.other.col-q.other.col));
       list.forEach((p,i)=>{p.e[p.end==="a"?"ta":"tb"]=(i+1)/(list.length+1)});
     }
-    for(const e of B.edges){
+    for(const e of curEdges){
       const a=anchor(nodeById.get(e.from),e.sa,e.ta),b=anchor(nodeById.get(e.to),e.sb,e.tb);
       const d=e.arc?62:Math.max(36,Math.min(150,Math.hypot(b.x-a.x,b.y-a.y)*.4));
       const c1={x:a.x+a.nx*d,y:a.y+a.ny*d},c2={x:b.x+b.nx*d,y:b.y+b.ny*d};
@@ -171,7 +187,7 @@ function mount(root,data,opts={}){
     let best=null;
     for(const t of [.5,.42,.58,.34,.66,.26,.74,.2,.8]){
       const m=bez(a,c1,c2,b,t);
-      if(B.nodes.some(n=>hits(m,nodeRect(n))))continue;
+      if(curNodes.some(n=>hits(m,nodeRect(n))))continue;
       if(placed.some(r=>hits(m,r)))continue;
       best=m;break;
     }
@@ -281,7 +297,7 @@ function mount(root,data,opts={}){
   world.addEventListener("click",e=>{if(e.detail!==0)return;const c=e.target.closest(".ab-card");if(c)select(c.dataset.id)});
 
   /* ---------- Selection and panel ---------- */
-  const neighbours=id=>B.edges.filter(e=>!hiddenKinds.has(e.kind)&&(e.from===id||e.to===id));
+  const neighbours=id=>B.edges.filter(e=>!hiddenKinds.has(e.kind)&&edgeEl.has(e.id)&&(e.from===id||e.to===id));
   function highlight(nodeIds,edgeIds){
     world.classList.toggle("dim",!!nodeIds);
     for(const [id,el] of cardEl){el.classList.toggle("lit",!!nodeIds&&nodeIds.has(id));el.classList.toggle("sel",id===selected)}
@@ -289,6 +305,7 @@ function mount(root,data,opts={}){
   }
   function select(id,keep){
     const n=nodeById.get(id);if(!n)return;
+    if(SESS&&!cardEl.has(id))setMode("highlight");
     if(!keep)dropIssue();
     selected=id;activeFlow=null;
     const es=neighbours(id),ns=new Set([id]);es.forEach(e=>{ns.add(e.from);ns.add(e.to)});
@@ -491,6 +508,7 @@ function mount(root,data,opts={}){
     panel.innerHTML=`<button class="ab-close" data-act="clear" aria-label="Close">×</button>
       <div class="kicker">${esc(f.title)}${f.tag?" · "+esc(f.tag):""}</div>
       <h3>${esc(n.title)}</h3><p class="sub">${esc(n.sub)}</p>
+      ${whyHtml(n)}
       ${live}
       ${problems}
       <p>${esc(n.summary)}</p>
@@ -521,7 +539,7 @@ function mount(root,data,opts={}){
       ${H.stale?`<p class="ab-note" style="margin-top:8px">Error data is stale: last updated ${esc(ago(H.generated_at))}. Is harness-signals running?</p>`:""}
       ${failing.map(([src,s])=>`<p class="ab-note" style="margin-top:8px"><b>${esc(src)}</b> failed: ${esc(s.error||"unknown error")}</p>`).join("")}`;
     }
-    panel.innerHTML=`<div class="kicker">How to read this board</div>
+    panel.innerHTML=`${sessionHtml()}<div class="kicker">How to read this board</div>
       <h3>${esc(B.overview.heading||B.title)}</h3>
       <p class="sub">Each card is a component; each coloured frame is where it lives. Positions are fixed: drag the board, not the cards.</p>
       ${B.overview.text?`<p>${esc(B.overview.text)}</p>`:""}
@@ -538,7 +556,7 @@ function mount(root,data,opts={}){
     if(activeFlow===id){clearSelection();return}
     dropIssue();selected=null;activeFlow=id;
     const fl=B.flows.find(f=>f.id===id),ns=new Set(),es=new Set();
-    for(const [a,b] of fl.steps){if(!nodeById.has(a)||!nodeById.has(b))continue;ns.add(a);ns.add(b);const e=B.edges.find(x=>(x.from===a&&x.to===b)||(x.from===b&&x.to===a));if(e)es.add(e.id)}
+    for(const [a,b] of fl.steps){if(!cardEl.has(a)||!cardEl.has(b))continue;ns.add(a);ns.add(b);const e=B.edges.find(x=>(x.from===a&&x.to===b)||(x.from===b&&x.to===a));if(e)es.add(e.id)}
     highlight(ns,es);renderOverview();openPanel();
     if(ns.size){const r=boxOf(ns);fitRect(r.x,r.y,r.w,r.h,1.1)}
   }
@@ -563,7 +581,7 @@ function mount(root,data,opts={}){
   panel.addEventListener("change",e=>{
     const k=e.target.dataset.kind;if(!k)return;
     e.target.checked?hiddenKinds.delete(k):hiddenKinds.add(k);
-    for(const ed of B.edges){const h=hiddenKinds.has(ed.kind);edgeEl.get(ed.id).classList.toggle("hidden",h);labelEl.get(ed.id).classList.toggle("hidden",h)}
+    for(const ed of curEdges){const h=hiddenKinds.has(ed.kind);edgeEl.get(ed.id).classList.toggle("hidden",h);labelEl.get(ed.id).classList.toggle("hidden",h)}
   });
   function copy(text){
     const done=()=>toast("Copied "+text);
@@ -597,7 +615,7 @@ function mount(root,data,opts={}){
 
   /* ---------- Toolbar, keyboard, theme ---------- */
   $("frames").innerHTML=B.frames.map(f=>`<button class="ab-chip" data-frame="${esc(f.id)}" style="--c:${tone(f.tone)}"><i></i>${esc(f.title)}</button>`).join("");
-  $("frames").addEventListener("click",e=>{const b=e.target.closest("[data-frame]");if(!b)return;const r=frameRect(frameById.get(b.dataset.frame));fitRect(r.x,r.y,r.w,r.h,1.2)});
+  $("frames").addEventListener("click",e=>{const b=e.target.closest("[data-frame]");if(!b)return;const fr=frameById.get(b.dataset.frame);if(!curFrames.includes(fr))return;const r=frameRect(fr);fitRect(r.x,r.y,r.w,r.h,1.2)});
   const zc=()=>{const b=visibleBox();return [b.w/2,b.y+b.h/2]};
   $("zin").onclick=()=>zoomAt(view.k*1.25,...zc());
   $("zout").onclick=()=>zoomAt(view.k/1.25,...zc());
@@ -815,11 +833,139 @@ function mount(root,data,opts={}){
     const el=$("status");el.className="ab-status "+(s.kind||"");el.querySelector("span").textContent=s.text||"";el.title=s.title||"";
   }
 
+  /* ---------- Session focus: which cards a session earns, and why ---------- */
+  const sigOf=id=>(focus&&focus.signals&&focus.signals[id])||null;
+  const list=a=>Array.isArray(a)?a:[];
+  const isCore=sg=>!!sg&&(list(sg.edited).length>0||list(sg.scope).length>0);
+  const focusIds=()=>focus&&focus.signals?Object.keys(focus.signals).filter(id=>nodeById.has(id)):[];
+  const coreIds=()=>new Set(focusIds().filter(id=>isCore(sigOf(id))));
+  /* Neighbours: one connection away from a changed or planned card, and not themselves in focus. */
+  function neighbourIds(){
+    const core=coreIds(),out=new Set();
+    for(const e of B.edges){
+      if(core.has(e.from)&&!sigOf(e.to))out.add(e.to);
+      if(core.has(e.to)&&!sigOf(e.from))out.add(e.from);
+    }
+    return out;
+  }
+  const levelOf=id=>sigOf(id)?"focus":showNb&&neighbourIds().has(id)?"ctx":"rest";
+  function applyLayout(){
+    for(const n of B.nodes){const h=nodeHome.get(n.id);n.col=h.col;n.row=h.row}
+    for(const f of B.frames)Object.assign(f,frameHome.get(f.id));
+    curNodes=B.nodes;curFrames=B.frames;curEdges=B.edges;
+    if(!focus||vmode!=="focus")return;
+    const ids=new Set(focusIds());if(showNb)for(const id of neighbourIds())ids.add(id);
+    curNodes=B.nodes.filter(n=>ids.has(n.id));
+    const num=(a,b)=>a-b,cols=[...new Set(curNodes.map(n=>nodeHome.get(n.id).col))].sort(num),rows=[...new Set(curNodes.map(n=>nodeHome.get(n.id).row))].sort(num);
+    for(const n of curNodes){const h=nodeHome.get(n.id);n.col=cols.indexOf(h.col);n.row=rows.indexOf(h.row)}
+    curFrames=B.frames.filter(f=>curNodes.some(n=>n.frame===f.id));
+    for(const f of curFrames){
+      const mine=curNodes.filter(n=>n.frame===f.id),c0=Math.min(...mine.map(n=>n.col)),r0=Math.min(...mine.map(n=>n.row));
+      f.col=c0;f.row=r0;f.cols=Math.max(...mine.map(n=>n.col))-c0+1;f.rows=Math.max(...mine.map(n=>n.row))-r0+1;
+    }
+    curEdges=B.edges.filter(e=>ids.has(e.from)&&ids.has(e.to));
+  }
+  function clearBoard(){
+    for(const el of [...world.children])if(el!==svg)el.remove();
+    for(const p of [...svg.querySelectorAll("path")])p.remove();
+    cardEl.clear();edgeEl.clear();labelEl.clear();placed.length=0;
+  }
+  const kindOfSignal=sg=>list(sg.edited).length?"edited":list(sg.scope).length?"scope":"touched";
+  function decorate(){
+    for(const [id,el] of cardEl){
+      const sg=sigOf(id),lv=vmode==="full"?"plain":levelOf(id);
+      el.classList.remove("lv-focus","lv-ctx","lv-rest","scope-only","touched-only");
+      if(vmode==="full"){ovBadges.delete(id);continue}
+      el.classList.add("lv-"+lv);
+      let pills="";
+      if(sg){
+        const k=kindOfSignal(sg);
+        if(k==="scope")el.classList.add("scope-only");else if(k==="touched")el.classList.add("touched-only");
+        if(list(sg.edited).length)pills+=`<span class="ab-badge" style="--b:var(--edited)">${list(sg.edited).length} changed</span>`;
+        if(list(sg.scope).length&&!list(sg.edited).length)pills+=`<span class="ab-badge" style="--b:var(--scope);color:#fff">planned</span>`;
+        if(list(sg.touched).length)pills+=`<span class="ab-badge" style="--b:var(--touched);color:#fff">read</span>`;
+      }else if(lv==="ctx")pills=`<span class="ab-badge" style="--b:var(--faint);color:#fff">neighbor</span>`;
+      ovBadges.set(id,pills);
+    }
+    paintBadges();
+    for(const e of curEdges){
+      const p=edgeEl.get(e.id),l=labelEl.get(e.id),a=!!sigOf(e.from),b=!!sigOf(e.to);
+      const hot=vmode!=="full"&&a&&b,faded=vmode!=="full"&&!a&&!b;
+      p.classList.toggle("hot",hot);p.classList.toggle("faded",faded);l.classList.toggle("faded",faded);
+    }
+    root.querySelectorAll(".ab-chip").forEach(c=>{c.hidden=!curFrames.includes(frameById.get(c.dataset.frame))});
+    root.querySelector(".ab-empty")&&root.querySelector(".ab-empty").remove();
+    if(!curNodes.length)vp.insertAdjacentHTML("beforeend",`<div class="ab-empty"><div><b>${focus?"Nothing on the map yet":"Loading the session"}</b>${focus?"This session has not changed, planned or read any file that a card owns.":""}</div></div>`);
+    const rest=$("rest"),hidden=B.nodes.length-curNodes.length;
+    rest.hidden=!(vmode==="focus"&&hidden>0);
+    rest.innerHTML=hidden>0?`${hidden} other part${hidden===1?"":"s"} of the system ${hidden===1?"is":"are"} folded away. <button type="button" data-act="unfold">Show them dimmed</button>`:"";
+    root.querySelectorAll("[data-mode]").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.mode===vmode)));
+    $("nb").disabled=vmode==="full";
+  }
+  function reselect(){
+    if(selected&&cardEl.has(selected)){
+      const es=neighbours(selected),ns=new Set([selected]);es.forEach(e=>{ns.add(e.from);ns.add(e.to)});
+      highlight(ns,new Set(es.map(e=>e.id)));renderNode(nodeById.get(selected),es);
+    }else{selected=null;activeFlow=null;highlight(null,null);renderOverview()}
+  }
+  function rebuild(refit){
+    applyLayout();clearBoard();buildBoard();decorate();reselect();
+    if(refit)fitAll(false);
+  }
+  function setMode(m){
+    if(!["focus","highlight","full"].includes(m)||m===vmode)return;
+    vmode=m;rebuild(true);
+  }
+  function sessionHtml(){
+    if(!SESS||!focus)return "";
+    const se=focus.session||{},ow=se.owner||{},phases=["plan","build","review"];
+    const at=phases.indexOf(se.phase),ph=phases.map((p,i)=>`<span class="${p===se.phase?"on":i<at||se.phase==="done"?"done":""}">${p}</span>`).join("");
+    const kv=[["Owner",esc(ow.login||ow.user||"you")],["Branch",se.branch?`<code>${esc(se.branch)}</code>${se.base?" → <code>"+esc(se.base)+"</code>":""}`:""],["Worktree",se.root?`<code>${esc(se.root)}</code>`:""],
+      ["Phase",se.phase?`<span class="ab-phase">${ph}</span>`:""],["Agent",se.live?'<span class="ab-live">live</span>':se.last_active?"last active "+esc(ago(se.last_active)):""]].filter(r=>r[1]);
+    return `<div class="kicker">Task in a worktree</div><h3>${esc(se.title||se.branch||"Session")}</h3>
+      <dl class="ab-kv">${kv.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>
+      ${focus.summary?`<h4>In plain words</h4><p class="ab-summary">${esc(focus.summary)}</p>`:""}
+      <h4>Legend</h4>
+      <div class="ab-key"><div><i style="background:var(--edited)"></i>Changed in this worktree</div><div><i style="background:var(--scope)"></i>Planned in the task, not changed yet</div><div><i style="background:var(--touched)"></i>Only read by the session</div><div><i class="ctx"></i>Neighbor, shown for context</div></div>
+      ${unmappedHtml()}`;
+  }
+  function unmappedHtml(){
+    const u=list(focus&&focus.unmapped);
+    return u.length?`<h4>Not on the map</h4><p class="ab-note">${u.length===1?"This file belongs":"These files belong"} to no card.</p><ul class="files">${u.map(p=>fileItem(p,"",false)).join("")}</ul>`:"";
+  }
+  function whyHtml(n){
+    if(!SESS||!focus)return "";
+    const sg=sigOf(n.id),group=(label,cls,files)=>list(files).length?`<div class="ab-why"><span class="ab-badge" style="--b:var(--${cls});${cls==="edited"?"":"color:#fff"}">${label}</span><ul class="files">${list(files).map(p=>fileItem(p,"",cls==="edited")).join("")}</ul></div>`:"";
+    let body;
+    if(sg)body=group("changed","edited",sg.edited)+group("planned in task","scope",sg.scope)+group("read only","touched",sg.touched);
+    else{
+      const via=[...new Set(B.edges.filter(e=>(e.from===n.id&&sigOf(e.to))||(e.to===n.id&&sigOf(e.from))).map(e=>nodeById.get(sigOf(e.to)&&e.from===n.id?e.to:e.from).title))];
+      body=via.length?`<p>Not touched. Shown because it connects to ${via.map(esc).join(", ")}.</p>`:`<p>Not touched by this session.</p>`;
+    }
+    return `<div class="ab-whybox"><h4>Why this card</h4>${body}</div>${unmappedHtml()}`;
+  }
+  function setFocus(doc){
+    const sig=JSON.stringify(doc||null);if(sig===sessSig)return;
+    const before=new Set(curNodes.map(n=>n.id));
+    sessSig=sig;focus=doc&&typeof doc==="object"?doc:null;
+    applyLayout();
+    const same=before.size===curNodes.length&&curNodes.every(n=>before.has(n.id));
+    // A new set of cards re-fits the board; otherwise the view stays where the reader left it.
+    clearBoard();buildBoard();decorate();reselect();
+    if(!same)fitAll(false);
+  }
+  if(SESS){
+    root.querySelector('[data-r="sess"]').addEventListener("click",e=>{const b=e.target.closest("[data-mode]");if(b)setMode(b.dataset.mode)});
+    $("nb").addEventListener("change",e=>{showNb=e.target.checked;rebuild(true)});
+    $("rest").addEventListener("pointerdown",e=>e.stopPropagation());
+    $("rest").addEventListener("click",e=>{if(e.target.closest('[data-act="unfold"]'))setMode("highlight")});
+  }
+
   buildBoard();renderOverview();fitAll(false);
   if(opts.status)setStatus(opts.status);
   if(!B.nodes.length)vp.insertAdjacentHTML("beforeend",`<div class="ab-empty"><div><b>No cards yet</b>The board for this project has not been mapped.</div></div>`);
   const start=decodeURIComponent(location.hash.slice(1));if(nodeById.has(start))select(start);
-  return {setOverlay,setStatus,select,fitAll,setAgents,setJob,openJob,watched:()=>[...openJobs]};
+  return {setOverlay,setStatus,select,fitAll,setAgents,setJob,openJob,setFocus,setMode,watched:()=>[...openJobs]};
 }
 
 /* Fill defaults and drop anything that would break rendering; the harness validates strictly before writing. */

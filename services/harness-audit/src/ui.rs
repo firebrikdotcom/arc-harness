@@ -5,7 +5,8 @@
 //! time, so the service needs no working directory or asset build to serve them.
 
 use crate::agents::{self, Action, Agents, Fingerprint, Reply};
-use crate::boards::{Boards, Outcome, Query, TargetId};
+use crate::boards::{Boards, Outcome, Query, SessionKey, TargetId};
+use crate::owner::{Owner, OwnerCheck};
 use crate::reports::{EventFilter, ReportStore};
 use crate::routes::read_report;
 use crate::summary as grouped;
@@ -89,6 +90,10 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
         name: TemplateName("audit/board.html"),
         source: include_str!("../resources/views/audit/board.html"),
+    },
+    TemplateDef {
+        name: TemplateName("audit/session.html"),
+        source: include_str!("../resources/views/audit/session.html"),
     },
     TemplateDef {
         name: TemplateName("audit/agents.html"),
@@ -2292,10 +2297,20 @@ async fn projects_page(
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
     let boards = Boards::for_request(&request);
-    let projects = boards.clone().list().await;
+    let rows = boards.clone().list().await;
     let removed = boards.removed().await;
+    let (groups, hidden_worktrees) = group_projects(&request, rows.as_slice()).await;
+    let shown: usize = groups
+        .iter()
+        .map(|group| {
+            group["worktrees"].as_array().map_or(0, Vec::len)
+                + usize::from(!group["main"].is_null())
+        })
+        .sum();
     let mut context = Context::new();
-    context.insert("projects", projects.as_slice());
+    context.insert("groups", &groups);
+    context.insert("project_count", &shown);
+    context.insert("hidden_worktrees", &hidden_worktrees);
     context.insert("removed_projects", &removed);
     render(
         &registry,
@@ -2310,6 +2325,180 @@ async fn projects_page(
         ],
     )
     .await
+}
+
+/// Main folders as top rows, each with the worktrees under it that this
+/// requester owns. Worktrees owned by someone else are counted, never listed.
+/// A worktree whose main folder is not listed stands on its own.
+async fn group_projects(request: &HttpRequest, rows: &[Value]) -> (Vec<Value>, usize) {
+    let check = OwnerCheck::for_request(request);
+    let requester = OwnerCheck::who(request);
+    let mut verdicts: std::collections::HashMap<Owner, bool> = std::collections::HashMap::new();
+    let mut hidden = 0;
+    let mut visible_worktrees: Vec<&Value> = Vec::new();
+    for row in rows.iter().filter(|row| row["kind"] == "worktree") {
+        let allowed = match row.get("owner").and_then(Owner::from_json) {
+            None => false,
+            Some(owner) => match verdicts.get(&owner) {
+                Some(verdict) => *verdict,
+                None => {
+                    let verdict = check.clone().allows(requester.clone(), owner.clone()).await;
+                    verdicts.insert(owner, verdict);
+                    verdict
+                }
+            },
+        };
+        if allowed {
+            visible_worktrees.push(row);
+        } else {
+            hidden += 1;
+        }
+    }
+    let mains: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["kind"] != "worktree")
+        .collect();
+    let mut groups: Vec<Value> = mains
+        .iter()
+        .map(|main| {
+            let children: Vec<&&Value> = visible_worktrees
+                .iter()
+                .filter(|wt| wt["parent"] == main["id"])
+                .collect();
+            json!({"main": main, "worktrees": children})
+        })
+        .collect();
+    for wt in visible_worktrees
+        .iter()
+        .filter(|wt| !mains.iter().any(|main| wt["parent"] == main["id"]))
+    {
+        groups.push(json!({"main": null, "worktrees": [wt]}));
+    }
+    (groups, hidden)
+}
+
+/// The one answer for an unknown session and for a session that is not the
+/// requester's, so a 404 never says which it was.
+fn session_not_found(json_body: bool) -> HttpResponse {
+    if json_body {
+        no_store_json(StatusCode::NOT_FOUND, &json!({"error": "not found"}))
+    } else {
+        HttpResponse::NotFound()
+            .insert_header(("Cache-Control", "no-store"))
+            .content_type("text/plain; charset=utf-8")
+            .body("Not found.")
+    }
+}
+
+/// The focus document of a session, only when the requester owns it.
+async fn owned_focus(
+    request: &HttpRequest,
+    raw_id: &str,
+    raw_key: &str,
+) -> Result<(TargetId, SessionKey, Value), Option<String>> {
+    let (Some(id), Some(key)) = (TargetId::parse(raw_id), SessionKey::parse(raw_key)) else {
+        return Err(None);
+    };
+    match Boards::for_request(request)
+        .focus(id.clone(), key.clone())
+        .await
+    {
+        Outcome::Json(document) => {
+            let owner = document
+                .get("session")
+                .and_then(|session| session.get("owner"))
+                .and_then(Owner::from_json);
+            let allowed = match owner {
+                Some(owner) => {
+                    OwnerCheck::for_request(request)
+                        .allows(OwnerCheck::who(request), owner)
+                        .await
+                }
+                None => false,
+            };
+            if allowed {
+                Ok((id, key, document))
+            } else {
+                Err(None)
+            }
+        }
+        Outcome::NotMapped | Outcome::UnknownTarget => Err(None),
+        Outcome::Failed(error) => Err(Some(error)),
+    }
+}
+
+/// `GET /projects/{id}/sessions/{key}`: one session's focused board. Only the owner gets a page.
+#[get("/projects/{id}/sessions/{key}")]
+async fn session_page(
+    request: HttpRequest,
+    session: Session,
+    path: web::Path<(String, String)>,
+    registry: web::Data<UiRegistry>,
+) -> impl Responder {
+    let (raw_id, raw_key) = path.into_inner();
+    let (id, key, focus) = match owned_focus(&request, &raw_id, &raw_key).await {
+        Ok(found) => found,
+        Err(None) => return session_not_found(false),
+        Err(Some(error)) => {
+            tracing::warn!(%error, "session focus failed");
+            return HttpResponse::BadGateway()
+                .content_type("text/plain; charset=utf-8")
+                .body("The board CLI failed.");
+        }
+    };
+    let text = |value: &Value, key: &str| value[key].as_str().map(str::to_owned);
+    let board_target = text(&focus, "board_target")
+        .and_then(|raw| TargetId::parse(&raw))
+        .unwrap_or_else(|| id.clone());
+    let repo_id = text(&focus, "parent")
+        .and_then(|raw| TargetId::parse(&raw))
+        .unwrap_or_else(|| board_target.clone());
+    let rows = Boards::for_request(&request).list().await;
+    let repo_name = rows
+        .iter()
+        .find(|row| row["id"] == repo_id.as_str())
+        .and_then(|row| row["name"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| display_name(repo_id.as_str()).to_owned());
+    let branch = text(&focus["session"], "branch").unwrap_or_default();
+    let mut context = Context::new();
+    context.insert("session_target", id.as_str());
+    context.insert("session_key", key.as_str());
+    context.insert("board_target", board_target.as_str());
+    context.insert("repo_id", repo_id.as_str());
+    context.insert("repo_name", &repo_name);
+    context.insert("branch", &branch);
+    context.insert("is_worktree", &!focus["parent"].is_null());
+    context.insert("workspace_class", "workspace--board");
+    render(
+        &registry,
+        &request,
+        &session,
+        "audit/session.html",
+        &format!("{branch} · {repo_name}"),
+        context,
+        Vec::new(),
+    )
+    .await
+}
+
+/// `GET /projects/{id}/sessions/{key}/focus.json`: the focus document, owner only.
+#[get("/projects/{id}/sessions/{key}/focus.json")]
+async fn session_focus_json(
+    request: HttpRequest,
+    path: web::Path<(String, String)>,
+) -> impl Responder {
+    let (raw_id, raw_key) = path.into_inner();
+    match owned_focus(&request, &raw_id, &raw_key).await {
+        Ok((_, _, document)) => no_store_json(StatusCode::OK, &document),
+        Err(None) => session_not_found(true),
+        Err(Some(error)) => {
+            tracing::warn!(%error, "session focus failed");
+            no_store_json(
+                StatusCode::BAD_GATEWAY,
+                &json!({"error": "the board CLI failed"}),
+            )
+        }
+    }
 }
 
 /// `GET /projects/{id}/board`: the page shell; `board-page.js` loads the data.
@@ -2835,6 +3024,8 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .service(remove_project)
         .service(restore_project)
         .service(board_page)
+        .service(session_page)
+        .service(session_focus_json)
         .service(board_json)
         .service(board_state_json)
         .service(board_overlay_json)
@@ -4535,6 +4726,154 @@ mod tests {
 
         let response = test::call_service(&app, post("/projects/nope/remove", &token)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    const KEY_MINE: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_THEIRS: &str = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+    /// A stand-in board CLI: two worktree sessions, one owned by `me`, one by `other`.
+    fn session_cli(directory: &std::path::Path) -> std::path::PathBuf {
+        let script = directory.join("board.py");
+        std::fs::write(
+            &script,
+            format!(
+                r#"import json, sys
+args = sys.argv
+command = args[args.index("--db-root") + 2]
+rows = [
+  {{"id": "repo-1", "name": "Repo", "root": "/r", "kind": "repo", "state": "ready", "label": "ready", "cards": 4}},
+  {{"id": "wt-mine", "name": "wt-mine", "root": "/r-mine", "kind": "worktree", "parent": "repo-1", "branch": "eng-1-mine",
+    "state": "ready", "label": "ready", "session_key": "{mine}", "owner": {{"user": "me", "login": None}},
+    "task": {{"title": "My <task>", "phase": "build", "run_id": "r1", "live": True, "last_active": "2026-11-05T10:00:00Z"}}}},
+  {{"id": "wt-theirs", "name": "wt-theirs", "root": "/r-theirs", "kind": "worktree", "parent": "repo-1", "branch": "eng-2-theirs",
+    "state": "ready", "label": "ready", "session_key": "{theirs}", "owner": {{"user": "other", "login": None}}, "task": None}},
+]
+if command == "list":
+    print(json.dumps(rows))
+elif command == "focus":
+    key = args[args.index("--session") + 1]
+    owners = {{"{mine}": ("wt-mine", "me", "eng-1-mine"), "{theirs}": ("wt-theirs", "other", "eng-2-theirs")}}
+    if key not in owners or args[args.index("--target") + 1] != owners[key][0]:
+        print(json.dumps({{"error": "unknown session"}}))
+        sys.exit(3)
+    target, user, branch = owners[key]
+    print(json.dumps({{"target": target, "board_target": "repo-1", "parent": "repo-1",
+        "session": {{"key": key, "owner": {{"user": user, "login": None}}, "branch": branch, "base": "main", "phase": "build", "live": True}},
+        "signals": {{}}, "unmapped": [], "summary": "SECRET-SUMMARY"}}))
+else:
+    sys.exit(2)
+"#,
+                mine = KEY_MINE,
+                theirs = KEY_THEIRS
+            ),
+        )
+        .unwrap();
+        script
+    }
+
+    #[actix_web::test]
+    async fn session_routes_serve_the_owner_and_answer_404_to_everyone_else() {
+        use actix_web::{test, App};
+        let directory =
+            std::env::temp_dir().join(format!("audit-sessions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let boards = std::sync::Arc::new(Boards::new(session_cli(&directory), &directory));
+        let database = directory.join("audit.sqlite");
+        let store = ReportStore::open(database.to_str().unwrap()).unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(page_registry())
+                .app_data(web::Data::from(boards))
+                .app_data(web::Data::new(crate::owner::tests::check("me", None)))
+                .app_data(web::Data::new(store))
+                .configure(config),
+        )
+        .await;
+        let loopback: std::net::SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let stranger: std::net::SocketAddr = "192.168.1.9:50000".parse().unwrap();
+        macro_rules! get_from {
+            ($peer:expr, $uri:expr) => {{
+                let response = test::call_service(
+                    &app,
+                    test::TestRequest::get()
+                        .uri($uri)
+                        .peer_addr($peer)
+                        .to_request(),
+                )
+                .await;
+                let status = response.status();
+                let body = actix_web::body::to_bytes(response.into_body())
+                    .await
+                    .unwrap();
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }};
+        }
+
+        // The owner gets the page and the document.
+        let page = format!("/projects/wt-mine/sessions/{KEY_MINE}");
+        let (status, html) = get_from!(loopback, &page);
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&format!("data-session-key=\"{KEY_MINE}\"")));
+        assert!(html.contains("data-target=\"repo-1\""));
+        assert!(html.contains("href=\"/projects/repo-1/board\""));
+        assert!(html.contains("eng-1-mine"));
+        let (status, body) = get_from!(loopback, &format!("{page}/focus.json"));
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("SECRET-SUMMARY"));
+
+        // An unknown key, someone else's session, a stranger's address and a malformed key all look the same.
+        let unknown = format!("/projects/wt-mine/sessions/{}", "C".repeat(32));
+        let theirs = format!("/projects/wt-theirs/sessions/{KEY_THEIRS}");
+        let (status, unknown_page) = get_from!(loopback, &unknown);
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, unknown_json) = get_from!(loopback, &format!("{unknown}/focus.json"));
+        for (peer, uri, json) in [
+            (loopback, theirs.clone(), false),
+            (loopback, format!("{theirs}/focus.json"), true),
+            (stranger, page.clone(), false),
+            (stranger, format!("{page}/focus.json"), true),
+            (
+                loopback,
+                "/projects/wt-mine/sessions/short".to_owned(),
+                false,
+            ),
+            (
+                loopback,
+                "/projects/..%2Fx/sessions/short/focus.json".to_owned(),
+                true,
+            ),
+        ] {
+            let (status, body) = get_from!(peer, &uri);
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(
+                body,
+                if json {
+                    unknown_json.clone()
+                } else {
+                    unknown_page.clone()
+                },
+                "{uri}"
+            );
+            assert!(!body.contains("SECRET-SUMMARY") && !body.contains("eng-2-theirs"));
+        }
+
+        // The project list shows only the requester's worktrees, and counts the others.
+        let (status, html) = get_from!(loopback, "/projects");
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains("tag--main"));
+        assert!(
+            html.find("tag--main").unwrap() < html.find("eng-1-mine").unwrap(),
+            "a worktree is listed under its main folder"
+        );
+        assert!(html.contains("tag--worktree"));
+        assert!(html.contains(&format!("href=\"/projects/wt-mine/sessions/{KEY_MINE}\"")));
+        assert!(html.contains("eng-1-mine") && html.contains("My &lt;task&gt;"));
+        assert!(!html.contains("eng-2-theirs") && !html.contains(KEY_THEIRS));
+        assert!(html.contains("1 worktree started by someone else is not listed."));
+        let (_, html) = get_from!(stranger, "/projects");
+        assert!(!html.contains("eng-1-mine") && !html.contains(KEY_MINE));
+        assert!(html.contains("2 worktrees started by someone else are not listed."));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[actix_web::test]

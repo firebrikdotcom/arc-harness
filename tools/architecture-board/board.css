@@ -271,3 +271,36 @@
   .ab-jfoot{flex-direction:column;align-items:stretch}
   .ab-jbtn,.ab-jcopy,.ab-tabs button{min-height:36px}
 }
+
+/* Session focus (dashboard session page only): view modes, neighbours, why-this-card. */
+.ab{--touched:#2e9a62}
+.ab[data-theme="dark"]{--touched:#5cc78f}
+.ab-chip[hidden]{display:none}
+.ab-sess{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;min-width:0}
+.ab-seg{display:inline-flex;border:1px solid var(--card-line);border-radius:8px;overflow:hidden;background:var(--card)}
+.ab-seg button{border:0;background:none;padding:5px 11px;font-size:12.5px;white-space:nowrap}
+.ab-seg button[aria-pressed="true"]{background:var(--accent);color:var(--card)}
+.ab-seg button:focus-visible,.ab-nb:focus-within{outline:2px solid var(--focus);outline-offset:2px}
+.ab-nb{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted)}
+.ab-nb input:disabled+*,.ab-nb input:disabled{opacity:.5}
+.ab-lock{font-size:12px;color:var(--muted)}
+.ab-card.lv-focus{border-width:2px;border-color:var(--edited)}
+.ab-card.lv-focus.scope-only{border-color:var(--scope)}
+.ab-card.lv-focus.touched-only{border-color:var(--touched)}
+.ab-card.lv-ctx{border-style:dashed;box-shadow:none}
+.ab-card.lv-rest{opacity:.28}
+.ab .ab-edges path.edge.hot{stroke-width:2.4}
+.ab path.edge.faded,.ab-elabel.faded{opacity:.12}
+.ab-rest{position:absolute;left:12px;bottom:40px;max-width:calc(100% - 24px);z-index:6;padding:7px 12px;border:1px dashed var(--card-line);border-radius:9px;font-size:12px;color:var(--muted);background:var(--panel)}
+.ab-rest button{border:0;background:none;color:var(--accent);padding:0;text-decoration:underline}
+.ab-kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 10px;font-size:12.5px;margin:8px 0 0}
+.ab-kv dt{color:var(--faint)}.ab-kv dd{margin:0;overflow-wrap:anywhere}
+.ab-phase{display:inline-flex;gap:3px}
+.ab-phase span{padding:0 6px;border-radius:4px;background:var(--chip);font-size:11px;color:var(--faint)}
+.ab-phase span.on{background:var(--accent);color:var(--card)}.ab-phase span.done{color:var(--ink)}
+.ab-live{color:var(--touched)}.ab-live::before{content:"● "}
+.ab-key{display:grid;gap:4px;font-size:12px;color:var(--muted)}
+.ab-key i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.ab-key i.ctx{border:1px dashed var(--faint)}
+.ab-whybox{border-top:1px solid var(--panel-line);margin-top:10px}
+.ab-why{margin-bottom:8px}

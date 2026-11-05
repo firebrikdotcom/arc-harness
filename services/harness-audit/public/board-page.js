@@ -13,6 +13,8 @@
   const csrf = page.dataset.csrf || '';
   const POLL_MS = 5000;
   const FINGERPRINT = /^[0-9a-f]{64}$/;
+  const sessionKey = page.dataset.sessionKey || '';
+  const sessionBase = sessionKey ? '/projects/' + encodeURIComponent(page.dataset.sessionTarget || '') + '/sessions/' + encodeURIComponent(sessionKey) : '';
   const deepLink = (new URLSearchParams(location.search).get('job') || '').toLowerCase();
   let deepLinkDone = !FINGERPRINT.test(deepLink);
   let api = null;
@@ -209,6 +211,44 @@
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, fallback);
     else fallback();
   });
+
+  /* The session page: the owner's focus document, then the shared map; focus refreshes every 10 s. */
+  async function sessionMain() {
+    const FOCUS_MS = 10000;
+    let sessionApi = null;
+    const say = (kind, text) => { statusText.textContent = text; statusDot.className = 'state-dot state-dot--' + kind; };
+    const stop = (title, text) => { host.innerHTML = `<div class="board-message"><h2>${esc(title)}</h2><p>${esc(text)}</p></div>`; };
+    async function refresh() {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const response = await getJson(sessionBase + '/focus.json');
+        if (response.status === 404) { say('failed', 'This session is not available'); return; }
+        if (!response.ok || !response.body) throw new Error('HTTP ' + response.status);
+        if (sessionApi) sessionApi.setFocus(response.body);
+        const session = response.body.session || {};
+        say(session.live ? 'ready' : 'none', session.live ? 'Live · refreshing every 10 s' : 'Not running now · last read ' + ago(session.last_active));
+      } catch (error) {
+        say('failed', 'Session unavailable · retrying');
+      }
+    }
+    const first = await getJson(sessionBase + '/focus.json');
+    if (!first.ok || !first.body) { stop('Not found', 'This session is not available to you.'); say('failed', 'Not found'); return; }
+    const map = await getJson(base + '/board.json');
+    if (map.status === 404) { stop('The map is not ready', 'The main folder has no architecture board yet. The harness maps it in the background at the next session start in it.'); say('none', 'No map yet'); return; }
+    if (!map.ok || !map.body) { stop('The board could not be loaded', 'board.json returned HTTP ' + map.status); say('failed', 'Board unavailable'); return; }
+    host.replaceChildren();
+    const canvas = document.createElement('div');
+    canvas.className = 'board-canvas';
+    host.appendChild(canvas);
+    sessionApi = window.ArchitectureBoard.mount(canvas, map.body, {session: true, target: id});
+    sessionApi.setFocus(first.body);
+    const session = first.body.session || {};
+    say(session.live ? 'ready' : 'none', session.live ? 'Live · refreshing every 10 s' : 'Not running now · last read ' + ago(session.last_active));
+    setInterval(refresh, FOCUS_MS);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
+  }
+
+  if (sessionKey) { sessionMain(); return; }
 
   (async () => {
     try {

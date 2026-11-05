@@ -14,6 +14,7 @@ mod agents;
 mod boards;
 mod domain;
 mod orchestration;
+mod owner;
 mod reports;
 mod routes;
 mod settings;
@@ -48,6 +49,7 @@ fn builder(reports: reports::ReportStore) -> ArcAppBuilder {
         .register_aggregate::<AuditEventAggregate>()
         .register_data(Arc::new(reports))
         .register_data(boards::Boards::shared())
+        .register_data(owner::OwnerCheck::shared())
         .register_data(agents::Agents::shared())
         .register_ui_host(ui::host())
         .register_ui(ui::contribution())
