@@ -8,6 +8,8 @@ import subprocess
 import uuid
 import re
 import sys
+
+import permit
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -196,6 +198,15 @@ def begin(project, features, evidence_dir):
     ignored = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "--no-index", str(path)], check=False)
     if ignored.returncode != 0:
         raise Invalid("evidence directory must be ignored by git")
+    rules_path, rules = permit.load_rules(root)
+    # Check every ancestor too: rules such as .env can match a directory itself
+    # without matching a child created underneath it.
+    for candidate in [path, *path.parents]:
+        if candidate == root:
+            break
+        denial = permit.judge_target(str(candidate), (str(root),), "directory", root, rules, rules_path)
+        if denial:
+            raise Invalid(f"evidence directory is protected: {denial}")
     path.mkdir(mode=0o700)
     attempt = uuid.uuid4().hex
     receipt = {"attempt": attempt, "run": run, "project": str(root), "tree": tree,
@@ -223,6 +234,8 @@ def record(project, attempt, report_path):
     artifacts = validate_report(report, receipt)
     if datetime.fromisoformat(report["started_at"].replace("Z", "+00:00")) < datetime.fromisoformat(receipt["created_at"]):
         raise Invalid("report predates attempt")
+    if datetime.fromisoformat(report["ended_at"].replace("Z", "+00:00")) > datetime.now(timezone.utc):
+        raise Invalid("report ends in the future")
     data.update(report=report, artifacts=artifacts)
     tmp = path.with_suffix(".tmp-" + uuid.uuid4().hex)
     tmp.write_text(json.dumps(data) + "\n")
@@ -271,7 +284,7 @@ def review_summary(project):
                 lines.append(f"  artifact: {safe(receipt['evidence_dir'])}/{safe(artifact['path'])} sha256={safe(artifact['sha256'])}")
         except (Invalid, OSError, ValueError, KeyError, TypeError):
             lines.append(f"Attempt {path.stem}: invalid or unavailable evidence")
-    return "\n".join(lines) if lines else "No behavioral evidence recorded for this run."
+    return "\n".join(lines[:200]) if lines else "No behavioral evidence recorded for this run."
 
 
 def main():

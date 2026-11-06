@@ -3,6 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 spec = importlib.util.spec_from_file_location("behavior", Path(__file__).resolve().parents[1] / "scripts/behavior_verification.py")
 behavior = importlib.util.module_from_spec(spec)
@@ -153,6 +155,12 @@ class AttemptTests(unittest.TestCase):
         (self.root / "guide.md").write_text("changed")
         with self.assertRaises(behavior.Invalid):
             behavior.check(self.root, ["example"])
+
+    def test_rejects_denied_evidence_directories(self):
+        (self.root / ".harness-denylist").write_text("path ^evidence/private(/|$)\n")
+        (self.root / "evidence/private").mkdir()
+        with self.assertRaisesRegex(behavior.Invalid, "protected"):
+            behavior.begin(self.root, ["example"], str(self.root / "evidence/private/attempt"))
 
     def test_rejects_unowned_and_unignored_directories(self):
         with self.assertRaises(behavior.Invalid):
