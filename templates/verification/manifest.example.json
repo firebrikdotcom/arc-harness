@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "enabled": true,
+  "guide": "docs/verification/README.md",
+  "index": "docs/verification/features/README.md",
+  "features": [{"id": "example", "document": "docs/verification/features/example.md", "references": [{"path": "docs/requirements.md", "id": "REQ-1"}]}]
+}
