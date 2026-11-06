@@ -22,7 +22,11 @@
           "line": {"type": ["integer", "null"], "minimum": 1},
           "claim": {"type": "string", "maxLength": 4000},
           "evidence": {"type": "string", "maxLength": 4000},
-          "status": {"enum": ["open", "fixed", "wontfix"], "default": "open"}
+          "status": {"enum": ["open", "fixed", "wontfix"], "default": "open"},
+          "evidence_kind": {"enum": ["reproduced", "source_analysis", "unverified_concern"]},
+          "repro_command": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "expected": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "actual": {"type": "string", "minLength": 1, "maxLength": 4000}
         }
       }
     },

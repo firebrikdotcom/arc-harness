@@ -251,9 +251,32 @@ def check(project, features):
     return "current passing evidence: " + ", ".join(features)
 
 
+def review_summary(project):
+    """Summarize bounded, current-run evidence without executing project actions."""
+    root, run, run_dir, tree, definition, _ = identity(project)
+    lines = []
+    def safe(value):
+        return "".join(c if c.isprintable() else "?" for c in str(value))[:1024]
+    for path in sorted((run_dir / "behavior").glob("*.json"))[:100]:
+        try:
+            data = load_json(path)
+            receipt, report = data["receipt"], data["report"]
+            if (receipt["run"], receipt["project"]) != (run, str(root)):
+                continue
+            stale = receipt["tree"] != tree or receipt["definition"] != definition
+            intact = validate_report(report, receipt) == data.get("artifacts")
+            state = "stale" if stale else ("intact" if intact else "modified")
+            lines.append(f"Attempt {receipt['attempt']}: {report['outcome']} ({state}); features: {', '.join(receipt['features'])}")
+            for artifact in data.get("artifacts", [])[:100]:
+                lines.append(f"  artifact: {safe(receipt['evidence_dir'])}/{safe(artifact['path'])} sha256={safe(artifact['sha256'])}")
+        except (Invalid, OSError, ValueError, KeyError, TypeError):
+            lines.append(f"Attempt {path.stem}: invalid or unavailable evidence")
+    return "\n".join(lines) if lines else "No behavioral evidence recorded for this run."
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["validate", "begin", "record", "check"])
+    parser.add_argument("action", choices=["validate", "begin", "record", "check", "review-summary"])
     parser.add_argument("--project", required=True)
     parser.add_argument("--features", nargs="+")
     parser.add_argument("--feature", action="append", dest="feature")
@@ -264,6 +287,8 @@ def main():
     try:
         if args.action == "validate":
             result = validate(args.project)
+        elif args.action == "review-summary":
+            result = review_summary(args.project)
         elif args.action == "begin":
             if not args.evidence_dir:
                 raise Invalid("begin requires --evidence-dir")

@@ -159,3 +159,18 @@ class AttemptTests(unittest.TestCase):
             behavior.begin(self.root, ["example"], str(self.root / "unignored"))
         with self.assertRaises(behavior.Invalid):
             behavior.begin(self.root, ["example"], str(self.root / "evidence"))
+
+class ReviewFindingTests(unittest.TestCase):
+    def test_optional_evidence_labels_and_legacy_findings(self):
+        spec = importlib.util.spec_from_file_location("review_findings", Path(__file__).resolve().parents[1] / "scripts/review_findings.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        finding = {"severity": "minor", "file": "x", "claim": "claim", "evidence": "evidence"}
+        data = {"tree_hash": "abc", "reviewer": "independent", "verdict": "approve", "findings": [finding]}
+        module.validate(data)
+        for kind in ("reproduced", "source_analysis", "unverified_concern"):
+            finding["evidence_kind"] = kind
+            module.validate(data)
+        finding["evidence_kind"] = "invented"
+        with self.assertRaises(ValueError):
+            module.validate(data)

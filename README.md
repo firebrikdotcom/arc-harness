@@ -242,3 +242,5 @@ The optional [Rust updater](docs/updater.md) keeps each computer on a CI-passing
 published version without pulling into its editable checkout. It provides
 operation-safe activation, status, rollback and a development override. Install
 with `python3 scripts/install-updater.py` after publishing and verifying CI.
+
+Behavioral verification is optional per project; see [the operating guide](docs/behavior-verification.md).

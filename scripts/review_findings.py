@@ -70,6 +70,11 @@ def validate(data) -> list[dict]:
         text(item.get("file"), where + ".file", 1000)
         text(item.get("claim"), where + ".claim")
         text(item.get("evidence"), where + ".evidence")
+        if "evidence_kind" in item and item["evidence_kind"] not in ("reproduced", "source_analysis", "unverified_concern"):
+            raise ValueError(where + ".evidence_kind must be reproduced, source_analysis, or unverified_concern")
+        for field in ("repro_command", "expected", "actual"):
+            if field in item:
+                text(item[field], where + "." + field)
         if item.get("line") is not None and (type(item["line"]) is not int or item["line"] < 1):
             raise ValueError(where + ".line must be a positive integer or null")
     answers = data.get("criteria", [])

@@ -99,3 +99,5 @@ scripts/harness review done                 # needs an approval of the current f
 - Wait for the user's explicit approval of the current part before presenting or unlocking the next part. Silence, elapsed time, feedback, requested edits, or navigation are not approval. Revise the current part and obtain approval when changes are requested.
 - Record which part and revision was approved, preserve decisions, and keep later parts gated across reloads and agent handoffs. Approval of a plan part authorizes only that review progression, not implementation or deployment.
 <!-- shared-rule:lavish-sequential-review:end -->
+
+Behavioral verification is optional per project; see [the operating guide](docs/behavior-verification.md).

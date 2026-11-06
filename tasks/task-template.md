@@ -20,3 +20,5 @@ Relevant docs, files, prior decisions. Harness root and target project root when
 ## Rollback
 
 How to revert safely, including data or migration steps.
+
+Behavioral verification is optional per project; see [the operating guide](../docs/behavior-verification.md).

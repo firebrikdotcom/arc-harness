@@ -247,6 +247,13 @@ packet="$records_dir/review-packet.md"
   else
     printf '%s\n' "No task contract was recorded for this run (harness contract set FILE)."
   fi
+  if [ -f "$PROJECT_ROOT/.harness-verification.json" ] && [ -n "$run_id" ]; then
+    behavior_summary=$(HARNESS_BEHAVIOR_TARGET="$PROJECT_ROOT" HARNESS_BEHAVIOR_RUN_ID="$run_id" \
+      HARNESS_BEHAVIOR_RUN_DIR="$HARNESS_DB_ROOT/runs/$run_id" \
+      python3 "$SCRIPT_DIR/behavior_verification.py" review-summary --project "$PROJECT_ROOT" 2>/dev/null) && {
+      printf '%s\n' "## Behavioral evidence" "$behavior_summary" ""
+    }
+  fi
   printf '\n%s\n%s\n' "## Verification (exit $verify_status)" '```'
   cat "$WORK/verify.log"
   printf '%s\n\n%s\n%s\n' '```' "## Diff" '```diff'

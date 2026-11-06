@@ -57,3 +57,5 @@ Follow existing patterns first. If the repository already has a style, test patt
 - Record meaningful steps with `scripts/harness step --note`.
 - For cross-project orchestration, keep target-specific registries, task notes, run logs, generated indexes, and project documents in ignored local database state such as `.harness-db/`.
 - Do not track project database records in this template repo unless they are intentionally generalized into reusable template documentation.
+
+Behavioral verification is optional per project; see [the operating guide](../docs/behavior-verification.md).

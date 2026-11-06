@@ -170,3 +170,5 @@ See `services/harness-audit/README.md` for restart and rebuild semantics.
   bounded read kinds/statuses; decision records carry the context version and
   interaction origin through the existing private receipt/advice and audit paths.
   Grouped reports separate context generations without reclassifying history.
+
+Behavioral verification is optional per project; see [the operating guide](../docs/behavior-verification.md).

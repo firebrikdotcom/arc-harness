@@ -1003,3 +1003,5 @@ third Jev call. Counts survive changed commands, context and plan revisions.
 Confidence below 70% immediately falls back to the agent; configuration can
 raise this threshold but cannot lower the 70% floor. See
 [two context requests](jev-checkpoints.md#two-context-requests-then-the-agent-decides).
+
+Behavioral verification is optional per project; see [the operating guide](../docs/behavior-verification.md).
