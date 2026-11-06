@@ -151,7 +151,7 @@ pub fn summarize(rows: &[Value]) -> Value {
     ];
     let workers = collapse(&ordered, "orchestration.worker_", "worker_id", &fields);
     let runs = collapse(&ordered, "orchestration.run_", "run_id", &fields);
-    let mut decisions = collapse(
+    let decisions = collapse(
         &ordered,
         "orchestration.decision_",
         "decision_id",
@@ -174,6 +174,54 @@ pub fn summarize(rows: &[Value]) -> Value {
             "cost_usd",
         ],
     );
+    summarize_entities(ordered.len(), runs, workers, decisions)
+}
+
+pub(crate) fn entity_key(row: &Value) -> Option<(String, String, String)> {
+    let kind = row["event_type"].as_str()?;
+    let (category, id_key) = if kind.starts_with("orchestration.worker_") {
+        ("worker", "worker_id")
+    } else if kind.starts_with("orchestration.run_") {
+        ("run", "run_id")
+    } else if kind.starts_with("orchestration.decision_") {
+        ("decision", "decision_id")
+    } else {
+        return None;
+    };
+    let p = &row["payload"];
+    let id = p[id_key]
+        .as_str()
+        .or_else(|| {
+            if category == "decision" {
+                p["id"].as_str()
+            } else {
+                None
+            }
+        })
+        .filter(|id| !id.is_empty())?;
+    let scope = p["run_id"]
+        .as_str()
+        .or(p["parent_session_id"].as_str())
+        .unwrap_or("");
+    Some((category.into(), scope.into(), id.into()))
+}
+
+pub(crate) fn entity(rows: &[Value], category: &str) -> Option<Value> {
+    let summary = summarize(rows);
+    let key = match category {
+        "worker" => "workers",
+        "run" => "runs",
+        _ => "decisions",
+    };
+    summary[key].as_array()?.first().cloned()
+}
+
+pub(crate) fn summarize_entities(
+    events: usize,
+    runs: Vec<Value>,
+    workers: Vec<Value>,
+    mut decisions: Vec<Value>,
+) -> Value {
     for decision in &mut decisions {
         let usage = decision
             .as_object_mut()
@@ -233,7 +281,7 @@ pub fn summarize(rows: &[Value]) -> Value {
         active += delta;
         peak = peak.max(active);
     }
-    json!({"events":ordered.len(),"runs":runs,"task_measurements":task_measurements,"workers":workers,"worker_groups":grouped,"worker_count":workers.len(),"statuses":statuses(&workers),"decisions":decisions,"decision_count":decisions.len(),"decision_tokens":metric(&decisions,"total_tokens"),"decision_cost_usd":metric(&decisions,"cost_usd"),"decision_latency_ms":metric(&decisions,"latency_ms"),"decision_duration_ms":metric(&decisions,"duration_ms"),"cache_hits":decisions.iter().filter(|d| d["cache_hit"] == true).count(),"cache_samples":decisions.iter().filter(|d| d["cache_hit"].is_boolean()).count(),"peak_concurrency":if intervals.is_empty(){None}else{Some(peak)},"concurrency_samples":intervals.len()/2})
+    json!({"events":events,"runs":runs,"task_measurements":task_measurements,"workers":workers,"worker_groups":grouped,"worker_count":workers.len(),"statuses":statuses(&workers),"decisions":decisions,"decision_count":decisions.len(),"decision_tokens":metric(&decisions,"total_tokens"),"decision_cost_usd":metric(&decisions,"cost_usd"),"decision_latency_ms":metric(&decisions,"latency_ms"),"decision_duration_ms":metric(&decisions,"duration_ms"),"cache_hits":decisions.iter().filter(|d| d["cache_hit"] == true).count(),"cache_samples":decisions.iter().filter(|d| d["cache_hit"].is_boolean()).count(),"peak_concurrency":if intervals.is_empty(){None}else{Some(peak)},"concurrency_samples":intervals.len()/2})
 }
 fn statuses(items: &[Value]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();

@@ -475,8 +475,6 @@ dependencies = [
 [[package]]
 name = "arc-core"
 version = "0.8.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f73b319407de8bfda082e3e1647f337c2c1f0d8b835a868db2ec7e0a911b4b05"
 dependencies = [
  "async-trait",
  "hmac",

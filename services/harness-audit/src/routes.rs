@@ -22,7 +22,7 @@ where
     F: FnOnce(&ReportStore) -> anyhow::Result<T> + Send + 'static,
 {
     web::block(move || {
-        store.refresh()?;
+        while store.refresh()? == crate::reports::CATCH_UP_BATCH {}
         read(&store)
     })
     .await?

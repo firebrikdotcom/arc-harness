@@ -43,6 +43,8 @@ struct Group {
     recommendations: BTreeMap<String, usize>,
     pairs: BTreeMap<String, usize>,
     confidence: Vec<f64>,
+    confidence_count: usize,
+    confidence_sum: f64,
     latency: Vec<f64>,
     tokens: i64,
     token_samples: usize,
@@ -54,9 +56,9 @@ struct Group {
 /// Each measurement has its own coverage; absent values never become measured zero.
 #[derive(Default)]
 struct Usage {
-    input: Vec<i64>,
-    output: Vec<i64>,
-    costs: Vec<f64>,
+    input: (i64, usize, bool),
+    output: (i64, usize, bool),
+    costs: (f64, usize),
     estimated: usize,
     reported: usize,
 }
@@ -68,7 +70,12 @@ impl Usage {
             ("jev_output_tokens", &mut self.output),
         ] {
             if let Some(n) = p.get(key).and_then(Value::as_i64).filter(|n| *n >= 0) {
-                values.push(n);
+                values.1 += 1;
+                if let Some(total) = values.0.checked_add(n) {
+                    values.0 = total;
+                } else {
+                    values.2 = true;
+                }
             }
         }
         if let Some(n) = p
@@ -76,7 +83,8 @@ impl Usage {
             .and_then(Value::as_f64)
             .filter(|n| n.is_finite() && *n >= 0.0)
         {
-            self.costs.push(n);
+            self.costs.0 += n;
+            self.costs.1 += 1;
             match p.get("jev_cost_source").and_then(Value::as_str) {
                 Some("list_price_estimate") => self.estimated += 1,
                 Some("provider") => self.reported += 1,
@@ -86,16 +94,10 @@ impl Usage {
     }
 
     fn render(&self) -> Value {
-        let tokens = |values: &[i64]| {
-            json!({
-                "total": if values.is_empty() { None } else { values.iter().try_fold(0_i64, |a, b| a.checked_add(*b)) },
-                "samples": values.len(),
-            })
-        };
-        let cost = self.costs.iter().sum::<f64>();
+        let tokens = |values: &(i64, usize, bool)| json!({"total": if values.1 == 0 || values.2 { None } else { Some(values.0) }, "samples": values.1});
         json!({"input_tokens": tokens(&self.input), "output_tokens": tokens(&self.output),
-            "cost_usd": {"total": if self.costs.is_empty() || !cost.is_finite() { None } else { Some(cost) },
-                "samples": self.costs.len(), "estimated_samples": self.estimated, "provider_samples": self.reported}})
+            "cost_usd": {"total": if self.costs.1 == 0 || !self.costs.0.is_finite() { None } else { Some(self.costs.0) },
+                "samples": self.costs.1, "estimated_samples": self.estimated, "provider_samples": self.reported}})
     }
 }
 
@@ -293,6 +295,204 @@ fn top_pairs(pairs: &BTreeMap<String, usize>) -> Vec<Value> {
         .collect()
 }
 
+fn record_group(
+    group: &mut Group,
+    payload: &Map<String, Value>,
+    kind: Kind,
+    outcome: Option<&str>,
+    store_samples: bool,
+) {
+    group.count += 1;
+    group.usage.record(payload);
+
+    let recommendation = text(payload, kind.recommendation_field());
+    if let Some(recommendation) = &recommendation {
+        *group
+            .recommendations
+            .entry(recommendation.clone())
+            .or_default() += 1;
+    }
+    if let (Kind::Checkpoint, Some(recommendation), Some(baseline)) =
+        (kind, &recommendation, text(payload, "baseline_action"))
+    {
+        group.comparable += 1;
+        group.agreed += usize::from(*recommendation == baseline);
+        *group
+            .pairs
+            .entry(format!("{baseline}->{recommendation}"))
+            .or_default() += 1;
+    }
+    if let Some(confidence) = payload
+        .get("recommendation_confidence")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+    {
+        if store_samples {
+            group.confidence.push(confidence);
+        }
+        group.confidence_count += 1;
+        group.confidence_sum += confidence;
+    }
+    if let Some(latency) = payload.get("jev_latency_ms").and_then(Value::as_f64) {
+        if store_samples {
+            group.latency.push(latency);
+        }
+    }
+    match total_tokens(payload) {
+        Ok(Some(tokens)) => {
+            group.token_samples += 1;
+            if let Some(total) = group.tokens.checked_add(tokens) {
+                group.tokens = total;
+            } else {
+                group.token_overflowed = true;
+            }
+        }
+        Err(()) => {
+            group.token_samples += 1;
+            group.token_overflowed = true;
+            group.token_overflowed_samples += 1;
+        }
+        Ok(None) => {}
+    }
+    if let Some(outcome) = outcome {
+        *group.outcomes.entry(outcome.to_string()).or_default() += 1;
+        if outcome != "unknown" {
+            group.labeled += 1;
+            group.correct += usize::from(outcome == "correct");
+        }
+    }
+}
+
+fn render_group(
+    key: GroupKey,
+    mut group: Group,
+    kind: Kind,
+    confidence_median: Option<f64>,
+    latency_median: Option<f64>,
+) -> Value {
+    let mut entry = Map::new();
+    for (field, value) in kind.key_fields().iter().zip(key) {
+        entry.insert((*field).to_string(), json!(value));
+    }
+    entry.insert("count".into(), json!(group.count));
+    entry.insert(
+        "interaction_label".into(),
+        json!(origin_label(
+            entry.get("interaction_origin").and_then(Value::as_str)
+        )),
+    );
+    entry.insert("labeled".into(), json!(group.labeled));
+    entry.insert("unlabeled".into(), json!(group.count - group.labeled));
+    entry.insert("outcomes".into(), json!(group.outcomes));
+    entry.insert("correct".into(), json!(group.correct));
+    entry.insert(
+        "accuracy".into(),
+        json!(ratio(group.correct, group.labeled)),
+    );
+    entry.insert("recommendations".into(), json!(group.recommendations));
+    entry.insert("confidence_samples".into(), json!(group.confidence_count));
+    entry.insert(
+        "mean_confidence".into(),
+        json!(if group.confidence_count == 0 {
+            None
+        } else {
+            Some(group.confidence_sum / group.confidence_count as f64)
+        }),
+    );
+    if matches!(kind, Kind::Checkpoint) {
+        entry.insert("comparable".into(), json!(group.comparable));
+        entry.insert(
+            "agreement_rate".into(),
+            json!(ratio(group.agreed, group.comparable)),
+        );
+        entry.insert("top_pairs".into(), json!(top_pairs(&group.pairs)));
+        entry.insert(
+            "median_confidence".into(),
+            json!(confidence_median.or_else(|| median(&mut group.confidence))),
+        );
+    }
+    entry.insert(
+        "median_latency_ms".into(),
+        json!(latency_median.or_else(|| median(&mut group.latency))),
+    );
+    let mut tokens = json!({"total": group.tokens, "samples": group.token_samples});
+    if group.token_overflowed {
+        tokens["total"] = Value::Null;
+        tokens["overflowed"] = json!(true);
+        tokens["overflowed_samples"] = json!(group.token_overflowed_samples);
+    }
+    entry.insert("tokens".into(), tokens);
+    for (key, value) in group.usage.render().as_object().unwrap() {
+        entry.insert(key.clone(), value.clone());
+    }
+    Value::Object(entry)
+}
+
+#[derive(Default)]
+pub(crate) struct StreamingCheckpoint {
+    group: Group,
+    excluded: usize,
+}
+impl StreamingCheckpoint {
+    pub(crate) fn record(&mut self, row: &Value, outcome: Option<&str>, fixtures: bool) {
+        let Some(payload) = payload(row) else { return };
+        if !fixtures && is_fixture(payload) {
+            self.excluded += 1;
+            return;
+        }
+        record_group(&mut self.group, payload, Kind::Checkpoint, outcome, false);
+    }
+    pub(crate) fn finish(
+        self,
+        key: Vec<Option<String>>,
+        fixtures: bool,
+        confidence: Option<f64>,
+        latency: Option<f64>,
+    ) -> Value {
+        let groups = if self.group.count == 0 {
+            vec![]
+        } else {
+            vec![render_group(
+                key,
+                self.group,
+                Kind::Checkpoint,
+                confidence,
+                latency,
+            )]
+        };
+        json!({"include_fixtures": fixtures, "excluded_fixture_events": self.excluded, "groups": groups})
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct StreamingRoute {
+    group: Group,
+    excluded: usize,
+}
+impl StreamingRoute {
+    pub(crate) fn record(&mut self, row: &Value, outcome: Option<&str>, fixtures: bool) {
+        let Some(payload) = payload(row) else { return };
+        if !fixtures && is_fixture(payload) {
+            self.excluded += 1;
+            return;
+        }
+        record_group(&mut self.group, payload, Kind::Route, outcome, false);
+    }
+    pub(crate) fn finish(
+        self,
+        key: Vec<Option<String>>,
+        fixtures: bool,
+        latency: Option<f64>,
+    ) -> Value {
+        let groups = if self.group.count == 0 {
+            vec![]
+        } else {
+            vec![render_group(key, self.group, Kind::Route, None, latency)]
+        };
+        json!({"include_fixtures": fixtures, "excluded_fixture_events": self.excluded, "groups": groups})
+    }
+}
+
 fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
     let outcomes = latest_outcomes(rows, kind);
     let mut groups = BTreeMap::<GroupKey, Group>::new();
@@ -314,119 +514,21 @@ fn summarize(rows: &[Value], kind: Kind, include_fixtures: bool) -> Value {
             .map(|field| text(payload, field))
             .collect();
         let group = groups.entry(key).or_default();
-        group.count += 1;
-        group.usage.record(payload);
-
-        let recommendation = text(payload, kind.recommendation_field());
-        if let Some(recommendation) = &recommendation {
-            *group
-                .recommendations
-                .entry(recommendation.clone())
-                .or_default() += 1;
-        }
-        if let (Kind::Checkpoint, Some(recommendation), Some(baseline)) =
-            (kind, &recommendation, text(payload, "baseline_action"))
-        {
-            group.comparable += 1;
-            group.agreed += usize::from(*recommendation == baseline);
-            *group
-                .pairs
-                .entry(format!("{baseline}->{recommendation}"))
-                .or_default() += 1;
-        }
-        if let Some(confidence) = payload
-            .get("recommendation_confidence")
-            .and_then(Value::as_f64)
-            .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        {
-            group.confidence.push(confidence);
-        }
-        if let Some(latency) = payload.get("jev_latency_ms").and_then(Value::as_f64) {
-            group.latency.push(latency);
-        }
-        match total_tokens(payload) {
-            Ok(Some(tokens)) => {
-                group.token_samples += 1;
-                if let Some(total) = group.tokens.checked_add(tokens) {
-                    group.tokens = total;
-                } else {
-                    group.token_overflowed = true;
-                }
-            }
-            Err(()) => {
-                group.token_samples += 1;
-                group.token_overflowed = true;
-                group.token_overflowed_samples += 1;
-            }
-            Ok(None) => {}
-        }
-        if let Some(outcome) = text(payload, "call_id").and_then(|call| outcomes.get(&call)) {
-            *group.outcomes.entry(outcome.clone()).or_default() += 1;
-            if outcome != "unknown" {
-                group.labeled += 1;
-                group.correct += usize::from(outcome == "correct");
-            }
-        }
+        record_group(
+            group,
+            payload,
+            kind,
+            text(payload, "call_id")
+                .and_then(|call| outcomes.get(&call))
+                .map(String::as_str),
+            true,
+        );
     }
 
     let mut rendered = Vec::with_capacity(groups.len());
-    for (key, mut group) in groups {
-        let mut entry = Map::new();
-        for (field, value) in kind.key_fields().iter().zip(key) {
-            entry.insert((*field).to_string(), json!(value));
-        }
-        entry.insert("count".into(), json!(group.count));
-        entry.insert(
-            "interaction_label".into(),
-            json!(origin_label(
-                entry.get("interaction_origin").and_then(Value::as_str)
-            )),
-        );
-        entry.insert("labeled".into(), json!(group.labeled));
-        entry.insert("unlabeled".into(), json!(group.count - group.labeled));
-        entry.insert("outcomes".into(), json!(group.outcomes));
-        entry.insert("correct".into(), json!(group.correct));
-        entry.insert(
-            "accuracy".into(),
-            json!(ratio(group.correct, group.labeled)),
-        );
-        entry.insert("recommendations".into(), json!(group.recommendations));
-        entry.insert("confidence_samples".into(), json!(group.confidence.len()));
-        entry.insert(
-            "mean_confidence".into(),
-            json!(if group.confidence.is_empty() {
-                None
-            } else {
-                Some(group.confidence.iter().sum::<f64>() / group.confidence.len() as f64)
-            }),
-        );
-        if matches!(kind, Kind::Checkpoint) {
-            entry.insert("comparable".into(), json!(group.comparable));
-            entry.insert(
-                "agreement_rate".into(),
-                json!(ratio(group.agreed, group.comparable)),
-            );
-            entry.insert("top_pairs".into(), json!(top_pairs(&group.pairs)));
-            entry.insert(
-                "median_confidence".into(),
-                json!(median(&mut group.confidence)),
-            );
-        }
-        entry.insert(
-            "median_latency_ms".into(),
-            json!(median(&mut group.latency)),
-        );
-        let mut tokens = json!({"total": group.tokens, "samples": group.token_samples});
-        if group.token_overflowed {
-            tokens["total"] = Value::Null;
-            tokens["overflowed"] = json!(true);
-            tokens["overflowed_samples"] = json!(group.token_overflowed_samples);
-        }
-        entry.insert("tokens".into(), tokens);
-        for (key, value) in group.usage.render().as_object().unwrap() {
-            entry.insert(key.clone(), value.clone());
-        }
-        rendered.push(Value::Object(entry));
+    for (key, group) in groups {
+        let entry = render_group(key, group, kind, None, None);
+        rendered.push(entry);
     }
     json!({
         "include_fixtures": include_fixtures,

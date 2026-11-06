@@ -1,9 +1,16 @@
-# Progress
+# Audit RAM repair handoff
 
-Current task: resolve todo #55 (license documentation).
+- **Goal:** Fix the harness audit service's excessive RAM use with durable, incremental projections and bounded report reads, preserving existing audit events, dashboards, filters, time zones and settings. Work directly on `master` in `the repository root`; the user requested a commit and explicitly asked the current agent to stop spawning agents.
+- **State:** HEAD `95bb184`; substantial audit changes are uncommitted in `services/harness-audit/`, including an untracked `vendor/` Arc patch. Inspect and preserve the diff; it is incomplete and has not been independently reviewed, deployed, memory-tested or committed. Preserve unrelated `.playwright-mcp/`, `tasks/delegation-worker-review.json`, `tasks/pstack-integration-plan.md`, and the original progress saved in `progress-prior-audit-handoff.md`.
+- **Evidence:** The running `harness-audit` process had approximately 5 GiB resident and 1–1.5 GiB swapped, with repeated dashboard catch-up database-lock errors. This is observational evidence, not a proven allocation profile. `cargo test --manifest-path services/harness-audit/Cargo.toml --locked -q` passed 97 tests after the latest test fix; these tests do not establish bounded RAM or complete correctness.
+- **What is partially implemented:** bounded source batches and chart reads; database-side directory pagination; persisted checkpoint, route, orchestration and session facts; partial timeline and prompt paging; a vendored Arc change to skip startup event scanning when no projector is registered. All need integrated correctness and performance review.
+- **Critical remaining work:** `services/harness-audit/src/reports.rs` `ReportStore::refresh` replays each affected session into `workflow.rs` `SessionReducer`, which retains the full event, task and prompt histories and materializes full reports and timelines. Replace this with disk-backed, incremental, bounded projections and page readers, including filtered timelines and flow views. Also inspect `refresh_session_entities`, `refresh_orchestration`, `sessions`, and report/chart serialization for remaining unbounded allocations. Preserve correct late events, replacements, prompt chunk assembly, chronological order, tool pairing, task histories, verdicts, signal grouping and timezone behavior. Do not claim input pagination alone bounds reducer memory.
+- **Next:** Inspect the existing changes and tests, finish the actual reducer/read-path redesign, and add equivalence, replacement, restart and large-history memory/lock regressions. Run the audit suite and `~/.local/bin/harness-runtime exec scripts/verify.sh --project the repository root`; run the harness build/review gates, obtain the required independent review and user approval, then make the requested commit. Measure actual memory and page behavior on the running service only after a safe, verified build, preserving the machine database and secrets. Report any CI limitation honestly; no push was requested.
+- **Harness:** Run `20261106T033158Z-3746566` was active in build phase at handoff; check `~/.local/bin/harness status` and obey its gates. Use `~/.local/bin/harness` and the managed runtime for harness commands. No .harness-handoff file was found during this task.
 
-- Preserved existing README links to LICENSE-MIT and LICENSE-APACHE.
-- Added bundled artwork notices: upstream Omarchy MIT text, Arc provenance and modifications, dependency license guidance. Linked notices from README and removed resolved #55.
-- Validation: `harness-runtime exec scripts/verify.sh --project .`, `git diff --check`, then GitHub CI on the pushed commit. Do not claim delivery until all pass; current run evidence is available through `harness brief`.
-- Next: #56, historical personal paths and private run notes; no history rewrite authorized in this task.
-- Preserved unrelated untracked files. No worktrees created.
+## Current repair continuation
+
+- Working directly on master; no branch, worktree or additional agent created. Active harness run: `20261106T043419Z-3976791`.
+- Removed simultaneous owned copies of all four timeline orderings, the full prompt-body lookup clone, and cloning of histories discarded by directory compaction. These reduce transient allocation; they do not make the reducer bounded.
+- All three allocation changes passed all 97 audit tests; `git diff --check` also passed. The running unchanged service still measured 5,113,344 KiB RSS, so no deployed memory improvement is claimed.
+- Remaining critical work is unchanged: disk-backed bounded reducer and complete bounded readers, memory regression measurement, required verification and independent review before commit.

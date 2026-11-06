@@ -35,7 +35,9 @@ case "$host" in
   ''|localhost|localhost.*) ;;
   *)
     if [ "${#host}" -ge 4 ]; then
-      own=$(git grep -nIwiF "$host" -- . ':!tests/personal-paths.sh' ':!LICENSE*' || true)
+      # Preserve upstream crate attribution without exempting vendor source or paths.
+      own=$(git grep -nIwiF "$host" -- . ':!tests/personal-paths.sh' ':!LICENSE*' \
+        | grep -vE '^services/harness-audit/vendor/arc-core/(Cargo\.toml:[0-9]+:authors = |LICENSE-MIT:[0-9]+:Copyright )' || true)
       found=$(printf '%s\n%s\n' "$found" "$own")
     fi
     ;;

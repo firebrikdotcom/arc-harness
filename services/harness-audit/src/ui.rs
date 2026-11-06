@@ -464,15 +464,16 @@ async fn workbench(
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
     let include_fixtures = query.include_fixtures;
-    let (checkpoints, routes, recent, rows, event_count, session_count) =
+    let timezone = client_timezone(&request);
+    let (checkpoints, routes, recent, days, event_count, session_count) =
         match read_report(store, move |store| {
             Ok((
                 store.checkpoint_groups(include_fixtures)?,
                 store.route_groups(include_fixtures)?,
                 store.events(&EventFilter::default(), RECENT_EVENTS)?,
-                store.checkpoint_rows()?,
+                store.checkpoint_days(include_fixtures, timezone)?,
                 store.event_counts()?.values().sum::<usize>(),
-                store.sessions()?.len(),
+                store.session_count()?,
             ))
         })
         .await
@@ -481,11 +482,7 @@ async fn workbench(
             Err(error) => return unavailable(error),
         };
     let recent: Vec<Value> = recent.iter().map(event_row).collect();
-    let chart = confidence_chart(&local_confidence_days(
-        &rows,
-        query.include_fixtures,
-        client_timezone(&request),
-    ));
+    let chart = confidence_chart(&days);
     let mut context = Context::new();
     context.insert("totals", &totals(event_count, &checkpoints));
     context.insert("confidence_chart", &chart);
@@ -759,13 +756,142 @@ fn checks_rank(session: &Value) -> u8 {
     }
 }
 
-fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
+fn directory_matches(s: &Value, query: &WorkflowQuery) -> bool {
     let clean = |value: &Option<String>| value.as_deref().unwrap_or("").trim().to_owned();
     let terms: Vec<String> = clean(&query.q)
         .split_whitespace()
         .map(str::to_lowercase)
         .collect();
     let path = clean(&query.path).to_lowercase();
+    let since = clean(&query.since);
+    let until = clean(&query.until);
+    let timezone: Tz = query
+        .timezone
+        .as_deref()
+        .and_then(|zone| zone.parse().ok())
+        .unwrap_or(chrono_tz::UTC);
+    let errors = (!since.is_empty() && !valid_date(&since))
+        || (!until.is_empty() && !valid_date(&until))
+        || (!since.is_empty() && !until.is_empty() && since > until);
+
+    if errors {
+        return false;
+    }
+    if [
+        (&query.agent, "agent"),
+        (&query.model, "model"),
+        (&query.status, "status"),
+    ]
+    .iter()
+    .any(|(wanted, key)| {
+        !clean(wanted).is_empty() && s[*key].as_str().unwrap_or("") != clean(wanted)
+    }) {
+        return false;
+    }
+    if !s["cwd"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains(&path)
+    {
+        return false;
+    }
+    if !clean(&query.phase).is_empty()
+        && !s["phases"].as_array().is_some_and(|phases| {
+            phases
+                .iter()
+                .any(|phase| phase.as_str() == Some(clean(&query.phase).as_str()))
+        })
+        && !s["tasks"].as_object().is_some_and(|tasks| {
+            tasks
+                .values()
+                .any(|t| t["phase"].as_str().unwrap_or("") == clean(&query.phase))
+        })
+    {
+        return false;
+    }
+    let verdict = &s["verdict"];
+    match clean(&query.attention).as_str() {
+        "needs" if verdict["attention"].as_array().is_none_or(Vec::is_empty) => return false,
+        "unfinished" if verdict["unfinished"] != true => return false,
+        "verified" if verdict["verified"] != true => return false,
+        _ => {}
+    }
+    let prompt_count = s["prompt_count"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or_else(|| s["prompts"].as_array().map_or(0, Vec::len));
+    if (clean(&query.prompts) == "recorded" && prompt_count == 0)
+        || (clean(&query.prompts) == "none" && prompt_count > 0)
+    {
+        return false;
+    }
+    let date = local_activity_date(s["last_at"].as_str().unwrap_or(""), timezone);
+    if (!since.is_empty() && date.as_str() < since.as_str())
+        || (!until.is_empty() && date.as_str() > until.as_str())
+    {
+        return false;
+    }
+    let mut words = Vec::new();
+    for key in [
+        "label",
+        "session_name",
+        "herdr_tab",
+        "agent",
+        "model",
+        "cwd",
+        "status",
+        "session_id",
+        "initial_goal",
+    ] {
+        if let Some(text) = s[key].as_str() {
+            words.push(text);
+        }
+    }
+    for task in s["tasks"]
+        .as_object()
+        .into_iter()
+        .flat_map(|tasks| tasks.values())
+    {
+        for key in [
+            "name",
+            "description",
+            "outcome",
+            "status",
+            "phase",
+            "task_id",
+        ] {
+            if let Some(text) = task[key].as_str() {
+                words.push(text);
+            }
+        }
+    }
+    for prompt in s["prompts"].as_array().into_iter().flatten() {
+        if let Some(text) = prompt["text"].as_str() {
+            words.push(text);
+        }
+    }
+    for event in s["events"].as_array().into_iter().flatten() {
+        for key in ["name", "description", "outcome", "selected", "tool_name"] {
+            if let Some(text) = event["payload"][key].as_str() {
+                words.push(text);
+            }
+        }
+        for option in event["payload"]["options"].as_array().into_iter().flatten() {
+            if let Some(text) = option.as_str() {
+                words.push(text);
+            }
+        }
+    }
+    let searchable = s["search_text"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| words.join(" ").to_lowercase());
+    terms.iter().all(|term| searchable.contains(term))
+}
+
+fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
+    let clean = |value: &Option<String>| value.as_deref().unwrap_or("").trim().to_owned();
     let since = clean(&query.since);
     let until = clean(&query.until);
     let timezone: Tz = query
@@ -801,124 +927,7 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
     facets.insert("phase".into(), json!(phases));
     let mut matching: Vec<Value> = sessions
         .iter()
-        .filter(|s| {
-            if !errors.is_empty() {
-                return false;
-            }
-            if [
-                (&query.agent, "agent"),
-                (&query.model, "model"),
-                (&query.status, "status"),
-            ]
-            .iter()
-            .any(|(wanted, key)| {
-                !clean(wanted).is_empty() && s[*key].as_str().unwrap_or("") != clean(wanted)
-            }) {
-                return false;
-            }
-            if !s["cwd"]
-                .as_str()
-                .unwrap_or("")
-                .to_lowercase()
-                .contains(&path)
-            {
-                return false;
-            }
-            if !clean(&query.phase).is_empty()
-                && !s["phases"].as_array().is_some_and(|phases| {
-                    phases
-                        .iter()
-                        .any(|phase| phase.as_str() == Some(clean(&query.phase).as_str()))
-                })
-                && !s["tasks"].as_object().is_some_and(|tasks| {
-                    tasks
-                        .values()
-                        .any(|t| t["phase"].as_str().unwrap_or("") == clean(&query.phase))
-                })
-            {
-                return false;
-            }
-            let verdict = &s["verdict"];
-            match clean(&query.attention).as_str() {
-                "needs" if verdict["attention"].as_array().is_none_or(Vec::is_empty) => {
-                    return false
-                }
-                "unfinished" if verdict["unfinished"] != true => return false,
-                "verified" if verdict["verified"] != true => return false,
-                _ => {}
-            }
-            let prompt_count = s["prompt_count"]
-                .as_u64()
-                .map(|n| n as usize)
-                .unwrap_or_else(|| s["prompts"].as_array().map_or(0, Vec::len));
-            if (clean(&query.prompts) == "recorded" && prompt_count == 0)
-                || (clean(&query.prompts) == "none" && prompt_count > 0)
-            {
-                return false;
-            }
-            let date = local_activity_date(s["last_at"].as_str().unwrap_or(""), timezone);
-            if (!since.is_empty() && date.as_str() < since.as_str())
-                || (!until.is_empty() && date.as_str() > until.as_str())
-            {
-                return false;
-            }
-            let mut words = Vec::new();
-            for key in [
-                "label",
-                "session_name",
-                "herdr_tab",
-                "agent",
-                "model",
-                "cwd",
-                "status",
-                "session_id",
-                "initial_goal",
-            ] {
-                if let Some(text) = s[key].as_str() {
-                    words.push(text);
-                }
-            }
-            for task in s["tasks"]
-                .as_object()
-                .into_iter()
-                .flat_map(|tasks| tasks.values())
-            {
-                for key in [
-                    "name",
-                    "description",
-                    "outcome",
-                    "status",
-                    "phase",
-                    "task_id",
-                ] {
-                    if let Some(text) = task[key].as_str() {
-                        words.push(text);
-                    }
-                }
-            }
-            for prompt in s["prompts"].as_array().into_iter().flatten() {
-                if let Some(text) = prompt["text"].as_str() {
-                    words.push(text);
-                }
-            }
-            for event in s["events"].as_array().into_iter().flatten() {
-                for key in ["name", "description", "outcome", "selected", "tool_name"] {
-                    if let Some(text) = event["payload"][key].as_str() {
-                        words.push(text);
-                    }
-                }
-                for option in event["payload"]["options"].as_array().into_iter().flatten() {
-                    if let Some(text) = option.as_str() {
-                        words.push(text);
-                    }
-                }
-            }
-            let searchable = s["search_text"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| words.join(" ").to_lowercase());
-            terms.iter().all(|term| searchable.contains(term))
-        })
+        .filter(|s| directory_matches(s, query))
         .cloned()
         .collect();
     // Sessions with nothing to review stay out of the list unless asked for.
@@ -1105,6 +1114,116 @@ fn session_directory(sessions: &[Value], query: &WorkflowQuery) -> Value {
     json!({"rows":rows,"columns":columns,"total":total,"all_count":sessions.len(),"pulse":pulse,"chips":chips,"advanced":advanced,"hidden_empty":hidden_empty,"show_empty_url":directory_url(&with_empty,1),"show_empty":show_empty,"facets":facets,"filters":filters,"errors":errors,"page":page,"pages":pages,"start":if total==0{0}else{offset+1},"end":(offset+per_page).min(total),"url":directory_url(query,page),"previous":if page>1{directory_url(query,page-1)}else{String::new()},"next":if page<pages{directory_url(query,page+1)}else{String::new()}})
 }
 
+/// Query the durable directory in SQLite, returning only the requested page of documents.
+fn stored_directory(store: &ReportStore, query: &WorkflowQuery) -> anyhow::Result<Value> {
+    use diesel::prelude::*;
+    use diesel::sql_types::{BigInt, Text};
+    #[derive(QueryableByName)]
+    struct Number {
+        #[diesel(sql_type = BigInt)]
+        value: i64,
+    }
+    #[derive(QueryableByName)]
+    struct Document {
+        #[diesel(sql_type = Text)]
+        document: String,
+    }
+    let mut conn = store.connection()?;
+    let mut predicate = query.clone();
+    predicate.empty = Some("show".into());
+    predicate.page = Some(1);
+    predicate.per_page = Some(1);
+    // The existing predicate defines the exact Unicode search, dates and all filter semantics.
+    // It executes inside SQLite, so only matching page documents cross the database boundary.
+    conn.register_sql_function::<Text, BigInt, String, i64, _>(
+        "directory_match",
+        true,
+        move |document| {
+            serde_json::from_str::<Value>(&document)
+                .ok()
+                .map_or(0, |row| i64::from(directory_matches(&row, &predicate)))
+        },
+    )?;
+    conn.register_sql_function::<Text, Text, String, String, _>("directory_lower", true, |s| {
+        s.to_lowercase()
+    })?;
+    let timezone: Tz = query
+        .timezone
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(chrono_tz::UTC);
+    conn.register_sql_function::<Text, Text, String, String, _>("directory_day", true, move |s| {
+        local_activity_date(&s, timezone)
+    })?;
+    conn.transaction::<_, anyhow::Error, _>(|conn| {
+        let base = "dashboard_reports.key >= 'directory:' AND dashboard_reports.key < 'directory;'";
+        let has_filters = [&query.q, &query.agent, &query.model, &query.status, &query.path,
+            &query.phase, &query.prompts, &query.since, &query.until, &query.attention]
+            .iter().any(|value| value.as_deref().is_some_and(|s| !s.trim().is_empty()));
+        let filtered = if has_filters { format!("{base} AND directory_match(document)=1") } else { base.to_owned() };
+        let visible = if query.empty.as_deref().unwrap_or("").trim() == "show" { filtered.clone() } else { format!("{filtered} AND COALESCE(json_extract(document,'$.empty'),0) != 1") };
+        let count = |conn: &mut SqliteConnection, condition: &str| -> anyhow::Result<usize> {
+            Ok(diesel::sql_query(format!("SELECT COUNT(*) AS value FROM dashboard_reports WHERE {condition}")).get_result::<Number>(conn)?.value as usize)
+        };
+        let all = count(conn, base)?;
+        let total = count(conn, &visible)?;
+        let hidden = if query.empty.as_deref().unwrap_or("").trim() == "show" { 0 } else { count(conn, &filtered)? - total };
+        let per_page = query.per_page.unwrap_or(25).clamp(1,100);
+        let pages = total.div_ceil(per_page).max(1);
+        let page = query.page.unwrap_or(1).clamp(1,pages);
+        let sort = query.sort.as_deref().unwrap_or("").trim();
+        let (key, desc) = match sort { "" | "latest" => ("oldest", true), x => x.strip_suffix("_desc").map_or((x,false), |x| (x,true)) };
+        let expression = match key {
+            "oldest" => "json_extract(document,'$.last_at')",
+            "name" => "directory_lower(COALESCE(json_extract(document,'$.label'),''))",
+            "agent" => "json_extract(document,'$.agent')",
+            "model" => "json_extract(document,'$.model')",
+            "status" => "json_extract(document,'$.status')",
+            "path" => "json_extract(document,'$.cwd')",
+            "project" => "directory_lower(COALESCE(json_extract(document,'$.project'),'')), json_extract(document,'$.cwd')",
+            "progress" => "CASE WHEN COALESCE(json_extract(document,'$.verdict.todos_total'),0)=0 THEN -1.0 ELSE 1.0*COALESCE(json_extract(document,'$.verdict.todos_done'),0)/json_extract(document,'$.verdict.todos_total') END, COALESCE(json_extract(document,'$.verdict.todos_total'),0)",
+            "checks" => "CASE WHEN json_extract(document,'$.verdict.checks.verify.last')='failed' OR json_extract(document,'$.verdict.checks.review.last')='failed' THEN 0 WHEN COALESCE(json_extract(document,'$.verdict.checks.verify.last'),'')='' AND COALESCE(json_extract(document,'$.verdict.checks.review.last'),'')='' THEN 1 WHEN json_extract(document,'$.verdict.checks.verify.last')='passed' AND json_extract(document,'$.verdict.checks.review.last')='passed' THEN 3 ELSE 2 END",
+            "tasks" => "-json_extract(document,'$.task_count')",
+            "prompts" => "-json_extract(document,'$.prompt_count')",
+            _ => "json_extract(document,'$.last_at') DESC",
+        };
+        // Multi-key sorts reverse every key, with session ID always ascending as the tie-break.
+        let direction = if desc { "DESC" } else { "ASC" };
+        let order = match key {
+            "project" => format!("directory_lower(COALESCE(json_extract(document,'$.project'),'')) {direction}, json_extract(document,'$.cwd') {direction}"),
+            "progress" => format!("CASE WHEN COALESCE(json_extract(document,'$.verdict.todos_total'),0)=0 THEN -1.0 ELSE 1.0*COALESCE(json_extract(document,'$.verdict.todos_done'),0)/json_extract(document,'$.verdict.todos_total') END {direction}, COALESCE(json_extract(document,'$.verdict.todos_total'),0) {direction}"),
+            _ if !matches!(key, "oldest"|"name"|"agent"|"model"|"status"|"path"|"checks"|"tasks"|"prompts") => format!("json_extract(document,'$.last_at') {}", if desc {"ASC"} else {"DESC"}),
+            _ => format!("{expression} {direction}"),
+        };
+        let sql = format!("SELECT document FROM dashboard_reports WHERE {visible} ORDER BY {order}, json_extract(document,'$.session_id') ASC LIMIT {per_page} OFFSET {}", (page-1)*per_page);
+        let rows: Vec<Value> = diesel::sql_query(sql).load::<Document>(conn)?.into_iter().map(|r| serde_json::from_str(&r.document)).collect::<Result<_,_>>()?;
+        let mut page_query = WorkflowQuery { sort: query.sort.clone(), timezone: query.timezone.clone(), per_page: Some(100), empty: Some("show".into()), ..Default::default() };
+        page_query.page = Some(1);
+        let rendered = session_directory(&rows, &page_query);
+        let mut result = session_directory(&[], query);
+        result["rows"] = rendered["rows"].clone();
+        for (key, value) in [("total",total),("all_count",all),("hidden_empty",hidden),("page",page),("pages",pages),("start",if total==0 {0} else {(page-1)*per_page+1}),("end",(page*per_page).min(total))] { result[key]=json!(value); }
+        result["url"] = json!(directory_url(query,page));
+        result["previous"] = json!(if page>1 { directory_url(query,page-1) } else { String::new() });
+        result["next"] = json!(if page<pages { directory_url(query,page+1) } else { String::new() });
+        for key in ["agent","model","status"] {
+            let sql = format!("SELECT DISTINCT json_extract(document,'$.{key}') AS document FROM dashboard_reports WHERE {base} AND json_type(document,'$.{key}')='text' ORDER BY document");
+            let values = diesel::sql_query(sql).load::<Document>(conn)?.into_iter().map(|r| r.document).collect::<Vec<_>>();
+            result["facets"][key] = json!(values);
+        }
+        let phases = diesel::sql_query(format!("SELECT DISTINCT value AS document FROM dashboard_reports, json_each(dashboard_reports.document,'$.phases') WHERE {base} AND value != '' UNION SELECT DISTINCT json_extract(value,'$.phase') AS document FROM dashboard_reports, json_each(dashboard_reports.document,'$.tasks') WHERE {base} AND json_type(value,'$.phase')='text' AND json_extract(value,'$.phase') != '' ORDER BY document")).load::<Document>(conn)?.into_iter().map(|r|r.document).collect::<Vec<_>>();
+        result["facets"]["phase"] = json!(phases);
+        let reviewable = format!("{base} AND COALESCE(json_extract(document,'$.empty'),0) != 1");
+        for (name, condition) in [("running", "json_extract(document,'$.status')='running'".to_owned()),("needs", "COALESCE(json_array_length(document,'$.verdict.attention'),0)>0".to_owned()),("unfinished", "json_extract(document,'$.verdict.unfinished')=1".to_owned()),("verified_today", format!("json_extract(document,'$.verdict.verified')=1 AND directory_day(COALESCE(json_extract(document,'$.last_at'),''))='{}'", Utc::now().with_timezone(&timezone).format("%Y-%m-%d")))] {
+            result["pulse"][name] = json!(count(conn,&format!("{reviewable} AND {condition}"))?);
+        }
+        result["chips"][0]["count"] = result["pulse"]["needs"].clone();
+        result["chips"][1]["count"] = result["pulse"]["running"].clone();
+        result["chips"][2]["count"] = result["pulse"]["unfinished"].clone();
+        Ok(result)
+    })
+}
+
 #[get("/workflow")]
 async fn workflow_page(
     request: HttpRequest,
@@ -1116,23 +1235,50 @@ async fn workflow_page(
     let mut query = query.into_inner();
     query.timezone = Some(client_timezone(&request).name().to_owned());
     let selected_id = query.session_id.clone();
-    let (sessions, selected) = match read_report(store, move |store| {
-        Ok((
-            store.sessions()?,
-            match selected_id {
-                Some(id) => store.session(&id)?,
-                None => None,
-            },
-        ))
-    })
-    .await
-    {
-        Ok(report) => report,
-        Err(error) => return unavailable(error),
-    };
+    let directory_query = query.clone();
+    let indexed_query = query.clone();
+    let (directory, selected, has_sessions) =
+        match read_report(store, move |store| match selected_id {
+            Some(id) => {
+                let selected = if indexed_timeline(&indexed_query) {
+                    let mut selected = store.session_without_events(&id)?;
+                    let (view, ordering) = timeline_index_keys(&indexed_query);
+                    let first = if signal_view(&indexed_query) {
+                        FIRST_SIGNAL
+                    } else {
+                        FIRST_EVENTS
+                    };
+                    let limit = indexed_query
+                        .show_events
+                        .unwrap_or(first)
+                        .clamp(1, MAX_PAGE);
+                    if let (Some(session), Some((rows, total))) = (
+                        &mut selected,
+                        store.session_timeline(&id, view, ordering, 0, limit)?,
+                    ) {
+                        session["indexed_rows"] = json!(rows);
+                        session["indexed_total"] = json!(total);
+                    }
+                    selected
+                } else {
+                    store.session(&id)?
+                };
+                Ok((Value::Null, selected, store.session_count()? > 0))
+            }
+            None => {
+                let directory = stored_directory(store, &directory_query)?;
+                let has_sessions = directory["all_count"].as_u64().unwrap_or(0) > 0;
+                Ok((directory, None, has_sessions))
+            }
+        })
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => return unavailable(error),
+        };
     if query.session_id.is_none() {
         let mut context = Context::new();
-        context.insert("directory", &session_directory(&sessions, &query));
+        context.insert("directory", &directory);
         return render(
             &registry,
             &request,
@@ -1148,7 +1294,7 @@ async fn workflow_page(
         .await;
     }
     let mut context = Context::new();
-    context.insert("sessions", &!sessions.is_empty());
+    context.insert("sessions", &has_sessions);
     context.insert("selected", &selected);
     if let Some(session) = &selected {
         session_view(session, &query, &mut context);
@@ -1447,6 +1593,25 @@ fn timeline_more(query: &WorkflowQuery, shown: usize, total: usize) -> Value {
     more
 }
 
+fn indexed_timeline(query: &WorkflowQuery) -> bool {
+    !flow_view(query)
+        && query.task_id.is_none()
+        && query.todo_id.is_none()
+        && trimmed(&query.event_q).is_empty()
+        && trimmed(&query.event_category).is_empty()
+        && trimmed(&query.event_status).is_empty()
+}
+fn timeline_index_keys(query: &WorkflowQuery) -> (&'static str, &'static str) {
+    (
+        if signal_view(query) { "signal" } else { "all" },
+        if newest_first(query) {
+            "newest"
+        } else {
+            "oldest"
+        },
+    )
+}
+
 /// Quick timeline views: the curated signal, every raw event, and one-click
 /// filters for failures, decisions and checks.
 fn timeline_chips(session: &Value, query: &WorkflowQuery) -> Value {
@@ -1482,7 +1647,7 @@ fn timeline_chips(session: &Value, query: &WorkflowQuery) -> Value {
     json!([
         {"label": "Signal", "href": link(None, None, None), "active": signal_view(query) && !flow_view(query) && unfiltered, "count": Value::Null},
         {"label": "Flow", "href": link(Some("flow"), None, None), "active": flow_view(query) && unfiltered, "count": Value::Null},
-        {"label": "Raw events", "href": link(Some("all"), None, None), "active": !signal_view(query) && unfiltered, "count": session["events"].as_array().map_or(0, Vec::len)},
+        {"label": "Raw events", "href": link(Some("all"), None, None), "active": !signal_view(query) && unfiltered, "count": session["event_count"].as_u64().unwrap_or_else(|| session["events"].as_array().map_or(0, |events| events.len() as u64))},
         {"label": "Failures", "href": link(current, None, Some("failed")), "active": status == "failed", "count": failures},
         {"label": "Decisions", "href": link(current, Some("decision"), None), "active": category == "decision", "count": verdict["decisions"]},
         {"label": "Checks", "href": link(current, Some("check"), None), "active": category == "check", "count": checks},
@@ -1519,7 +1684,14 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
         FIRST_EVENTS
     };
     let event_rows = size(query.show_events, first_events);
-    let events = timeline_rows(session, query);
+    let events = session["indexed_rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| timeline_rows(session, query));
+    let timeline_total = session["indexed_total"]
+        .as_u64()
+        .map(|n| n as usize)
+        .unwrap_or(events.len());
     context.insert("prompt_page", page(prompts, 0, prompt_rows));
     context.insert(
         "prompts_more",
@@ -1531,7 +1703,7 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
     context.insert("timeline_page", page(&events, 0, event_rows));
     context.insert(
         "timeline_more",
-        &timeline_more(query, event_rows, events.len()),
+        &timeline_more(query, event_rows, timeline_total),
     );
     context.insert("signal_view", &signal_view(query));
     context.insert("flow_view", &flow_view(query));
@@ -1679,6 +1851,131 @@ async fn workflow_items(
     query: web::Query<WorkflowQuery>,
     store: web::Data<ReportStore>,
 ) -> impl Responder {
+    if query.list.as_deref() == Some("timeline") && indexed_timeline(&query) {
+        let id = query.session_id.clone();
+        let offset = query.offset.unwrap_or(0);
+        let first = if signal_view(&query) {
+            FIRST_SIGNAL
+        } else {
+            FIRST_EVENTS
+        };
+        let limit = query
+            .limit
+            .unwrap_or(if offset == 0 { first } else { MORE_EVENTS })
+            .clamp(1, MAX_PAGE);
+        let (view, ordering) = timeline_index_keys(&query);
+        let result = read_report(store, move |store| match id {
+            Some(id) => store.session_timeline(&id, view, ordering, offset, limit),
+            None => Ok(None),
+        })
+        .await;
+        let (rows, total) = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return HttpResponse::NotFound().json(json!({"error": "session not found"}))
+            }
+            Err(error) => return unavailable(error),
+        };
+        let mut context = Context::new();
+        context.insert("timeline_page", &rows);
+        context.insert(
+            "more",
+            &timeline_more(&query, offset.saturating_add(rows.len()), total),
+        );
+        let template = if signal_view(&query) {
+            "signal-items"
+        } else {
+            "timeline-items"
+        };
+        return match (
+            fragments().render(&format!("audit/partials/{template}.html"), &context),
+            fragments().render("audit/partials/more.html", &context),
+        ) {
+            (Ok(html), Ok(more_html)) => {
+                HttpResponse::Ok().json(json!({"html": html, "more_html": more_html}))
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                HttpResponse::BadRequest().json(json!({"error": format!("{error:?}")}))
+            }
+        };
+    }
+    if query.list.as_deref() == Some("prompts") {
+        let id = query.session_id.clone();
+        let offset = query.offset.unwrap_or(0);
+        let limit = query
+            .limit
+            .unwrap_or(if offset == 0 { FIRST_ROWS } else { MORE_ROWS })
+            .clamp(1, MAX_PAGE);
+        let result = read_report(store, move |store| match id {
+            Some(id) => store.session_prompts(&id, offset, limit),
+            None => Ok(None),
+        })
+        .await;
+        let (rows, total) = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return HttpResponse::NotFound().json(json!({"error": "session not found"}))
+            }
+            Err(error) => return unavailable(error),
+        };
+        let mut context = Context::new();
+        context.insert("prompt_page", &rows);
+        context.insert(
+            "more",
+            &more(&query, "prompts", offset.saturating_add(rows.len()), total),
+        );
+        return match (
+            fragments().render("audit/partials/prompt-items.html", &context),
+            fragments().render("audit/partials/more.html", &context),
+        ) {
+            (Ok(html), Ok(more_html)) => {
+                HttpResponse::Ok().json(json!({"html": html, "more_html": more_html}))
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                HttpResponse::BadRequest().json(json!({"error": format!("{error:?}")}))
+            }
+        };
+    }
+    if query.list.as_deref() == Some("tasks") {
+        let id = query.session_id.clone();
+        let offset = query.offset.unwrap_or(0);
+        let limit = query
+            .limit
+            .unwrap_or(if offset == 0 { FIRST_ROWS } else { MORE_ROWS })
+            .clamp(1, MAX_PAGE);
+        let result = read_report(store, move |store| match id {
+            Some(id) => store.session_tasks(&id, offset, limit),
+            None => Ok(None),
+        })
+        .await;
+        let (rows, total) = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                return HttpResponse::NotFound().json(json!({"error": "session not found"}))
+            }
+            Err(error) => return unavailable(error),
+        };
+        let mut context = Context::new();
+        context.insert("selected", &json!({"session_id": query.session_id}));
+        context.insert("return_to", return_to(&query));
+        context.insert("expanded_task", &Value::Null);
+        context.insert("task_page", &rows);
+        context.insert(
+            "more",
+            &more(&query, "tasks", offset.saturating_add(rows.len()), total),
+        );
+        return match (
+            fragments().render("audit/partials/task-items.html", &context),
+            fragments().render("audit/partials/more.html", &context),
+        ) {
+            (Ok(html), Ok(more_html)) => {
+                HttpResponse::Ok().json(json!({"html": html, "more_html": more_html}))
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                HttpResponse::BadRequest().json(json!({"error": format!("{error:?}")}))
+            }
+        };
+    }
     let selected_id = query.session_id.clone();
     let selected = match read_report(store, move |store| match selected_id {
         Some(id) => store.session(&id),
@@ -2526,6 +2823,78 @@ mod tests {
             assert_eq!(
                 render_directory(&full, &query),
                 render_directory(&compact, &query)
+            );
+            assert_eq!(
+                stored_directory(&store, &query).unwrap(),
+                session_directory(&compact, &query)
+            );
+        }
+        // Multiple pages, ties, Unicode sorting, empty rows and every sort retain the
+        // pure reducer's results, including global facets and pulse counts.
+        for index in 0..35 {
+            let mut row = compact[0].clone();
+            row["session_id"] = json!(format!("extra-{index:02}"));
+            row["label"] = json!(if index % 2 == 0 { "Éclair" } else { "alpha" });
+            row["agent"] = json!(if index % 2 == 0 { "Codex" } else { "Claude" });
+            row["empty"] = json!(index % 7 == 0);
+            row["last_at"] = json!(format!("2026-10-{:02}T12:00:00Z", index % 28 + 1));
+            diesel::sql_query("INSERT INTO dashboard_reports(key,document) VALUES(?,?)")
+                .bind::<Text, _>(format!("directory:extra-{index:02}"))
+                .bind::<Text, _>(row.to_string())
+                .execute(&mut connection)
+                .unwrap();
+        }
+        let all = store.sessions().unwrap();
+        for sort in [
+            "latest",
+            "oldest",
+            "name",
+            "name_desc",
+            "project",
+            "project_desc",
+            "progress",
+            "progress_desc",
+            "checks",
+            "checks_desc",
+            "tasks",
+            "prompts",
+            "unexpected",
+        ] {
+            let query = WorkflowQuery {
+                sort: Some(sort.into()),
+                page: Some(2),
+                per_page: Some(5),
+                ..Default::default()
+            };
+            assert_eq!(
+                stored_directory(&store, &query).unwrap(),
+                session_directory(&all, &query),
+                "sort={sort}"
+            );
+        }
+        for query in [
+            WorkflowQuery {
+                agent: Some("Claude".into()),
+                empty: Some("show".into()),
+                page: Some(3),
+                per_page: Some(3),
+                ..Default::default()
+            },
+            WorkflowQuery {
+                q: Some("unicode regression".into()),
+                since: Some("2026-10-10".into()),
+                until: Some("2026-10-20".into()),
+                timezone: Some("America/Chicago".into()),
+                ..Default::default()
+            },
+            WorkflowQuery {
+                since: Some("2026-02-30".into()),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                stored_directory(&store, &query).unwrap(),
+                session_directory(&all, &query)
             );
         }
         drop(connection);

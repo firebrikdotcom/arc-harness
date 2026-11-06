@@ -109,10 +109,13 @@ fn start_report_worker(reports: reports::ReportStore) {
         let mut failures = 0_u64;
         loop {
             match reports.refresh() {
-                Ok(_) => {
+                Ok(processed) => {
                     if failures > 0 {
                         tracing::info!(failures, "Dashboard report catch-up recovered");
                         failures = 0;
+                    }
+                    if processed == reports::CATCH_UP_BATCH {
+                        continue;
                     }
                 }
                 Err(error) => {
@@ -149,8 +152,8 @@ async fn serve() -> anyhow::Result<()> {
     let reports = reports::ReportStore::open(&env::var("DATABASE_URL")?)?;
     reports.refresh()?;
     start_report_worker(reports.clone());
-    // Arc still scans its event stream at startup. No projector is registered:
-    // historical views remain intact and incremental reports own all read paths.
+    // The local Arc patch skips replay when no projectors are registered;
+    // incremental reports own all read paths and preserve historical events.
     builder(reports).serve(host, port).await?;
     Ok(())
 }

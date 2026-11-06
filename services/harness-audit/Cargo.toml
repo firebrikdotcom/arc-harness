@@ -27,3 +27,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
+
+# Avoid scanning the entire event log when no Arc projectors are registered.
+[patch.crates-io]
+arc-core = { path = "vendor/arc-core" }

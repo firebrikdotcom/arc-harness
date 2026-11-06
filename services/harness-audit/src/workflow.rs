@@ -818,7 +818,7 @@ fn by_sequence(map: &Value) -> Vec<Value> {
 
 /// Tasks in the order they were first seen, each carrying its todos in plan order
 /// and a count of completed, still-planned todos for the compact list row.
-fn ordered_tasks(tasks: &Value) -> Vec<Value> {
+pub(crate) fn ordered_tasks(tasks: &Value) -> Vec<Value> {
     by_sequence(tasks)
         .into_iter()
         .map(|mut task| {
@@ -835,33 +835,26 @@ fn ordered_tasks(tasks: &Value) -> Vec<Value> {
         .collect()
 }
 
-pub fn sessions(rows: &[Value]) -> Vec<Value> {
-    let mut matching: Vec<&Value> = rows
-        .iter()
-        .filter(|r| {
-            r["event_type"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("workflow."))
-        })
-        .collect();
-    // Source time preserves order when an outage delays delivery; row time breaks ties.
-    matching.sort_by(|a, b| {
-        a["payload"]["occurred_at"]
+/// Incrementally accepts events in chronological order.  The caller is responsible
+/// for sorting by occurred_at, recorded_at_us, and source position.
+#[derive(Default)]
+pub(crate) struct SessionReducer {
+    sessions: BTreeMap<String, Value>,
+}
+
+impl SessionReducer {
+    pub(crate) fn push(&mut self, row: &Value) {
+        if !row["event_type"]
             .as_str()
-            .cmp(&b["payload"]["occurred_at"].as_str())
-            .then(
-                a["recorded_at_us"]
-                    .as_i64()
-                    .cmp(&b["recorded_at_us"].as_i64()),
-            )
-    });
-    let mut sessions = BTreeMap::<String, Value>::new();
-    for row in matching {
+            .is_some_and(|s| s.starts_with("workflow."))
+        {
+            return;
+        }
         let p = &row["payload"];
         let Some(id) = p["session_id"].as_str() else {
-            continue;
+            return;
         };
-        let session = sessions.entry(id.to_owned()).or_insert_with(|| json!({"session_id": id, "label": "Untitled session", "agent": "Unknown", "model": "Unknown", "cwd": "Unknown", "metadata_history": [], "tasks": {}, "events": [], "prompts": [], "initial_goal": "", "status": "observed", "last_at": ""}));
+        let session = self.sessions.entry(id.to_owned()).or_insert_with(|| json!({"session_id": id, "label": "Untitled session", "agent": "Unknown", "model": "Unknown", "cwd": "Unknown", "metadata_history": [], "tasks": {}, "events": [], "prompts": [], "initial_goal": "", "status": "observed", "last_at": ""}));
         session["last_at"] = p["occurred_at"].clone();
         for key in ["session_name", "herdr_tab", "agent", "model", "cwd"] {
             if p[key].as_str().is_some_and(|s| !s.trim().is_empty()) {
@@ -941,133 +934,160 @@ pub fn sessions(rows: &[Value]) -> Vec<Value> {
             .unwrap()
             .push(json!({"event_type": row["event_type"], "event_id": row["id"], "recorded_at_us": row["recorded_at_us"], "payload": p}));
     }
-    for session in sessions.values_mut() {
-        let activity: Vec<&Value> = session["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|e| e["event_type"] != "workflow.session_updated")
-            .collect();
-        let first = activity
-            .first()
-            .map(|e| e["payload"]["occurred_at"].clone())
-            .unwrap_or_else(|| session["last_at"].clone());
-        let last = activity
-            .last()
-            .map(|e| e["payload"]["occurred_at"].clone())
-            .unwrap_or_else(|| session["last_at"].clone());
-        session["first_at"] = first;
-        session["last_at"] = last;
-        let mut parts = BTreeMap::<String, (usize, BTreeMap<usize, String>, String)>::new();
-        let mut order = Vec::new();
-        for event in session["events"].as_array().unwrap() {
-            if event["event_type"] != "workflow.prompt_recorded" {
-                continue;
+
+    pub(crate) fn finish(self) -> Vec<Value> {
+        let mut sessions = self.sessions;
+        for session in sessions.values_mut() {
+            let activity: Vec<&Value> = session["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["event_type"] != "workflow.session_updated")
+                .collect();
+            let first = activity
+                .first()
+                .map(|e| e["payload"]["occurred_at"].clone())
+                .unwrap_or_else(|| session["last_at"].clone());
+            let last = activity
+                .last()
+                .map(|e| e["payload"]["occurred_at"].clone())
+                .unwrap_or_else(|| session["last_at"].clone());
+            session["first_at"] = first;
+            session["last_at"] = last;
+            let mut parts = BTreeMap::<String, (usize, BTreeMap<usize, String>, String)>::new();
+            let mut order = Vec::new();
+            for event in session["events"].as_array().unwrap() {
+                if event["event_type"] != "workflow.prompt_recorded" {
+                    continue;
+                }
+                let p = &event["payload"];
+                let Some(id) = p["prompt_id"].as_str() else {
+                    continue;
+                };
+                let Some(count) = p["part_count"].as_u64() else {
+                    continue;
+                };
+                let Some(index) = p["part_index"].as_u64() else {
+                    continue;
+                };
+                if !parts.contains_key(id) {
+                    order.push(id.to_owned());
+                }
+                let entry = parts.entry(id.to_owned()).or_insert_with(|| {
+                    (
+                        count as usize,
+                        BTreeMap::new(),
+                        p["occurred_at"].as_str().unwrap_or("").to_owned(),
+                    )
+                });
+                entry
+                    .1
+                    .insert(index as usize, p["text"].as_str().unwrap_or("").to_owned());
             }
-            let p = &event["payload"];
-            let Some(id) = p["prompt_id"].as_str() else {
-                continue;
-            };
-            let Some(count) = p["part_count"].as_u64() else {
-                continue;
-            };
-            let Some(index) = p["part_index"].as_u64() else {
-                continue;
-            };
-            if !parts.contains_key(id) {
-                order.push(id.to_owned());
+            for id in order {
+                let (count, chunks, time) = &parts[&id];
+                if chunks.len() != *count || !(0..*count).all(|i| chunks.contains_key(&i)) {
+                    continue;
+                }
+                let text = chunks.values().cloned().collect::<String>();
+                if session["prompts"].as_array().unwrap().is_empty() {
+                    session["initial_goal"] = json!(text);
+                }
+                let prompts = session["prompts"].as_array_mut().unwrap();
+                let number = prompts.len() + 1;
+                prompts.push(json!({"prompt_id":id,"number":number,"preview":preview(&text),"text":text,"occurred_at":time}));
             }
-            let entry = parts.entry(id.to_owned()).or_insert_with(|| {
-                (
-                    count as usize,
-                    BTreeMap::new(),
-                    p["occurred_at"].as_str().unwrap_or("").to_owned(),
-                )
-            });
-            entry
-                .1
-                .insert(index as usize, p["text"].as_str().unwrap_or("").to_owned());
-        }
-        for id in order {
-            let (count, chunks, time) = &parts[&id];
-            if chunks.len() != *count || !(0..*count).all(|i| chunks.contains_key(&i)) {
-                continue;
-            }
-            let text = chunks.values().cloned().collect::<String>();
-            if session["prompts"].as_array().unwrap().is_empty() {
-                session["initial_goal"] = json!(text);
-            }
-            let prompts = session["prompts"].as_array_mut().unwrap();
-            let number = prompts.len() + 1;
-            prompts.push(json!({"prompt_id":id,"number":number,"preview":preview(&text),"text":text,"occurred_at":time}));
-        }
-        // Timeline rows link to their prompt by position, since prompts load in pages.
-        let numbers: BTreeMap<String, Value> = session["prompts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|p| (p["prompt_id"].as_str().unwrap_or("").to_owned(), p.clone()))
-            .collect();
-        for event in session["events"].as_array_mut().unwrap() {
-            if let Some(prompt) = event["payload"]["prompt_id"]
-                .as_str()
-                .and_then(|id| numbers.get(id))
-            {
-                event["prompt_number"] = prompt["number"].clone();
-                // The signal view opens a chapter with the whole prompt.
-                event["prompt_preview"] = prompt["preview"].clone();
-                event["prompt_text"] = prompt["text"].clone();
-            }
-        }
-    }
-    for session in sessions.values_mut() {
-        let explicit = session["session_name"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty());
-        let task_name = session["events"].as_array().unwrap().iter().find_map(|e| {
-            if !e["event_type"]
-                .as_str()
-                .is_some_and(|s| s.starts_with("workflow.task_"))
-            {
-                return None;
-            }
-            e["payload"]["name"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty() && *s != "Session work")
-        });
-        let label = task_name
-            .or(explicit)
-            .or_else(|| {
-                session["initial_goal"]
+            // Timeline rows link to their prompt by position, since prompts load in pages.
+            // Temporarily detach prompts so timeline annotation can borrow their
+            // bodies without cloning every assembled prompt into another map.
+            let prompts = session["prompts"].take();
+            let numbers: BTreeMap<&str, &Value> = prompts
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (p["prompt_id"].as_str().unwrap_or(""), p))
+                .collect();
+            for event in session["events"].as_array_mut().unwrap() {
+                if let Some(prompt) = event["payload"]["prompt_id"]
                     .as_str()
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .unwrap_or("Untitled session");
-        session["label"] = json!(humanize(label)
-            .split_whitespace()
-            .take(5)
-            .collect::<Vec<_>>()
-            .join(" "));
-        let (name, worktree) = project(session["cwd"].as_str().unwrap_or(""));
-        session["project"] = json!(name);
-        session["worktree"] = json!(worktree);
+                    .and_then(|id| numbers.get(id))
+                {
+                    event["prompt_number"] = prompt["number"].clone();
+                    // The signal view opens a chapter with the whole prompt.
+                    event["prompt_preview"] = prompt["preview"].clone();
+                    event["prompt_text"] = prompt["text"].clone();
+                }
+            }
+            session["prompts"] = prompts;
+        }
+        for session in sessions.values_mut() {
+            let explicit = session["session_name"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty());
+            let task_name = session["events"].as_array().unwrap().iter().find_map(|e| {
+                if !e["event_type"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("workflow.task_"))
+                {
+                    return None;
+                }
+                e["payload"]["name"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty() && *s != "Session work")
+            });
+            let label = task_name
+                .or(explicit)
+                .or_else(|| {
+                    session["initial_goal"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .unwrap_or("Untitled session");
+            session["label"] = json!(humanize(label)
+                .split_whitespace()
+                .take(5)
+                .collect::<Vec<_>>()
+                .join(" "));
+            let (name, worktree) = project(session["cwd"].as_str().unwrap_or(""));
+            session["project"] = json!(name);
+            session["worktree"] = json!(worktree);
+        }
+        for session in sessions.values_mut() {
+            annotate_timeline(session);
+            session["task_list"] = json!(ordered_tasks(&session["tasks"]));
+            session["verdict"] = verdict(session);
+            // Nothing to review: no prompt, no named task, no plan, check or decision.
+            let substantive = session["events"].as_array().unwrap().iter().any(|e| {
+                matches!(
+                    e["category"].as_str(),
+                    Some("prompt" | "todo" | "plan" | "check" | "decision")
+                ) || (e["category"] == "task" && e["task_name"] != "Session work")
+            });
+            session["empty"] = json!(!substantive);
+        }
+        let mut values: Vec<Value> = sessions.into_values().collect();
+        values.sort_by(|a, b| b["last_at"].as_str().cmp(&a["last_at"].as_str()));
+        values
     }
-    for session in sessions.values_mut() {
-        annotate_timeline(session);
-        session["task_list"] = json!(ordered_tasks(&session["tasks"]));
-        session["verdict"] = verdict(session);
-        // Nothing to review: no prompt, no named task, no plan, check or decision.
-        let substantive = session["events"].as_array().unwrap().iter().any(|e| {
-            matches!(
-                e["category"].as_str(),
-                Some("prompt" | "todo" | "plan" | "check" | "decision")
-            ) || (e["category"] == "task" && e["task_name"] != "Session work")
-        });
-        session["empty"] = json!(!substantive);
+}
+
+pub fn sessions(rows: &[Value]) -> Vec<Value> {
+    let mut matching: Vec<&Value> = rows.iter().collect();
+    matching.sort_by(|a, b| {
+        a["payload"]["occurred_at"]
+            .as_str()
+            .cmp(&b["payload"]["occurred_at"].as_str())
+            .then(
+                a["recorded_at_us"]
+                    .as_i64()
+                    .cmp(&b["recorded_at_us"].as_i64()),
+            )
+    });
+    let mut reducer = SessionReducer::default();
+    for row in matching {
+        reducer.push(row);
     }
-    let mut values: Vec<Value> = sessions.into_values().collect();
-    values.sort_by(|a, b| b["last_at"].as_str().cmp(&a["last_at"].as_str()));
-    values
+    reducer.finish()
 }
 
 #[cfg(test)]
@@ -1612,4 +1632,180 @@ mod tests {
             "workflow.task_started"
         );
     }
+}
+
+/// Keys for independently maintained, compact session entities. An event can
+/// affect several entities; the source row remains authoritative for detail.
+#[cfg(test)]
+mod projection_reader_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_projection_retains_complete_text_and_rejects_missing_parts() {
+        let row = |id: &str, index: u64, text: &str| {
+            json!({
+                "id": id, "event_type": "workflow.prompt_recorded", "recorded_at_us": index,
+                "payload": {"session_id": "s", "prompt_id": "p", "occurred_at": "2026-01-01T00:00:00Z", "part_count": 2, "part_index": index, "text": text}
+            })
+        };
+        let first = row("a", 0, "hello ");
+        let second = row("b", 1, "world");
+        let partial = projection_entity("prompt", "p", std::slice::from_ref(&first));
+        assert_eq!(partial["complete"], false);
+        assert!(partial.get("text").is_none());
+        let complete = projection_entity("prompt", "p", &[second, first]);
+        assert_eq!(complete["complete"], true);
+        assert_eq!(complete["text"], "hello world");
+    }
+}
+
+pub(crate) fn projection_keys(row: &Value) -> Vec<(String, String, String)> {
+    let p = &row["payload"];
+    let Some(session) = p["session_id"].as_str() else {
+        return vec![];
+    };
+    if !row["event_type"]
+        .as_str()
+        .is_some_and(|v| v.starts_with("workflow."))
+    {
+        return vec![];
+    }
+    let mut keys = Vec::new();
+    // Independent facts keep updates bounded and allow a replaced source event to
+    // retract its former metadata and timeline contribution.
+    for field in ["session_name", "herdr_tab", "agent", "model", "cwd"] {
+        if p[field].as_str().is_some_and(|v| !v.trim().is_empty()) {
+            keys.push((session.to_owned(), "metadata".into(), field.into()));
+        }
+    }
+    if matches!(
+        row["event_type"].as_str(),
+        Some("workflow.session_started" | "workflow.session_ended")
+    ) {
+        keys.push((session.to_owned(), "metadata".into(), "status".into()));
+    }
+    if let Some(id) = row["id"].as_str().filter(|id| !id.is_empty()) {
+        keys.push((session.to_owned(), "timeline".into(), id.to_owned()));
+    }
+    for (field, category) in [
+        ("task_id", "task"),
+        ("prompt_id", "prompt"),
+        ("tool_call_id", "tool"),
+    ] {
+        if let Some(id) = p[field].as_str().filter(|v| !v.is_empty()) {
+            keys.push((session.to_owned(), category.to_owned(), id.to_owned()));
+        }
+    }
+    keys
+}
+
+/// Persist the independently replaceable state needed by indexed session readers.
+pub(crate) fn projection_entity(category: &str, entity: &str, rows: &[Value]) -> Value {
+    let mut sorted: Vec<_> = rows.iter().collect();
+    sorted.sort_by(|a, b| {
+        a["payload"]["occurred_at"]
+            .as_str()
+            .cmp(&b["payload"]["occurred_at"].as_str())
+            .then(
+                a["recorded_at_us"]
+                    .as_i64()
+                    .cmp(&b["recorded_at_us"].as_i64()),
+            )
+    });
+    let mut value = json!({"events": sorted.len(), "first_at": sorted.first().map(|r| &r["payload"]["occurred_at"]), "last_at": sorted.last().map(|r| &r["payload"]["occurred_at"])});
+    if category == "metadata" {
+        let row = sorted.last().unwrap();
+        value["value"] = if entity == "status" {
+            json!(if row["event_type"] == "workflow.session_started" {
+                "running"
+            } else {
+                "ended"
+            })
+        } else {
+            row["payload"][entity].clone()
+        };
+    } else if category == "timeline" {
+        let row = sorted[0];
+        let p = &row["payload"];
+        let kind = row["event_type"].as_str().unwrap_or("");
+        value["event_type"] = row["event_type"].clone();
+        value["recorded_at_us"] = row["recorded_at_us"].clone();
+        value["activity"] = json!(kind != "workflow.session_updated");
+        value["task_id"] = p["task_id"].clone();
+        value["tool_call_id"] = p["tool_call_id"].clone();
+        value["outcome"] = p["outcome"].clone();
+        value["exit_code"] = p["exit_code"].clone();
+        value["row"] = (*row).clone();
+    } else if category == "prompt" {
+        let mut chunks = BTreeMap::new();
+        let mut expected = 0;
+        for row in &sorted {
+            if row["event_type"] != "workflow.prompt_recorded" {
+                continue;
+            }
+            let p = &row["payload"];
+            if expected == 0 {
+                expected = p["part_count"].as_u64().unwrap_or(0);
+            }
+            if let Some(index) = p["part_index"].as_u64() {
+                chunks.insert(index, p["text"].as_str().unwrap_or("").to_owned());
+            }
+        }
+        value["parts"] = json!(chunks.len());
+        value["part_count"] = json!(expected);
+        let complete = expected > 0
+            && chunks.len() as u64 == expected
+            && (0..expected).all(|i| chunks.contains_key(&i));
+        value["complete"] = json!(complete);
+        if complete {
+            let text = chunks.values().cloned().collect::<String>();
+            value["text"] = json!(text);
+            value["preview"] = json!(preview(&text));
+        }
+    } else if category == "task" {
+        if let Some(session) = sessions(rows).first() {
+            value["task"] = session["tasks"][entity].clone();
+        }
+    } else if category == "tool" {
+        value["started"] = json!(sorted
+            .iter()
+            .any(|r| r["event_type"] == "workflow.tool_started"));
+        value["returned"] = json!(sorted
+            .iter()
+            .any(|r| r["event_type"] == "workflow.tool_completed"
+                || r["event_type"] == "workflow.tool_failed"));
+        let returned = value["returned"] == true;
+        let mut counts = BTreeMap::<&str, usize>::from([
+            ("succeeded", 0),
+            ("failed", 0),
+            ("returned", 0),
+            ("process_running", 0),
+            ("unobserved", 0),
+        ]);
+        for row in &sorted {
+            let p = &row["payload"];
+            let kind = row["event_type"].as_str().unwrap_or("");
+            let status = match kind {
+                "workflow.tool_started" if !returned => Some("unobserved"),
+                "workflow.tool_failed" => Some("failed"),
+                "workflow.tool_completed"
+                    if p["outcome"] == "failed"
+                        || p["exit_code"].as_i64().is_some_and(|n| n != 0) =>
+                {
+                    Some("failed")
+                }
+                "workflow.tool_completed" if p["outcome"] == "succeeded" => Some("succeeded"),
+                "workflow.tool_completed" if p["outcome"] == "process_running" => {
+                    Some("process_running")
+                }
+                "workflow.tool_completed" => Some("returned"),
+                _ => None,
+            };
+            if let Some(status) = status {
+                *counts.get_mut(status).unwrap() += 1;
+            }
+        }
+        value["analysis"] = json!(counts);
+    }
+    value
 }
