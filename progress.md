@@ -41,3 +41,10 @@
 - Full managed harness verification passed after both review fixes; build gate reran and passed all 103 audit tests. Release build passed. Independent final review approved with no blocking findings. The configured review gate is off and build completion closed run `20261106T043419Z-3976791`.
 - Live service updated after a private SQLite backup; health returned HTTP 200. Initial RSS was 64,800 KiB versus the prior 5,113,344 KiB. Catch-up is still running, so final catch-up and loaded-page measurements remain pending.
 - Final commit/push and hosted CI acceptance remain pending; do not equate the passing local gates with final delivery.
+
+## Delivery record
+
+- Implementation committed and pushed on master as `ceae2e4`; CI run `42169675951` passed: https://github.com/firebrikdotcom/arc-harness/actions/runs/42169675951. All 103 audit tests, full local harness verification, release build, and independent final review passed.
+- Deployed to the existing local audit service after SQLite backup. Health, workbench, Workflow, Orchestration, and paged workflow API returned HTTP 200; sampled page responses took 4–59 ms.
+- Live historical rebuild reached 110,336 of 357,986 source events at 241,268 KiB RSS versus the previous 5,113,344 KiB. This is an in-progress measurement; complete historical catch-up remains background work, not a claim of full replay completion. Two transient database-lock retries recovered with the durable checkpoint intact.
+- Database backup is retained privately under the machine state directory; source events, settings and secrets were preserved. No branch or worktree was created.
