@@ -276,7 +276,12 @@ mod tests {
     #[actix_web::test]
     async fn ingest_uses_durable_ids_without_draining_backlog() {
         use actix_web::http::StatusCode;
-        use diesel::{connection::SimpleConnection, Connection, SqliteConnection};
+        use diesel::{connection::SimpleConnection, Connection, RunQueryDsl, SqliteConnection};
+        #[derive(diesel::QueryableByName)]
+        struct FactCount {
+            #[diesel(sql_type = diesel::sql_types::BigInt)]
+            count: i64,
+        }
         let path =
             std::env::temp_dir().join(format!("harness-ingest-{}.sqlite", uuid::Uuid::new_v4()));
         let url = path.to_str().unwrap();
@@ -321,21 +326,54 @@ mod tests {
         for (id, second) in [("same-race", 1), ("conflict-race", 2)] {
             let (a, b) = tokio::join!(request(id, 1), request(id, second));
             let statuses = [a.status(), b.status()];
-            assert!(statuses.contains(&StatusCode::CREATED));
             for status in statuses {
-                assert!(matches!(
-                    status,
-                    StatusCode::CREATED
-                        | StatusCode::OK
-                        | StatusCode::CONFLICT
-                        | StatusCode::SERVICE_UNAVAILABLE
-                ));
+                assert!(
+                    matches!(
+                        status,
+                        StatusCode::CREATED
+                            | StatusCode::OK
+                            | StatusCode::CONFLICT
+                            | StatusCode::SERVICE_UNAVAILABLE
+                    ),
+                    "{id}: {statuses:?}"
+                );
+            }
+            // SQLite can reject BOTH overlapping writers with SQLITE_BUSY.
+            // A 503 promises safe retry, not that another request committed.
+            if store.get_source_event(id).unwrap().is_none() {
+                assert_eq!(statuses, [StatusCode::SERVICE_UNAVAILABLE; 2], "{id}");
+                assert_eq!(request(id, 1).await.status(), StatusCode::CREATED);
+            } else {
+                assert!(
+                    statuses.iter().any(|status| status.is_success()),
+                    "{id}: {statuses:?}"
+                );
             }
             let saved = store.get_source_event(id).unwrap().unwrap()["payload"]["value"]
                 .as_i64()
                 .unwrap();
+            assert!([1, second].contains(&saved));
+            for (status, value) in statuses.into_iter().zip([1, second]) {
+                if status.is_success() {
+                    assert_eq!(value, saved, "{id}: acknowledged data must be durable");
+                } else if status == StatusCode::CONFLICT {
+                    assert_ne!(value, saved, "{id}: identical data must not conflict");
+                }
+            }
             assert_eq!(request(id, saved).await.status(), StatusCode::OK);
             assert_eq!(request(id, 3).await.status(), StatusCode::CONFLICT);
+            let count = diesel::sql_query("SELECT COUNT(*) AS count FROM events WHERE aggregate_type='AuditEvent' AND aggregate_id=?")
+                .bind::<diesel::sql_types::Text, _>(id)
+                .get_result::<FactCount>(&mut conn)
+                .unwrap();
+            assert_eq!(
+                count.count, 1,
+                "{id}: retries must preserve exactly one fact"
+            );
+            assert_eq!(
+                store.get_source_event(id).unwrap().unwrap()["payload"]["value"],
+                saved
+            );
         }
         // A long catch-up transaction must not block NEW authoritative writes,
         // duplicate checks, or conflicts. Exercise the real Arc CommandBus.

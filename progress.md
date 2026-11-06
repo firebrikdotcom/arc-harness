@@ -1,5 +1,12 @@
 # Audit RAM repair handoff
 
+## Audit race regression diagnosis — 2026-11-06
+
+- On preserved master `03e1a5c`, temporary dispatch diagnostics reproduced `conflict-race: [503, 503]`: both real Arc append attempts returned `AppendFailed / DatabaseError: database is locked`; this was not a successful append followed by a publish error. Evidence: `/tmp/audit-race-diagnostic.log`. Temporary diagnostic logging was removed.
+- Corrected the test's assumption that overlapping SQLite writers always produce a 201: when neither fact committed, require both responses to be retryable 503 and require a subsequent sequential retry to return 201; otherwise require an acknowledged durable success. Validate each successful response against its durable payload, reject false conflicts for identical data, and query the authoritative source for exactly one immutable fact after matching retries and conflicting requests. Production ingestion behavior remains unchanged.
+- Verification: 20 consecutive scoped regression passes (`/tmp/audit-race-repeated.log`); full audit suite 106 passed plus isolated child, 74.76 seconds (`/tmp/audit-race-full.log`); formatter and `git diff --check` passed. Child RSS: 29,164 KiB for 512 events and 34,304 KiB for 8,192 events.
+- Changed only `services/harness-audit/src/routes.rs` test and this handoff; no commit, deployment, branch, worktree, or production database change. Parent still owns integration harness gates, review, commit and CI.
+
 ## Current urgent handoff — source write isolation
 
 - Current master; no worker commit, branch, worktree, deployment, or live-database changes. Parent build run: `20261106T055658Z-968313`.
