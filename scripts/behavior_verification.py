@@ -3,9 +3,12 @@
 import argparse
 import hashlib
 import json
+import os
+import subprocess
+import uuid
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_BYTES = 262144
@@ -134,7 +137,10 @@ def validate_report(report, receipt):
     artifacts = report["artifacts"]
     if not isinstance(artifacts, list) or len(artifacts) > 100 or (outcome == "passed" and not artifacts):
         raise Invalid("report: invalid artifacts")
-    root = Path(receipt["evidence_dir"]).resolve(strict=True)
+    evidence = Path(receipt["evidence_dir"])
+    root = evidence.resolve(strict=True)
+    if root != evidence or ("evidence_inode" in receipt and [root.stat().st_dev, root.stat().st_ino] != receipt["evidence_inode"]):
+        raise Invalid("attempt evidence directory was replaced")
     if not root.is_dir():
         raise Invalid("attempt evidence directory is missing")
     result = []
@@ -153,16 +159,125 @@ def validate_report(report, receipt):
         raise Invalid("report: duplicate artifact")
     return result
 
+def identity(project):
+    root = Path(project).resolve(strict=True)
+    target = os.environ.get("HARNESS_BEHAVIOR_TARGET", "")
+    run = os.environ.get("HARNESS_BEHAVIOR_RUN_ID", "")
+    run_dir = os.environ.get("HARNESS_BEHAVIOR_RUN_DIR", "")
+    if not target or Path(target).resolve() != root or not run or not run_dir:
+        raise Invalid("behavior commands require the current project run through harness")
+    if validate(root) in ("not enabled", "disabled"):
+        raise Invalid("behavior verification is not enabled")
+    tree = subprocess.check_output(["sh", str(Path(__file__).with_name("tree-hash.sh")), str(root)], text=True).strip()
+    if not tree or tree in ("none", "unknown"):
+        raise Invalid("source tree identity is unavailable")
+    manifest = load_json(root / ".harness-verification.json")
+    paths = {".harness-verification.json", manifest["guide"], manifest["index"]}
+    for feature in manifest["features"]:
+        paths.add(feature["document"])
+        paths.update(ref["path"] for ref in feature["references"])
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(path.encode() + b"\0" + document(root, path).read_bytes() + b"\0")
+    return root, run, Path(run_dir), tree, digest.hexdigest(), {f["id"] for f in manifest["features"]}
+
+
+def begin(project, features, evidence_dir):
+    root, run, run_dir, tree, definition, known = identity(project)
+    if not features or len(set(features)) != len(features) or not set(features) <= known:
+        raise Invalid("features must be distinct registered IDs")
+    path = Path(evidence_dir)
+    if not path.is_absolute() or path.exists() or path.is_symlink():
+        raise Invalid("evidence directory must be an unused absolute path")
+    parent = path.parent.resolve(strict=True)
+    path = parent / path.name
+    if not parent.is_relative_to(root) or any(part in (".git", ".harness-db") for part in path.relative_to(root).parts):
+        raise Invalid("evidence directory must be within the project, outside protected locations")
+    ignored = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "--no-index", str(path)], check=False)
+    if ignored.returncode != 0:
+        raise Invalid("evidence directory must be ignored by git")
+    path.mkdir(mode=0o700)
+    attempt = uuid.uuid4().hex
+    receipt = {"attempt": attempt, "run": run, "project": str(root), "tree": tree,
+               "definition": definition, "features": features, "evidence_dir": str(path),
+               "created_at": datetime.now(timezone.utc).isoformat(),
+               "evidence_inode": [path.stat().st_dev, path.stat().st_ino]}
+    directory = run_dir / "behavior"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    (directory / (attempt + ".json")).write_text(json.dumps({"receipt": receipt}) + "\n")
+    return attempt
+
+
+def record(project, attempt, report_path):
+    root, run, run_dir, tree, definition, _ = identity(project)
+    if not re.fullmatch(r"[0-9a-f]{32}", attempt):
+        raise Invalid("invalid attempt ID")
+    path = run_dir / "behavior" / (attempt + ".json")
+    data = load_json(path)
+    receipt = data["receipt"]
+    if receipt["run"] != run or receipt["project"] != str(root) or receipt["tree"] != tree or receipt["definition"] != definition:
+        raise Invalid("attempt is stale or belongs to another run or project")
+    if "report" in data:
+        raise Invalid("attempt already recorded; begin a new attempt")
+    report = load_json(Path(report_path))
+    artifacts = validate_report(report, receipt)
+    if datetime.fromisoformat(report["started_at"].replace("Z", "+00:00")) < datetime.fromisoformat(receipt["created_at"]):
+        raise Invalid("report predates attempt")
+    data.update(report=report, artifacts=artifacts)
+    tmp = path.with_suffix(".tmp-" + uuid.uuid4().hex)
+    tmp.write_text(json.dumps(data) + "\n")
+    os.replace(tmp, path)
+    return "recorded " + report["outcome"]
+
+
+def check(project, features):
+    root, run, run_dir, tree, definition, known = identity(project)
+    if not features or len(set(features)) != len(features) or not set(features) <= known:
+        raise Invalid("features must be distinct registered IDs")
+    passing = set()
+    for path in (run_dir / "behavior").glob("*.json"):
+        try:
+            data = load_json(path)
+            receipt, report = data["receipt"], data["report"]
+            if (receipt["run"], receipt["project"], receipt["tree"], receipt["definition"]) != (run, str(root), tree, definition):
+                continue
+            if report["outcome"] == "passed" and validate_report(report, receipt) == data["artifacts"]:
+                passing.update(receipt["features"])
+        except (Invalid, OSError, ValueError, KeyError, TypeError):
+            continue
+    missing = set(features) - passing
+    if missing:
+        raise Invalid("missing current passing evidence: " + ", ".join(sorted(missing)))
+    return "current passing evidence: " + ", ".join(features)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["validate"])
+    parser.add_argument("action", choices=["validate", "begin", "record", "check"])
     parser.add_argument("--project", required=True)
+    parser.add_argument("--features", nargs="+")
+    parser.add_argument("--feature", action="append", dest="feature")
+    parser.add_argument("--evidence-dir")
+    parser.add_argument("--attempt")
+    parser.add_argument("--report")
     args = parser.parse_args()
     try:
-        print(validate(args.project))
+        if args.action == "validate":
+            result = validate(args.project)
+        elif args.action == "begin":
+            if not args.evidence_dir:
+                raise Invalid("begin requires --evidence-dir")
+            result = begin(args.project, args.features or args.feature, args.evidence_dir)
+        elif args.action == "record":
+            if not args.attempt or not args.report:
+                raise Invalid("record requires --attempt and --report")
+            result = record(args.project, args.attempt, args.report)
+        else:
+            result = check(args.project, args.features or args.feature)
+        print(result)
         return 0
-    except (Invalid, OSError, UnicodeError, ValueError) as exc:
-        print(f"behavior validation: {exc}", file=sys.stderr)
+    except (Invalid, OSError, UnicodeError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+        print(f"behavior verification: {exc}", file=sys.stderr)
         return 1
 
 

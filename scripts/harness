@@ -1736,7 +1736,12 @@ case "$COMMAND" in
     exec python3 "$SCRIPT_DIR/task_managers.py" --db-root "${HARNESS_DB_ROOT:-$ROOT/.harness-db}" "$@"
     ;;
   behavior)
-    exec python3 "$SCRIPT_DIR/behavior_verification.py" "$@"
+    if [ "${1:-}" = validate ]; then
+      exec python3 "$SCRIPT_DIR/behavior_verification.py" "$@"
+    fi
+    require_run
+    HARNESS_BEHAVIOR_RUN_DIR=$RUN_DIR HARNESS_BEHAVIOR_RUN_ID=$(state_get RUN_ID) \
+      HARNESS_BEHAVIOR_TARGET=$(run_target) exec python3 "$SCRIPT_DIR/behavior_verification.py" "$@"
     ;;
   board)
     exec python3 "$SCRIPT_DIR/board.py" --db-root "${HARNESS_DB_ROOT:-$ROOT/.harness-db}" "$@"

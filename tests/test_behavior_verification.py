@@ -115,3 +115,47 @@ class ReportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AttemptTests(unittest.TestCase):
+    def setUp(self):
+        ValidationTests.setUp(self)
+        import os
+        import subprocess
+        from unittest.mock import patch
+        ValidationTests.save(self)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        (self.root / ".gitignore").write_text("evidence/\n")
+        (self.root / "evidence").mkdir()
+        self.run_dir = self.root / ".run"
+        self.run_dir.mkdir()
+        (self.root / ".gitignore").write_text("evidence/\n.run/\n")
+        env = {"HARNESS_BEHAVIOR_TARGET": str(self.root), "HARNESS_BEHAVIOR_RUN_ID": "run", "HARNESS_BEHAVIOR_RUN_DIR": str(self.run_dir)}
+        self.patch = patch.dict(os.environ, env)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+
+    def test_receipt_integrity_and_staleness(self):
+        from datetime import datetime, timezone
+        directory = self.root / "evidence" / "attempt"
+        attempt = behavior.begin(self.root, ["example"], str(directory))
+        receipt = json.loads((self.run_dir / "behavior" / (attempt + ".json")).read_text())["receipt"]
+        (directory / "proof").write_text("proof")
+        now = datetime.now(timezone.utc).isoformat()
+        report = {"version": 1, **{k: receipt[k] for k in ("attempt", "run", "project", "tree", "definition", "features")}, "outcome": "passed", "started_at": now, "ended_at": now, "source_build": "build", "runtime_build": "build", "platform": "test", "configuration": "test", "test_data": "fixture", "readiness": [{"description": "ready", "observed": "yes"}], "actions": [{"action": "test", "expected": "yes", "observed": "yes"}], "cleanup": [{"description": "fixture", "observed": "removed"}], "artifacts": ["proof"], "reason": ""}
+        report_path = directory / "report.json"
+        report_path.write_text(json.dumps(report))
+        behavior.record(self.root, attempt, report_path)
+        behavior.check(self.root, ["example"])
+        (directory / "proof").write_text("changed")
+        with self.assertRaises(behavior.Invalid):
+            behavior.check(self.root, ["example"])
+        (directory / "proof").write_text("proof")
+        (self.root / "guide.md").write_text("changed")
+        with self.assertRaises(behavior.Invalid):
+            behavior.check(self.root, ["example"])
+
+    def test_rejects_unowned_and_unignored_directories(self):
+        with self.assertRaises(behavior.Invalid):
+            behavior.begin(self.root, ["example"], str(self.root / "unignored"))
+        with self.assertRaises(behavior.Invalid):
+            behavior.begin(self.root, ["example"], str(self.root / "evidence"))
