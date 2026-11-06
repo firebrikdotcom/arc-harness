@@ -3036,6 +3036,7 @@ mod tests {
                 render_directory_value(&expected)
             );
         }
+        let mut connection = store.connection().unwrap();
         // Multiple pages, ties, Unicode sorting, empty rows and every sort retain the
         // pure reducer's results, including global facets and pulse counts.
         for index in 0..35 {
@@ -3105,7 +3106,10 @@ mod tests {
             );
         }
         drop(connection);
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}.dashboard.sqlite{suffix}", path.display()));
+        }
     }
 
     #[test]

@@ -15,19 +15,6 @@ where
     web::block(move || read(&store)).await?
 }
 
-/// Ingestion acknowledges only after its committed source events are projected.
-async fn refresh_report<T, F>(store: web::Data<ReportStore>, read: F) -> anyhow::Result<T>
-where
-    T: Send + 'static,
-    F: FnOnce(&ReportStore) -> anyhow::Result<T> + Send + 'static,
-{
-    web::block(move || {
-        while store.refresh()? == crate::reports::CATCH_UP_BATCH {}
-        read(&store)
-    })
-    .await?
-}
-
 #[derive(Debug, Deserialize)]
 struct RecordAuditEvent {
     id: String,
@@ -76,9 +63,18 @@ async fn record_event(
             return HttpResponse::BadRequest().json(json!({"error": error}));
         }
     }
+    persist_event(body, bus, store).await
+}
+
+/// Acknowledge durable source commits; the background worker owns projection catch-up.
+async fn persist_event(
+    body: web::Json<RecordAuditEvent>,
+    bus: web::Data<CommandBus<AuditEventAggregate>>,
+    store: web::Data<ReportStore>,
+) -> HttpResponse {
     // Stable queued IDs make a retry after an ambiguous response safe.
     let id = body.id.clone();
-    match refresh_report(store.clone(), move |store| store.get_event(&id)).await {
+    match read_report(store.clone(), move |store| store.get_source_event(&id)).await {
         Ok(Some(row)) => {
             return if row["event_type"] == body.event_type && row["payload"] == body.payload {
                 HttpResponse::Ok().json(json!({"id": body.id, "duplicate": true}))
@@ -98,17 +94,12 @@ async fn record_event(
         payload: body.payload.clone(),
     };
     match bus.dispatch(command, CommandContext::system()).await {
-        Ok(_) => match refresh_report(store, |_| Ok(())).await {
-            Ok(()) => HttpResponse::Created().json(json!({"id": body.id})),
-            Err(error) => {
-                HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()}))
-            }
-        },
+        Ok(_) => HttpResponse::Created().json(json!({"id": body.id})),
         Err(error) => {
             // Another request may have committed this ID after our initial read,
             // or dispatch may have persisted before reporting a publish failure.
             let id = body.id.clone();
-            match refresh_report(store, move |store| store.get_event(&id)).await {
+            match read_report(store, move |store| store.get_source_event(&id)).await {
                 Ok(Some(row))
                     if row["event_type"] == body.event_type && row["payload"] == body.payload =>
                 {
@@ -116,7 +107,17 @@ async fn record_event(
                 }
                 Ok(Some(_)) => HttpResponse::Conflict()
                     .json(json!({"error": "event ID reused with different data"})),
-                Ok(None) => HttpResponse::BadRequest().json(json!({"error": error.to_string()})),
+                Ok(None) => {
+                    // Validation is permanent; storage/publish failures must remain retryable.
+                    if matches!(
+                        error,
+                        arc_core::command_bus::CommandBusError::HandleFailed { .. }
+                    ) {
+                        HttpResponse::BadRequest().json(json!({"error": error.to_string()}))
+                    } else {
+                        HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()}))
+                    }
+                }
                 Err(error) => {
                     HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()}))
                 }
@@ -273,6 +274,119 @@ mod tests {
     use super::*;
 
     #[actix_web::test]
+    async fn ingest_uses_durable_ids_without_draining_backlog() {
+        use actix_web::http::StatusCode;
+        use diesel::{connection::SimpleConnection, Connection, SqliteConnection};
+        let path =
+            std::env::temp_dir().join(format!("harness-ingest-{}.sqlite", uuid::Uuid::new_v4()));
+        let url = path.to_str().unwrap();
+        let mut conn = SqliteConnection::establish(url).unwrap();
+        conn.batch_execute(include_str!("../migrations/00000000000000_arc_base/up.sql"))
+            .unwrap();
+        let store = web::Data::new(ReportStore::open(url).unwrap());
+        let stack = arc_web::helpers::es_stack::build::<AuditEventAggregate>(url, vec![], None)
+            .await
+            .unwrap();
+        let bus = web::Data::new(stack.command_bus);
+        // More than one catch-up batch remains pending; requests must not project it.
+        conn.batch_execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<600) INSERT INTO events(event_id,aggregate_type,aggregate_id,sequence,event_type,payload,timestamp,actor_id,timestamp_utc_us,correlation_id) SELECT 'backlog-'||i,'AuditEvent','backlog-'||i,1,'AuditEventRecorded','{\"event_type\":\"jev.agent\",\"payload\":{}}',1,'system',1,'backlog' FROM n;").unwrap();
+        // A corrupt unrelated stream must not be loaded by per-ID dispatch.
+        conn.batch_execute(
+            "UPDATE events SET payload='invalid-json' WHERE aggregate_id='backlog-600';",
+        )
+        .unwrap();
+        let body = |id: &str, value: i64| {
+            web::Json(RecordAuditEvent {
+                id: id.into(),
+                event_type: "jev.agent".into(),
+                payload: json!({"value":value}),
+            })
+        };
+        let request =
+            |id: &'static str, value| persist_event(body(id, value), bus.clone(), store.clone());
+        let created =
+            actix_web::rt::time::timeout(std::time::Duration::from_secs(2), request("new", 1))
+                .await
+                .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert!(store.get_event("new").unwrap().is_none());
+        assert_eq!(
+            store.get_source_event("new").unwrap().unwrap()["payload"]["value"],
+            1
+        );
+        assert_eq!(request("new", 1).await.status(), StatusCode::OK);
+        assert_eq!(request("new", 2).await.status(), StatusCode::CONFLICT);
+        // Force overlapping requests through the real SQLite command bus. A
+        // losing SQLite writer can retry, but must never append a second fact.
+        for (id, second) in [("same-race", 1), ("conflict-race", 2)] {
+            let (a, b) = tokio::join!(request(id, 1), request(id, second));
+            let statuses = [a.status(), b.status()];
+            assert!(statuses.contains(&StatusCode::CREATED));
+            for status in statuses {
+                assert!(matches!(
+                    status,
+                    StatusCode::CREATED
+                        | StatusCode::OK
+                        | StatusCode::CONFLICT
+                        | StatusCode::SERVICE_UNAVAILABLE
+                ));
+            }
+            let saved = store.get_source_event(id).unwrap().unwrap()["payload"]["value"]
+                .as_i64()
+                .unwrap();
+            assert_eq!(request(id, saved).await.status(), StatusCode::OK);
+            assert_eq!(request(id, 3).await.status(), StatusCode::CONFLICT);
+        }
+        // A long catch-up transaction must not block NEW authoritative writes,
+        // duplicate checks, or conflicts. Exercise the real Arc CommandBus.
+        let mut projection = store.connection().unwrap();
+        projection.batch_execute("BEGIN IMMEDIATE;").unwrap();
+        let created = actix_web::rt::time::timeout(
+            std::time::Duration::from_secs(1),
+            request("during-projection", 7),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(
+            request("during-projection", 7).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request("during-projection", 8).await.status(),
+            StatusCode::CONFLICT
+        );
+        assert!(store.get_event("during-projection").unwrap().is_none());
+        let duplicate =
+            actix_web::rt::time::timeout(std::time::Duration::from_secs(1), request("new", 1))
+                .await
+                .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        projection.batch_execute("ROLLBACK;").unwrap();
+        drop(projection);
+        conn.batch_execute(r#"UPDATE events SET payload='{"event_type":"jev.agent","payload":{}}' WHERE aggregate_id='backlog-600';"#).unwrap();
+        // Eventual catch-up projects exactly one fact per accepted ID.
+        while store.refresh().unwrap() > 0 {}
+        assert_eq!(store.raw_summary().unwrap()["events"], 604);
+        assert!(store.get_event("new").unwrap().is_some());
+        drop(bus);
+        drop(stack.projection_engine);
+        drop(stack.read_model_store);
+        drop(store);
+        drop(conn);
+        for suffix in [
+            "",
+            "-wal",
+            "-shm",
+            ".dashboard.sqlite",
+            ".dashboard.sqlite-wal",
+            ".dashboard.sqlite-shm",
+        ] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    #[actix_web::test]
     async fn page_reads_use_committed_reports_while_pending_updates_are_write_locked() {
         use diesel::{connection::SimpleConnection, Connection, SqliteConnection};
         let path = std::env::temp_dir().join(format!(
@@ -284,7 +398,9 @@ mod tests {
         conn.batch_execute(r#"CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,aggregate_id TEXT NOT NULL,aggregate_type TEXT NOT NULL,event_type TEXT NOT NULL,payload TEXT NOT NULL,sequence BIGINT NOT NULL,timestamp_utc_us BIGINT NOT NULL);
             INSERT INTO events VALUES(1,'first','AuditEvent','AuditEventRecorded','{"event_type":"jev.agent","payload":{}}',1,1);"#).unwrap();
         store.refresh().unwrap();
-        conn.batch_execute(r#"INSERT INTO events VALUES(2,'pending','AuditEvent','AuditEventRecorded','{"event_type":"jev.agent","payload":{}}',1,2); BEGIN IMMEDIATE;"#).unwrap();
+        conn.batch_execute(r#"INSERT INTO events VALUES(2,'pending','AuditEvent','AuditEventRecorded','{"event_type":"jev.agent","payload":{}}',1,2);"#).unwrap();
+        let mut projection = store.connection().unwrap();
+        projection.batch_execute("BEGIN IMMEDIATE;").unwrap();
         let result = actix_web::rt::time::timeout(
             std::time::Duration::from_secs(1),
             read_report(web::Data::new(store.clone()), |store| store.raw_summary()),
@@ -293,7 +409,8 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(result["events"], 1);
-        conn.batch_execute("ROLLBACK;").unwrap();
+        projection.batch_execute("ROLLBACK;").unwrap();
+        drop(projection);
         assert_eq!(store.refresh().unwrap(), 1);
         assert_eq!(store.raw_summary().unwrap()["events"], 2);
         drop(conn);
@@ -301,19 +418,26 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}.dashboard.sqlite{suffix}", path.display()));
+        }
     }
 
     #[actix_web::test]
     async fn workflow_next_link_stops_at_last_page() {
         use actix_web::{test, App};
-        use diesel::{connection::SimpleConnection, Connection, SqliteConnection};
+        use diesel::connection::SimpleConnection;
         let path = std::env::temp_dir().join(format!(
             "harness-workflow-pages-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let store = ReportStore::open(path.to_str().unwrap()).unwrap();
-        let app =
-            test::init_service(App::new().app_data(web::Data::new(store)).configure(config)).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(store.clone()))
+                .configure(config),
+        )
+        .await;
         let empty = test::call_service(
             &app,
             test::TestRequest::get()
@@ -324,7 +448,7 @@ mod tests {
         assert!(empty.status().is_success());
         assert_eq!(empty.headers().get("X-Total-Count").unwrap(), "0");
         assert!(!empty.headers().contains_key("Link"));
-        let mut conn = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        let mut conn = store.connection().unwrap();
         conn.batch_execute("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO dashboard_reports(key,document) SELECT 'directory:' || i, json_object('session_id',i,'last_at',i) FROM n;").unwrap();
         for (offset, length, next) in [
             (0, 100, true),
@@ -357,6 +481,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}.dashboard.sqlite{suffix}", path.display()));
+        }
     }
 
     #[test]

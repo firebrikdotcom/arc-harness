@@ -448,6 +448,7 @@ fn refresh_route_groups(
 #[derive(Clone)]
 pub struct ReportStore {
     database_url: String,
+    projection_url: String,
 }
 #[derive(Default)]
 pub struct EventFilter {
@@ -515,8 +516,21 @@ const TOTALS: &[&str] = &[
 ];
 impl ReportStore {
     pub fn open(database_url: &str) -> Result<Self> {
+        // Resolve SQLite's actual file path, including file: URI aliases, so all
+        // instances share one sidecar and never attach or write-lock the source.
+        let mut source = SqliteConnection::establish(database_url)?;
+        let file = diesel::sql_query(
+            "SELECT file AS document FROM pragma_database_list WHERE name='main'",
+        )
+        .get_result::<Document>(&mut source)?
+        .document;
+        anyhow::ensure!(
+            !file.is_empty(),
+            "dashboard reports require a file-backed source database"
+        );
         let store = Self {
             database_url: database_url.into(),
+            projection_url: format!("{file}.dashboard.sqlite"),
         };
         let mut conn = store.connection()?;
         conn.batch_execute("PRAGMA journal_mode=WAL;
@@ -559,17 +573,31 @@ impl ReportStore {
         Ok(store)
     }
     pub(crate) fn connection(&self) -> Result<SqliteConnection> {
-        let mut conn = SqliteConnection::establish(&self.database_url)?;
+        let mut conn = SqliteConnection::establish(&self.projection_url)?;
         conn.batch_execute(
             "PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA temp_store=FILE;",
         )?;
+        Ok(conn)
+    }
+    fn source_connection(&self) -> Result<SqliteConnection> {
+        let mut conn = SqliteConnection::establish(&self.database_url)?;
+        conn.batch_execute("PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192;")?;
         Ok(conn)
     }
     /// Refresh only committed source rows after the durable cursor. An invalid source
     /// row fails the entire batch; it is never silently skipped or acknowledged.
     pub fn refresh(&self) -> Result<usize> {
         let mut conn = self.connection()?;
-        let pending = diesel::sql_query("SELECT EXISTS(SELECT 1 FROM events WHERE id > (SELECT position FROM dashboard_checkpoint WHERE singleton=1)) AS position").get_result::<Position>(&mut conn)?.position;
+        let mut source_conn = self.source_connection()?;
+        let cursor =
+            diesel::sql_query("SELECT position FROM dashboard_checkpoint WHERE singleton=1")
+                .get_result::<Position>(&mut conn)?
+                .position;
+        let pending =
+            diesel::sql_query("SELECT EXISTS(SELECT 1 FROM events WHERE id > ?) AS position")
+                .bind::<BigInt, _>(cursor)
+                .get_result::<Position>(&mut source_conn)?
+                .position;
         if pending == 0 {
             // Existing databases gain verdict summaries gradually, without resetting
             // the source checkpoint or rebuilding every session at startup.
@@ -586,9 +614,12 @@ impl ReportStore {
             });
         }
         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
+            // Serialize refreshers on the sidecar, then re-read its committed
+            // cursor. This source SELECT ends before any projection work; its
+            // independent connection never participates in the writer transaction.
             let cursor = diesel::sql_query("SELECT position FROM dashboard_checkpoint WHERE singleton=1").get_result::<Position>(conn)?.position;
             let source = diesel::sql_query("SELECT id AS position, aggregate_id, aggregate_type, event_type, payload, sequence, timestamp_utc_us AS recorded_at_us FROM events WHERE id > ? ORDER BY id LIMIT ?")
-                .bind::<BigInt,_>(cursor).bind::<BigInt,_>(CATCH_UP_BATCH as i64).load::<Source>(conn)?;
+                .bind::<BigInt,_>(cursor).bind::<BigInt,_>(CATCH_UP_BATCH as i64).load::<Source>(&mut source_conn)?;
             if source.is_empty() { return Ok(0); }
             let mut sessions = BTreeSet::new();
             let mut partitions = BTreeSet::new();
@@ -635,6 +666,17 @@ impl ReportStore {
             diesel::sql_query("UPDATE dashboard_checkpoint SET position=? WHERE singleton=1").bind::<BigInt,_>(source.last().unwrap().position).execute(conn)?;
             Ok(source.len())
         })
+    }
+    /// Authoritative ID lookup, independent of the dashboard catch-up cursor.
+    /// The source index starts with (aggregate_type, aggregate_id, sequence).
+    pub fn get_source_event(&self, id: &str) -> Result<Option<Value>> {
+        let mut conn = self.source_connection()?;
+        diesel::sql_query("SELECT payload AS document FROM events WHERE aggregate_type='AuditEvent' AND aggregate_id=? AND sequence=1 AND event_type='AuditEventRecorded'")
+            .bind::<Text, _>(id)
+            .get_result::<Document>(&mut conn)
+            .optional()?
+            .map(|d| Ok(serde_json::from_str(&d.document)?))
+            .transpose()
     }
     pub fn get_event(&self, id: &str) -> Result<Option<Value>> {
         let mut conn = self.connection()?;
@@ -1077,7 +1119,7 @@ mod tests {
             let path = std::env::temp_dir()
                 .join(format!("harness-reports-{}.sqlite", uuid::Uuid::new_v4()));
             let store = ReportStore::open(path.to_str().unwrap()).unwrap();
-            store.connection().unwrap().batch_execute("CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,aggregate_id TEXT NOT NULL,aggregate_type TEXT NOT NULL DEFAULT 'AuditEvent',event_type TEXT NOT NULL,payload TEXT NOT NULL,sequence BIGINT NOT NULL,timestamp_utc_us BIGINT NOT NULL)").unwrap();
+            store.source_connection().unwrap().batch_execute("CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,aggregate_id TEXT NOT NULL,aggregate_type TEXT NOT NULL DEFAULT 'AuditEvent',event_type TEXT NOT NULL,payload TEXT NOT NULL,sequence BIGINT NOT NULL,timestamp_utc_us BIGINT NOT NULL)").unwrap();
             Self { store, path }
         }
         fn append(&self, id: &str, kind: &str, payload: Value, at: i64) {
@@ -1088,11 +1130,14 @@ mod tests {
             );
         }
         fn source(&self, id: &str, payload: &str, at: i64) {
-            diesel::sql_query("INSERT INTO events(aggregate_id,event_type,payload,sequence,timestamp_utc_us) VALUES(?,'AuditEventRecorded',?,1,?)").bind::<Text,_>(id).bind::<Text,_>(payload).bind::<BigInt,_>(at).execute(&mut self.store.connection().unwrap()).unwrap();
+            diesel::sql_query("INSERT INTO events(aggregate_id,event_type,payload,sequence,timestamp_utc_us) VALUES(?,'AuditEventRecorded',?,1,?)").bind::<Text,_>(id).bind::<Text,_>(payload).bind::<BigInt,_>(at).execute(&mut self.store.source_connection().unwrap()).unwrap();
         }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{suffix}", self.store.projection_url));
+            }
             let _ = std::fs::remove_file(&self.path);
             let _ = std::fs::remove_file(format!("{}-wal", self.path.display()));
             let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
@@ -1214,7 +1259,7 @@ mod tests {
         let mut before = None;
         for end in [512, 8192] {
             let start = if end == 512 { 0 } else { 512 };
-            let mut conn = f.store.connection().unwrap();
+            let mut conn = f.store.source_connection().unwrap();
             conn.transaction::<_,anyhow::Error,_>(|conn| {
                 for n in start..end {
                     let payload=json!({"session_id":"large","task_id":"one","occurred_at":format!("{n:08}"),"description":"x".repeat(1500),"revision":n});
@@ -2220,11 +2265,75 @@ mod tests {
         // Repair is test-only; retry includes the previously rolled-back valid row.
         diesel::sql_query("UPDATE events SET payload=? WHERE aggregate_id='bad'")
             .bind::<Text, _>(json!({"event_type":"other","payload":{}}).to_string())
-            .execute(&mut f.store.connection().unwrap())
+            .execute(&mut f.store.source_connection().unwrap())
             .unwrap();
         assert_eq!(f.store.refresh().unwrap(), 2);
         assert_eq!(f.store.raw_summary().unwrap()["events"], 3);
     }
+    #[test]
+    fn sidecar_replays_without_modifying_legacy_source_reports() {
+        let f = Fixture::new();
+        let mut source = f.store.source_connection().unwrap();
+        source.batch_execute("CREATE TABLE dashboard_reports(key TEXT PRIMARY KEY,document TEXT); INSERT INTO dashboard_reports VALUES('legacy','preserve'); CREATE TABLE dashboard_checkpoint(position INTEGER); INSERT INTO dashboard_checkpoint VALUES(999);").unwrap();
+        f.append("original", "other", json!({}), 1);
+        let reopened = ReportStore::open(f.path.to_str().unwrap()).unwrap();
+        assert_eq!(reopened.refresh().unwrap(), 1);
+        assert_eq!(reopened.raw_summary().unwrap()["events"], 1);
+        assert_eq!(
+            diesel::sql_query("SELECT document FROM dashboard_reports WHERE key='legacy'")
+                .get_result::<Document>(&mut source)
+                .unwrap()
+                .document,
+            "preserve"
+        );
+        assert_eq!(
+            diesel::sql_query("SELECT position FROM dashboard_checkpoint")
+                .get_result::<Position>(&mut source)
+                .unwrap()
+                .position,
+            999
+        );
+        // Losing the disposable sidecar replays authoritative events from zero.
+        drop(reopened);
+        for suffix in ["", "-wal", "-shm"] {
+            std::fs::remove_file(format!("{}{suffix}", f.store.projection_url)).ok();
+        }
+        let rebuilt = ReportStore::open(f.path.to_str().unwrap()).unwrap();
+        assert_eq!(rebuilt.refresh().unwrap(), 1);
+        assert_eq!(rebuilt.raw_summary().unwrap()["events"], 1);
+    }
+
+    #[test]
+    fn interrupted_sidecar_transaction_restarts_at_last_committed_cursor() {
+        const CHILD: &str = "HARNESS_AUDIT_CRASH_SOURCE";
+        if let Ok(path) = std::env::var(CHILD) {
+            let store = ReportStore::open(&path).unwrap();
+            let mut conn = store.connection().unwrap();
+            conn.batch_execute("BEGIN IMMEDIATE; UPDATE dashboard_checkpoint SET position=999; DELETE FROM dashboard_events; DELETE FROM dashboard_reports;").unwrap();
+            // Exit without destructors/rollback, as an interrupted service would.
+            std::process::exit(17);
+        }
+        let f = Fixture::new();
+        f.append("a", "other", json!({}), 1);
+        f.store.refresh().unwrap();
+        f.append("b", "other", json!({}), 2);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "reports::tests::interrupted_sidecar_transaction_restarts_at_last_committed_cursor",
+            ])
+            .env(CHILD, &f.path)
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(17));
+        let reopened = ReportStore::open(f.path.to_str().unwrap()).unwrap();
+        assert_eq!(reopened.raw_summary().unwrap()["events"], 1);
+        assert!(reopened.get_event("a").unwrap().is_some());
+        assert_eq!(reopened.refresh().unwrap(), 1);
+        assert_eq!(reopened.raw_summary().unwrap()["events"], 2);
+        assert_eq!(reopened.refresh().unwrap(), 0);
+    }
+
     #[test]
     fn current_refresh_and_reads_do_not_need_writer_lock() {
         let f = Fixture::new();
@@ -2244,7 +2353,7 @@ mod tests {
         f.store.refresh().unwrap();
         let mut workers = Vec::new();
         for _ in 0..3 {
-            let store = f.store.clone();
+            let store = ReportStore::open(f.path.to_str().unwrap()).unwrap();
             workers.push(std::thread::spawn(move || {
                 for _ in 0..30 {
                     store.refresh().unwrap();

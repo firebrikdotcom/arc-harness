@@ -206,7 +206,11 @@ The gate uses UserPromptSubmit, PreToolUse and Stop hooks; policy errors return 
 ## Incremental dashboard reports
 
 `src/reports.rs` owns the SQLite `dashboard_events`, `dashboard_reports` and
-`dashboard_checkpoint` tables. First startup backfills them from immutable
+`dashboard_checkpoint` tables in a separate `<source SQLite file>.dashboard.sqlite`
+sidecar (for example `database/database.sqlite.dashboard.sqlite`). SQLite's resolved
+source filename determines the sidecar path, so aliases use the same projection.
+Existing derived tables in the original database are left untouched; they are no
+longer read or updated. First startup backfills the new sidecar from immutable
 `events.id` positions. Subsequent updates consume only newer committed rows and
 atomically save the affected reports together with their checkpoint. A crash or
 invalid source row leaves the previous checkpoint intact for retry. Unrepresentable
@@ -219,13 +223,29 @@ are persisted reports. Session directories use compact search/filter facts;
 event lists use indexed filters and bounded SQL limits. Accuracy charts retain
 small checkpoint/outcome facts for the viewer's timezone. Report work runs off
 the HTTP worker threads; page reads use the last atomically committed reports without waiting for catch-up.
-Ingestion acknowledges after projection; a background worker also catches up every
-500 ms, recovering source commits left by an interrupted request.
+Ingestion acknowledges the authoritative source commit without waiting for projection;
+idempotency and conflicts use the source stream. A background worker catches up every
+500 ms. Reports are eventually consistent and can lag during the initial replay;
+accepted events remain durable even if projection fails or the process stops.
 
-WAL and bounded SQLite busy waiting allow readers during report writes. The
+WAL and bounded SQLite busy waiting allow readers during report writes. Projection
+writers serialize in the sidecar and re-read its checkpoint after acquiring that
+lock. Each bounded source SELECT uses a separate connection and completes before
+report reduction; no attached source database shares the projection transaction.
+A long report write therefore cannot hold the source database's writer lock. The
 report schema version invalidates only derived dashboard tables when reducer
 semantics change; original events and the legacy view are preserved. Never reset
 the source event table to rebuild reports.
+
+Back up the authoritative source with SQLite's online backup API (or with the
+service stopped and all connections closed); copying a live SQLite main file alone
+can omit WAL commits. The sidecar is disposable and need not be backed up. For
+recovery, stop the service, preserve the source and its WAL, remove only the
+`.dashboard.sqlite` sidecar and its `-wal`/`-shm` companions, then restart to replay.
+After restoring an older source backup, discard the sidecar as well so its cursor
+cannot remain ahead of the restored events. Do not delete snapshots, original
+legacy tables, or credentials. Replay can take time, and pages show only committed
+projection batches until catch-up finishes.
 
 Arc 0.8.5 still reads its event stream once when constructing the aggregate
 runtime. The harness registers no historical projector there, avoiding its old
