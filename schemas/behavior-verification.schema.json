@@ -1,26 +1,280 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Behavior verification definitions",
-  "description": "Manifest definitions. Report format is deferred until run ownership is implemented.",
+  "description": "Versioned manifest and report definitions; report validation also checks attempt binding and artifact safety.",
   "type": "object",
-  "required": ["version", "enabled", "guide", "index", "features"],
+  "required": [
+    "version",
+    "enabled",
+    "guide",
+    "index",
+    "features"
+  ],
   "additionalProperties": false,
   "properties": {
-    "version": {"const": 1},
-    "enabled": {"type": "boolean"},
-    "guide": {"type": "string", "minLength": 1},
-    "index": {"type": "string", "minLength": 1},
-    "features": {"type": "array", "minItems": 1, "maxItems": 100, "items": {
-      "type": "object", "additionalProperties": false,
-      "required": ["id", "document", "references"],
-      "properties": {
-        "id": {"type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
-        "document": {"type": "string", "minLength": 1},
-        "references": {"type": "array", "minItems": 1, "maxItems": 100, "items": {
-          "type": "object", "additionalProperties": false, "required": ["path", "id"],
-          "properties": {"path": {"type": "string", "minLength": 1}, "id": {"type": "string", "minLength": 1, "maxLength": 128}}
-        }}
+    "version": {
+      "const": 1
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "guide": {
+      "type": "string",
+      "minLength": 1
+    },
+    "index": {
+      "type": "string",
+      "minLength": 1
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "document",
+          "references"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "document": {
+            "type": "string",
+            "minLength": 1
+          },
+          "references": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "id"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          }
+        }
       }
-    }}
+    }
+  },
+  "$defs": {
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "attempt",
+        "run",
+        "project",
+        "tree",
+        "definition",
+        "features",
+        "outcome",
+        "started_at",
+        "ended_at",
+        "source_build",
+        "runtime_build",
+        "platform",
+        "configuration",
+        "test_data",
+        "readiness",
+        "actions",
+        "cleanup",
+        "artifacts",
+        "reason"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "run": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "project": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "tree": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "definition": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "started_at": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "ended_at": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "source_build": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "runtime_build": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "platform": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "configuration": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "test_data": {
+          "type": "string",
+          "maxLength": 4096,
+          "minLength": 1
+        },
+        "version": {
+          "const": 1
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "features": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+          }
+        },
+        "outcome": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "inconclusive"
+          ]
+        },
+        "readiness": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "description",
+              "observed"
+            ],
+            "properties": {
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "observed": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            }
+          }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "action",
+              "expected",
+              "observed"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "expected": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "observed": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            }
+          }
+        },
+        "cleanup": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "description",
+              "observed"
+            ],
+            "properties": {
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "observed": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            }
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
   }
 }

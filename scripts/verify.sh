@@ -795,6 +795,16 @@ if [ -f composer.json ] && has_cmd composer && has_cmd node; then
   load_json_scripts composer.json
 fi
 
+# Validate a present manifest even for docs-only work. Disabled manifests remain
+# outside the check count so existing opt-out verification behavior is unchanged.
+if [ -e "$PROJECT_ROOT/.harness-verification.json" ] || [ -L "$PROJECT_ROOT/.harness-verification.json" ]; then
+  if python3 "$SCRIPT_DIR/behavior_verification.py" validate --project "$PROJECT_ROOT" 2>/dev/null | grep -qx disabled; then
+    :
+  else
+    run_check "behavior:definitions" python3 "$SCRIPT_DIR/behavior_verification.py" validate --project "$PROJECT_ROOT"
+  fi
+fi
+
 run_category format verify_format
 run_category lint verify_lint
 if [ "$SCOPE" = "docs-only" ]; then

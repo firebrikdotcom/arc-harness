@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Validate explicitly opted-in behavioral verification definitions without running them."""
 import argparse
+import hashlib
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 MAX_BYTES = 262144
@@ -80,6 +82,76 @@ def validate(project):
                 raise Invalid(f"feature {name}: inventory ID {ref['id']} not found in {ref['path']}")
     return f"validated {len(seen)} features"
 
+
+
+def validate_report(report, receipt):
+    """Validate a captured report against an independently supplied attempt receipt.
+
+    This is deliberately not a command runner: actions and observations are data.
+    The caller owns receipt persistence and must revalidate artifacts at check time.
+    """
+    required = {"version", "attempt", "run", "project", "tree", "definition",
+                "features", "outcome", "started_at", "ended_at", "source_build",
+                "runtime_build", "platform", "configuration", "test_data",
+                "readiness", "actions", "cleanup", "artifacts", "reason"}
+    if not isinstance(report, dict) or set(report) != required or type(report["version"]) is not int or report["version"] != 1:
+        raise Invalid("report requires exactly the version 1 fields")
+    for field in ("attempt", "run", "project", "tree", "definition", "started_at", "ended_at",
+                  "source_build", "runtime_build", "platform", "configuration", "test_data", "reason"):
+        value = report[field]
+        if not isinstance(value, str) or len(value) > 4096 or (field != "reason" and not value.strip()):
+            raise Invalid(f"report: invalid {field}")
+    try:
+        start = datetime.fromisoformat(report["started_at"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(report["ended_at"].replace("Z", "+00:00"))
+        if start.tzinfo is None or end.tzinfo is None or end < start:
+            raise ValueError("timestamps must be ordered and include timezones")
+    except ValueError as exc:
+        raise Invalid(f"report: invalid timestamps: {exc}") from exc
+    for field in ("attempt", "run", "project", "tree", "definition", "features"):
+        if report[field] != receipt.get(field):
+            raise Invalid(f"report: {field} does not match attempt")
+    features = report["features"]
+    if not isinstance(features, list) or not features or len(features) > 100 or any(not isinstance(x, str) or not ID.fullmatch(x) for x in features) or len(set(features)) != len(features):
+        raise Invalid("report: invalid features")
+    outcome = report["outcome"]
+    if outcome not in ("passed", "failed", "blocked", "inconclusive"):
+        raise Invalid("report: invalid outcome")
+    if outcome != "passed" and not report["reason"].strip():
+        raise Invalid("report: non-passing outcome requires a reason")
+    if outcome == "passed" and (report["tree"] in ("none", "unknown") or report["source_build"] in ("none", "unknown") or report["source_build"] != report["runtime_build"]):
+        raise Invalid("report: passing outcome requires known source and matching runtime build")
+    for field in ("readiness", "actions", "cleanup"):
+        entries = report[field]
+        if not isinstance(entries, list) or len(entries) > 100:
+            raise Invalid(f"report: invalid {field}")
+        if outcome == "passed" and not entries:
+            raise Invalid(f"report: passing outcome requires {field}")
+        for entry in entries:
+            keys = {"action", "expected", "observed"} if field == "actions" else {"description", "observed"}
+            if not isinstance(entry, dict) or set(entry) != keys or any(not isinstance(v, str) or not v.strip() or len(v) > 4096 for v in entry.values()):
+                raise Invalid(f"report: invalid {field} entry")
+    artifacts = report["artifacts"]
+    if not isinstance(artifacts, list) or len(artifacts) > 100 or (outcome == "passed" and not artifacts):
+        raise Invalid("report: invalid artifacts")
+    root = Path(receipt["evidence_dir"]).resolve(strict=True)
+    if not root.is_dir():
+        raise Invalid("attempt evidence directory is missing")
+    result = []
+    for item in artifacts:
+        if not isinstance(item, str) or not item or "\\" in item or "\x00" in item or Path(item).is_absolute() or any(part in ("", ".", "..") for part in item.split("/")):
+            raise Invalid("report: unsafe artifact path")
+        path = (root / item).resolve(strict=True)
+        if not path.is_relative_to(root) or not path.is_file():
+            raise Invalid(f"report: missing or unsafe artifact: {item}")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        result.append({"path": item, "size": path.stat().st_size, "sha256": digest.hexdigest()})
+    if len({entry["path"] for entry in result}) != len(result):
+        raise Invalid("report: duplicate artifact")
+    return result
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

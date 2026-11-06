@@ -78,5 +78,40 @@ class ValidationTests(unittest.TestCase):
             behavior.validate(self.root)
 
 
+class ReportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / "proof.txt").write_text("observed")
+        self.receipt = {"attempt": "a", "run": "r", "project": "/project", "tree": "abc", "definition": "def", "features": ["example"], "evidence_dir": str(self.root)}
+        self.report = {"version": 1, **{k: v for k, v in self.receipt.items() if k != "evidence_dir"}, "outcome": "passed", "started_at": "2026-11-05T12:00:00Z", "ended_at": "2026-11-05T12:01:00Z", "source_build": "build", "runtime_build": "build", "platform": "test", "configuration": "isolated", "test_data": "fixture", "readiness": [{"description": "ready", "observed": "yes"}], "actions": [{"action": "type", "expected": "receipt", "observed": "receipt"}], "cleanup": [{"description": "fixture", "observed": "removed"}], "artifacts": ["proof.txt"], "reason": ""}
+
+    def test_hash_and_integrity(self):
+        first = behavior.validate_report(self.report, self.receipt)
+        self.assertEqual(first[0]["size"], 8)
+        (self.root / "proof.txt").write_text("changed")
+        self.assertNotEqual(first, behavior.validate_report(self.report, self.receipt))
+
+    def test_binding_and_pass_requirements(self):
+        for field, value in (("run", "other"), ("runtime_build", "other"), ("cleanup", []), ("artifacts", [])):
+            original = self.report[field]
+            self.report[field] = value
+            with self.assertRaises(behavior.Invalid, msg=field):
+                behavior.validate_report(self.report, self.receipt)
+            self.report[field] = original
+        self.report["outcome"] = "blocked"
+        self.report["reason"] = "device unavailable"
+        self.report["artifacts"] = []
+        self.assertEqual(behavior.validate_report(self.report, self.receipt), [])
+
+    def test_artifact_escape(self):
+        (self.root / "escape").symlink_to("/etc/passwd")
+        for path in ("../etc/passwd", "/etc/passwd", "escape"):
+            self.report["artifacts"] = [path]
+            with self.assertRaises((behavior.Invalid, OSError), msg=path):
+                behavior.validate_report(self.report, self.receipt)
+
+
 if __name__ == "__main__":
     unittest.main()
