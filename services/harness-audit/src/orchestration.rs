@@ -20,7 +20,7 @@ fn metric(items: &[Value], key: &str) -> Value {
     };
     json!({"total": if n == 0 {None} else {Some(values.iter().sum::<f64>())}, "samples": n, "population": items.len(), "median": median})
 }
-fn instant(v: &Value) -> Option<i64> {
+pub(crate) fn instant(v: &Value) -> Option<i64> {
     if let Some(seconds) = v.as_f64().filter(|s| s.is_finite()) {
         return Some((seconds * 1000.0) as i64);
     }

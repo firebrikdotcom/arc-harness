@@ -298,3 +298,32 @@ category/version metadata enters audit events; the bounded, redacted task/action
 evidence context remains in private advice records. The 70% acceptance policy is
 unchanged. Restart the installed service after updating to rebuild derived reports
 and embed the revised templates.
+
+### Bounded dashboard projections
+
+Workflow history is kept as individual SQLite facts. Task/todo heads contain current
+fields, not revision arrays; prompt assembly selects the latest version of each
+chunk. Event annotations are cached by identity and invalidated when a replacement,
+task name, last plan, paired return, or prompt chapter changes. Catch-up commits
+heads, annotations, signal ordering, summaries and the source cursor atomically.
+Order-dependent summaries and signal bursts scan affected sessions in small pages;
+unchanged annotations are reused, and unchanged signal rows are not rewritten.
+SQLite temporary sorting is disk-backed with an 8 MiB connection cache.
+
+Session pages, filtered timelines, flow diagrams, task details and orchestration
+read bounded pages. Todo and plan histories remain available in the raw task/todo
+timeline; task detail pages expose further todos and plan revisions. Workbench
+cohorts and orchestration lists have page navigation while global totals remain
+computed across all observations. `/api/audit/workflow` returns compact session
+pages (`offset`, 100 rows, `X-Total-Count` and next-page `Link`), rather than an
+unbounded nested export; grouped and orchestration APIs also accept `offset`.
+Complete prompt text is retained and assembled, with the collector's existing
+2,000-chunk bound; a single very large prompt therefore still has an inherent cost.
+
+Run `cargo test --locked -- --nocapture` from this directory. The isolated
+`disk_history_memory_is_bounded_and_restart_keeps_pages` regression compares Linux
+peak RSS at 512 and 8,192 history events (12 MiB of revision text), checks a 32 MiB
+growth ceiling and 96 MiB process ceiling, then verifies restart and filtered tail
+pages. Other regressions compare disk output with the original reducer through
+late prompt chunks, replacements, task/todo histories, tool pairing and chapter
+ordering. No test opens or alters the machine audit database.

@@ -25,9 +25,10 @@
 </details></li>{% endfor %}
 </ul>
 {% else %}<p class="orch-empty">No child sessions recorded.</p>{% endif %}
-{% if diagram.hidden_children > 0 %}<p class="muted">Showing 200 of {{ diagram.child_count }} recorded children. {{ diagram.hidden_children }} more in the JSON API.</p>{% endif %}
+{% if diagram.hidden_children > 0 %}<p class="muted">Showing {{ diagram.children | length }} of {{ diagram.child_count }} recorded children.</p>{% endif %}
 </section>
 <footer class="orch-footer">{% if diagram.session.workflow_available %}<a href="/workflow?session_id={{ diagram.session.id | urlencode }}">Session details</a>{% endif %}<a href="/api/audit/orchestration">All measurements (JSON)</a></footer>
 {% else %}<div class="panel">{{ ui::empty(title="Session not found", detail="Choose a session above.") }}</div>{% endif %}
 {% else %}<div class="panel">{{ ui::empty(title="No orchestration activity yet", detail="Sessions appear when dispatch runs, workers or decision checkpoints are collected.") }}</div>{% endif %}
+<nav class="task-links">{% if diagram.session %}{% if page_offset > 0 %}<a href="/orchestration?session_id={{ diagram.session.id | urlencode }}&offset={{ previous_offset | default(value=0) }}&parents_offset={{ parents_offset | default(value=0) }}">Previous children</a>{% endif %}{% if diagram.hidden_children > 0 %}<a href="/orchestration?session_id={{ diagram.session.id | urlencode }}&offset={{ next_offset | default(value=200) }}&parents_offset={{ parents_offset | default(value=0) }}">Next children</a>{% endif %}{% endif %}{% if parents_offset %}<a href="/orchestration?parents_offset={{ previous_parents | default(value=0) }}">Previous sessions</a>{% endif %}<a href="/orchestration?parents_offset={{ next_parents | default(value=200) }}">Next sessions</a></nav>
 {% endblock content %}

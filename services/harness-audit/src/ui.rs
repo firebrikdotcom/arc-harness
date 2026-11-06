@@ -131,7 +131,7 @@ const FIRST_EVENTS: usize = 10;
 /// Signal rows are one line each, so the curated timeline opens with more of them.
 const FIRST_SIGNAL: usize = 25;
 const MORE_EVENTS: usize = 20;
-const MAX_PAGE: usize = 1000;
+const MAX_PAGE: usize = 100;
 
 /// The flow diagram draws every block at once, so very long sessions keep the latest ones.
 const FLOW_MAX: usize = 400;
@@ -193,6 +193,7 @@ const NAVIGATION: &[NavItem] = &[
 pub struct WorkbenchQuery {
     #[serde(default)]
     include_fixtures: bool,
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -465,15 +466,17 @@ async fn workbench(
 ) -> impl Responder {
     let include_fixtures = query.include_fixtures;
     let timezone = client_timezone(&request);
-    let (checkpoints, routes, recent, days, event_count, session_count) =
+    let offset = query.offset.unwrap_or(0);
+    let (checkpoints, routes, recent, days, event_count, session_count, all_totals) =
         match read_report(store, move |store| {
             Ok((
-                store.checkpoint_groups(include_fixtures)?,
-                store.route_groups(include_fixtures)?,
+                store.groups_page("checkpoint", include_fixtures, offset)?,
+                store.groups_page("route", include_fixtures, offset)?,
                 store.events(&EventFilter::default(), RECENT_EVENTS)?,
                 store.checkpoint_days(include_fixtures, timezone)?,
                 store.event_counts()?.values().sum::<usize>(),
                 store.session_count()?,
+                store.group_totals(include_fixtures)?,
             ))
         })
         .await
@@ -484,12 +487,15 @@ async fn workbench(
     let recent: Vec<Value> = recent.iter().map(event_row).collect();
     let chart = confidence_chart(&days);
     let mut context = Context::new();
-    context.insert("totals", &totals(event_count, &checkpoints));
+    context.insert("totals", &totals(event_count, &all_totals.0));
+    context.insert("group_offset", &offset);
+    context.insert("group_next", &(offset + 200));
+    context.insert("group_previous", &offset.saturating_sub(200));
     context.insert("confidence_chart", &chart);
     context.insert("checkpoints", &checkpoints);
     context.insert("routes", &routes);
     context.insert("usage_labels", &json!({"input_tokens":"Input tokens", "output_tokens":"Output tokens", "tokens":"Total tokens", "cost_usd":"Cost · USD"}));
-    context.insert("usage", &grouped::usage_totals(&[&checkpoints, &routes]));
+    context.insert("usage", &all_totals.1);
     context.insert("recent", &recent);
     context.insert("include_fixtures", &query.include_fixtures);
     let settings = match crate::settings::load() {
@@ -518,8 +524,14 @@ async fn orchestration_page(
     store: web::Data<ReportStore>,
     registry: web::Data<UiRegistry>,
 ) -> impl Responder {
-    let (summary, directory) = match read_report(store, |store| {
-        Ok((store.orchestration()?, store.sessions()?))
+    let offset = query.offset.unwrap_or(0);
+    let parents_offset = query.parents_offset.unwrap_or(0);
+    let selected = query.session_id.clone();
+    let (summary, diagram) = match read_report(store, move |store| {
+        Ok((
+            store.orchestration_page(offset)?,
+            store.orchestration_diagram(selected.as_deref(), offset, parents_offset)?,
+        ))
     })
     .await
     {
@@ -527,11 +539,14 @@ async fn orchestration_page(
         Err(error) => return unavailable(error),
     };
     let mut context = Context::new();
-    context.insert(
-        "diagram",
-        &crate::orchestration::diagram(&summary, &directory, query.session_id.as_deref()),
-    );
+    context.insert("diagram", &diagram);
+    context.insert("parents_offset", &parents_offset);
+    context.insert("next_parents", &parents_offset.saturating_add(200));
+    context.insert("previous_parents", &parents_offset.saturating_sub(200));
     context.insert("orchestration", &summary);
+    context.insert("page_offset", &offset);
+    context.insert("next_offset", &(offset + 200));
+    context.insert("previous_offset", &offset.saturating_sub(200));
     render(
         &registry,
         &request,
@@ -547,6 +562,8 @@ async fn orchestration_page(
 #[derive(serde::Deserialize, Default)]
 struct OrchestrationQuery {
     session_id: Option<String>,
+    offset: Option<usize>,
+    parents_offset: Option<usize>,
 }
 
 #[get("/events")]
@@ -623,6 +640,8 @@ struct WorkflowQuery {
     show_prompts: Option<usize>,
     show_tasks: Option<usize>,
     show_events: Option<usize>,
+    detail_offset: Option<usize>,
+    todos_offset: Option<usize>,
     event_q: Option<String>,
     event_category: Option<String>,
     event_status: Option<String>,
@@ -1133,6 +1152,7 @@ fn stored_directory(store: &ReportStore, query: &WorkflowQuery) -> anyhow::Resul
     predicate.empty = Some("show".into());
     predicate.page = Some(1);
     predicate.per_page = Some(1);
+    predicate.q = None;
     // The existing predicate defines the exact Unicode search, dates and all filter semantics.
     // It executes inside SQLite, so only matching page documents cross the database boundary.
     conn.register_sql_function::<Text, BigInt, String, i64, _>(
@@ -1142,6 +1162,26 @@ fn stored_directory(store: &ReportStore, query: &WorkflowQuery) -> anyhow::Resul
             serde_json::from_str::<Value>(&document)
                 .ok()
                 .map_or(0, |row| i64::from(directory_matches(&row, &predicate)))
+        },
+    )?;
+    conn.register_sql_function::<Text, Text, String, String, _>(
+        "directory_search",
+        true,
+        |document| {
+            let row = serde_json::from_str::<Value>(&document).unwrap_or(Value::Null);
+            let p = &row["payload"];
+            let mut words = ["name", "description", "outcome", "selected", "tool_name"]
+                .iter()
+                .filter_map(|k| p[k].as_str())
+                .collect::<Vec<_>>();
+            words.extend(
+                p["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            );
+            words.join(" ").to_lowercase()
         },
     )?;
     conn.register_sql_function::<Text, Text, String, String, _>("directory_lower", true, |s| {
@@ -1161,6 +1201,11 @@ fn stored_directory(store: &ReportStore, query: &WorkflowQuery) -> anyhow::Resul
             &query.phase, &query.prompts, &query.since, &query.until, &query.attention]
             .iter().any(|value| value.as_deref().is_some_and(|s| !s.trim().is_empty()));
         let filtered = if has_filters { format!("{base} AND directory_match(document)=1") } else { base.to_owned() };
+        let mut filtered=filtered;
+        for word in query.q.as_deref().unwrap_or("").to_lowercase().split_whitespace() {
+            let word=word.replace('\'',"''");
+            filtered.push_str(&format!(" AND (instr(COALESCE(json_extract(document,'$.search_text'),''),'{word}')>0 OR EXISTS(SELECT 1 FROM dashboard_events e WHERE e.session_id=substr(dashboard_reports.key,11) AND e.partition='workflow' AND instr(directory_search(e.document),'{word}')>0) OR EXISTS(SELECT 1 FROM dashboard_session_entities e WHERE e.session=substr(dashboard_reports.key,11) AND e.category='prompt' AND json_extract(e.document,'$.complete')=1 AND instr(directory_lower(json_extract(e.document,'$.text')),'{word}')>0))"));
+        }
         let visible = if query.empty.as_deref().unwrap_or("").trim() == "show" { filtered.clone() } else { format!("{filtered} AND COALESCE(json_extract(document,'$.empty'),0) != 1") };
         let count = |conn: &mut SqliteConnection, condition: &str| -> anyhow::Result<usize> {
             Ok(diesel::sql_query(format!("SELECT COUNT(*) AS value FROM dashboard_reports WHERE {condition}")).get_result::<Number>(conn)?.value as usize)
@@ -1240,29 +1285,85 @@ async fn workflow_page(
     let (directory, selected, has_sessions) =
         match read_report(store, move |store| match selected_id {
             Some(id) => {
-                let selected = if indexed_timeline(&indexed_query) {
-                    let mut selected = store.session_without_events(&id)?;
-                    let (view, ordering) = timeline_index_keys(&indexed_query);
-                    let first = if signal_view(&indexed_query) {
-                        FIRST_SIGNAL
-                    } else {
-                        FIRST_EVENTS
-                    };
-                    let limit = indexed_query
-                        .show_events
-                        .unwrap_or(first)
-                        .clamp(1, MAX_PAGE);
-                    if let (Some(session), Some((rows, total))) = (
-                        &mut selected,
-                        store.session_timeline(&id, view, ordering, 0, limit)?,
-                    ) {
-                        session["indexed_rows"] = json!(rows);
-                        session["indexed_total"] = json!(total);
-                    }
-                    selected
+                let mut selected = store.workflow_page(
+                    &id,
+                    indexed_query.show_prompts.unwrap_or(FIRST_ROWS),
+                    indexed_query.show_tasks.unwrap_or(FIRST_ROWS),
+                    indexed_query.task_id.as_deref(),
+                    indexed_query.detail_offset.unwrap_or(0),
+                )?;
+                let first = if signal_view(&indexed_query) {
+                    FIRST_SIGNAL
                 } else {
-                    store.session(&id)?
+                    FIRST_EVENTS
                 };
+                let limit = indexed_query
+                    .show_events
+                    .unwrap_or(first)
+                    .clamp(1, MAX_PAGE);
+                if let Some(session) = &mut selected {
+                    if indexed_query.list.as_deref() == Some("prompts") {
+                        session["prompts"] = json!(
+                            store
+                                .session_prompts(
+                                    &id,
+                                    indexed_query.offset.unwrap_or(0),
+                                    indexed_query.limit.unwrap_or(MORE_ROWS).min(MAX_PAGE)
+                                )?
+                                .unwrap()
+                                .0
+                        );
+                    }
+                    if indexed_query.list.as_deref() == Some("tasks") {
+                        session["task_list"] = json!(
+                            store
+                                .session_tasks(
+                                    &id,
+                                    indexed_query.offset.unwrap_or(0),
+                                    indexed_query.limit.unwrap_or(MORE_ROWS).min(MAX_PAGE)
+                                )?
+                                .unwrap()
+                                .0
+                        );
+                    }
+                    session["todo_rows"] = json!(store.session_todos(
+                        &id,
+                        indexed_query.todos_offset.unwrap_or(0),
+                        50
+                    )?);
+                    let (rows, total) = stored_timeline(
+                        store,
+                        &id,
+                        &indexed_query,
+                        if indexed_query.list.as_deref() == Some("timeline") {
+                            indexed_query.offset.unwrap_or(0)
+                        } else {
+                            0
+                        },
+                        limit,
+                    )?
+                    .unwrap();
+                    session["indexed_rows"] = json!(rows);
+                    session["indexed_total"] = json!(total);
+                    if flow_view(&indexed_query) {
+                        let (_, total) =
+                            stored_timeline(store, &id, &indexed_query, 0, 1)?.unwrap();
+                        let mut flow_query = indexed_query.clone();
+                        flow_query.order = Some("oldest".into());
+                        session["flow_rows"] = json!(
+                            stored_timeline(
+                                store,
+                                &id,
+                                &flow_query,
+                                total.saturating_sub(FLOW_MAX),
+                                FLOW_MAX
+                            )?
+                            .unwrap()
+                            .0
+                        );
+                        session["flow_total"] = json!(total);
+                    }
+                }
                 Ok((Value::Null, selected, store.session_count()? > 0))
             }
             None => {
@@ -1409,6 +1510,28 @@ fn timeline<'a>(session: &'a Value, query: &WorkflowQuery) -> Vec<&'a Value> {
         .collect()
 }
 
+fn stored_timeline(
+    store: &ReportStore,
+    id: &str,
+    query: &WorkflowQuery,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<Option<(Vec<Value>, usize)>> {
+    if indexed_timeline(query) {
+        let (view, order) = timeline_index_keys(query);
+        return store.session_timeline(id, view, order, offset, limit);
+    }
+    let filter = query.clone();
+    store.filtered_timeline(
+        id,
+        signal_view(query),
+        newest_first(query),
+        offset,
+        limit,
+        move |row| !timeline(&json!({"events":[row]}), &filter).is_empty(),
+    )
+}
+
 /// The list-size field that keeps a list's length across a full page load.
 fn show_key(list: &str) -> (&'static str, &'static str, usize) {
     match list {
@@ -1433,7 +1556,12 @@ fn more(query: &WorkflowQuery, list: &str, shown: usize, total: usize) -> Value 
     .filter(|(field, _)| *field != key)
     .filter_map(|(field, size)| size.map(|size| (field, size.to_string())))
     .collect();
-    sizes.push((key, next.to_string()));
+    sizes.push((key, next.min(MAX_PAGE).to_string()));
+    if next > MAX_PAGE || query.list.as_deref() == Some(list) {
+        sizes.push(("list", list.to_owned()));
+        sizes.push(("offset", shown.to_string()));
+        sizes.push(("limit", step.to_string()));
+    }
     let slice = [
         ("list", list.to_owned()),
         ("offset", shown.to_string()),
@@ -1533,10 +1661,16 @@ fn flow_fields(payload: &Value) -> Vec<Value> {
 /// lane without a prompt.
 fn flow_lanes(session: &Value, query: &WorkflowQuery) -> Value {
     let events: Vec<Value> = timeline(session, query).into_iter().cloned().collect();
-    let mut items = crate::workflow::signal_items(&events);
-    let total = items.len();
+    let mut items = session["flow_rows"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| crate::workflow::signal_items(&events));
+    let total = session["flow_total"]
+        .as_u64()
+        .map_or(items.len(), |n| n as usize);
     let hidden = total.saturating_sub(FLOW_MAX);
-    items.drain(..hidden);
+    let remove = items.len().saturating_sub(FLOW_MAX);
+    items.drain(..remove);
     let mut lanes: Vec<Value> = Vec::new();
     for (index, mut item) in items.into_iter().enumerate() {
         let (icon, kind) = flow_icon(&item);
@@ -1670,10 +1804,12 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let expanded = query
-        .task_id
-        .as_deref()
-        .and_then(|id| tasks.iter().find(|t| t["task_id"] == id));
+    let expanded = session.get("expanded_task").or_else(|| {
+        query
+            .task_id
+            .as_deref()
+            .and_then(|id| tasks.iter().find(|t| t["task_id"] == id))
+    });
     // A task opened from a link stays visible even when it is past the first rows.
     let task_rows = size(query.show_tasks, FIRST_ROWS)
         .max(expanded.and_then(|t| t["sequence"].as_u64()).unwrap_or(0) as usize);
@@ -1695,15 +1831,51 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
     context.insert("prompt_page", page(prompts, 0, prompt_rows));
     context.insert(
         "prompts_more",
-        &more(query, "prompts", prompt_rows, prompts.len()),
+        &more(
+            query,
+            "prompts",
+            prompts.len().min(prompt_rows)
+                + if query.list.as_deref() == Some("prompts") {
+                    query.offset.unwrap_or(0)
+                } else {
+                    0
+                },
+            session["prompt_count"]
+                .as_u64()
+                .map_or(prompts.len(), |n| n as usize),
+        ),
     );
     context.insert("task_page", page(tasks, 0, task_rows));
-    context.insert("tasks_more", &more(query, "tasks", task_rows, tasks.len()));
+    context.insert(
+        "tasks_more",
+        &more(
+            query,
+            "tasks",
+            tasks.len().min(task_rows)
+                + if query.list.as_deref() == Some("tasks") {
+                    query.offset.unwrap_or(0)
+                } else {
+                    0
+                },
+            session["task_count"]
+                .as_u64()
+                .map_or(tasks.len(), |n| n as usize),
+        ),
+    );
     context.insert("expanded_task", &expanded);
     context.insert("timeline_page", page(&events, 0, event_rows));
     context.insert(
         "timeline_more",
-        &timeline_more(query, event_rows, timeline_total),
+        &timeline_more(
+            query,
+            events.len().min(event_rows)
+                + if query.list.as_deref() == Some("timeline") {
+                    query.offset.unwrap_or(0)
+                } else {
+                    0
+                },
+            timeline_total,
+        ),
     );
     context.insert("signal_view", &signal_view(query));
     context.insert("flow_view", &flow_view(query));
@@ -1728,7 +1900,36 @@ fn session_view(session: &Value, query: &WorkflowQuery, context: &mut Context) {
                 })
         })
         .collect();
-    context.insert("todo_rows", &todo_rows);
+    context.insert(
+        "todo_rows",
+        &session
+            .get("todo_rows")
+            .cloned()
+            .unwrap_or_else(|| json!(todo_rows)),
+    );
+    let todos_offset = query.todos_offset.unwrap_or(0);
+    context.insert(
+        "todos_next",
+        &session_url(
+            query,
+            "/workflow",
+            &[("todos_offset", (todos_offset + 50).to_string())],
+        ),
+    );
+    context.insert(
+        "todos_previous",
+        &session_url(
+            query,
+            "/workflow",
+            &[("todos_offset", todos_offset.saturating_sub(50).to_string())],
+        ),
+    );
+    context.insert("todos_offset", &todos_offset);
+    context.insert(
+        "todos_has_next",
+        &(session["verdict"]["todos_total"].as_u64().unwrap_or(0)
+            > todos_offset.saturating_add(50) as u64),
+    );
     context.insert(
         "named_tasks",
         &tasks.iter().filter(|t| t["name"] != "Session work").count(),
@@ -1777,15 +1978,19 @@ fn workflow_fragment(session: &Value, query: &WorkflowQuery) -> Result<Value, St
             .map_err(|error| format!("{error:?}"))
     };
     if list == "task" {
-        let task = session["task_list"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|t| {
-                query
-                    .task_id
-                    .as_deref()
-                    .is_some_and(|id| t["task_id"] == id)
+        let task = session
+            .get("expanded_task")
+            .or_else(|| {
+                session["task_list"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|t| {
+                        query
+                            .task_id
+                            .as_deref()
+                            .is_some_and(|id| t["task_id"] == id)
+                    })
             })
             .ok_or("task not found")?;
         context.insert("expanded_task", task);
@@ -1851,7 +2056,7 @@ async fn workflow_items(
     query: web::Query<WorkflowQuery>,
     store: web::Data<ReportStore>,
 ) -> impl Responder {
-    if query.list.as_deref() == Some("timeline") && indexed_timeline(&query) {
+    if query.list.as_deref() == Some("timeline") {
         let id = query.session_id.clone();
         let offset = query.offset.unwrap_or(0);
         let first = if signal_view(&query) {
@@ -1863,9 +2068,9 @@ async fn workflow_items(
             .limit
             .unwrap_or(if offset == 0 { first } else { MORE_EVENTS })
             .clamp(1, MAX_PAGE);
-        let (view, ordering) = timeline_index_keys(&query);
+        let timeline_query = query.clone().into_inner();
         let result = read_report(store, move |store| match id {
-            Some(id) => store.session_timeline(&id, view, ordering, offset, limit),
+            Some(id) => stored_timeline(store, &id, &timeline_query, offset, limit),
             None => Ok(None),
         })
         .await;
@@ -1977,8 +2182,10 @@ async fn workflow_items(
         };
     }
     let selected_id = query.session_id.clone();
+    let task_id = query.task_id.clone();
+    let detail_offset = query.detail_offset.unwrap_or(0);
     let selected = match read_report(store, move |store| match selected_id {
-        Some(id) => store.session(&id),
+        Some(id) => store.workflow_page(&id, 2, 2, task_id.as_deref(), detail_offset),
         None => Ok(None),
     })
     .await
@@ -2820,13 +3027,13 @@ mod tests {
                 ..Default::default()
             },
         ] {
+            // Search history is now queried from disk instead of duplicated in
+            // each directory document; compare the actual production reader.
+            let actual = stored_directory(&store, &query).unwrap();
+            let expected = session_directory(&full, &query);
             assert_eq!(
-                render_directory(&full, &query),
-                render_directory(&compact, &query)
-            );
-            assert_eq!(
-                stored_directory(&store, &query).unwrap(),
-                session_directory(&compact, &query)
+                render_directory_value(&actual),
+                render_directory_value(&expected)
             );
         }
         // Multiple pages, ties, Unicode sorting, empty rows and every sort retain the
@@ -2945,8 +3152,11 @@ mod tests {
     }
 
     fn render_directory(sessions: &[Value], query: &WorkflowQuery) -> String {
+        render_directory_value(&session_directory(sessions, query))
+    }
+    fn render_directory_value(directory: &Value) -> String {
         let mut context = Context::new();
-        context.insert("directory", &session_directory(sessions, query));
+        context.insert("directory", directory);
         decorate(&mut context, "Workflow sessions");
         for key in ["app_name", "environment", "csrf_token", "request_path"] {
             context.insert(key, "x");
@@ -3641,6 +3851,9 @@ mod tests {
             context.insert("admin_actions", &Vec::<Value>::new());
             let summary = crate::orchestration::summarize(&rows);
             context.insert("orchestration", &summary);
+            context.insert("page_offset", &0);
+            context.insert("next_offset", &200);
+            context.insert("previous_offset", &0);
             context.insert(
                 "diagram",
                 &crate::orchestration::diagram(&summary, &[], None),
@@ -3679,6 +3892,9 @@ mod tests {
         context.insert("admin_navigation", &Vec::<Value>::new());
         context.insert("admin_actions", &Vec::<Value>::new());
         context.insert("orchestration", &summary);
+        context.insert("page_offset", &0);
+        context.insert("next_offset", &200);
+        context.insert("previous_offset", &0);
         context.insert(
             "diagram",
             &crate::orchestration::diagram(&summary, &directory, None),

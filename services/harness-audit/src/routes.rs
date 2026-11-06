@@ -44,6 +44,7 @@ struct ListQuery {
 struct GroupedQuery {
     #[serde(default)]
     include_fixtures: bool,
+    offset: Option<usize>,
 }
 
 #[get("/health")]
@@ -152,7 +153,11 @@ async fn checkpoint_summary(
 ) -> impl Responder {
     report_response(
         read_report(store, move |store| {
-            store.checkpoint_groups(query.include_fixtures)
+            store.groups_page(
+                "checkpoint",
+                query.include_fixtures,
+                query.offset.unwrap_or(0),
+            )
         })
         .await,
     )
@@ -165,15 +170,23 @@ async fn route_summary(
 ) -> impl Responder {
     report_response(
         read_report(store, move |store| {
-            store.route_groups(query.include_fixtures)
+            store.groups_page("route", query.include_fixtures, query.offset.unwrap_or(0))
         })
         .await,
     )
 }
 
 #[get("/audit/orchestration")]
-async fn orchestration_summary(store: web::Data<ReportStore>) -> impl Responder {
-    report_response(read_report(store, |store| store.orchestration()).await)
+async fn orchestration_summary(
+    query: web::Query<GroupedQuery>,
+    store: web::Data<ReportStore>,
+) -> impl Responder {
+    report_response(
+        read_report(store, move |store| {
+            store.orchestration_page(query.offset.unwrap_or(0))
+        })
+        .await,
+    )
 }
 
 fn report_response(result: anyhow::Result<Value>) -> HttpResponse {
@@ -214,22 +227,29 @@ async fn update_settings(
 }
 
 #[get("/audit/workflow")]
-async fn workflow_events(store: web::Data<ReportStore>) -> impl Responder {
-    match read_report(store, |store| {
-        store
-            .sessions()?
-            .iter()
-            .map(|session| {
-                store
-                    .session(session["session_id"].as_str().unwrap_or_default())?
-                    .ok_or_else(|| anyhow::anyhow!("prepared session missing"))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()
+async fn workflow_events(
+    query: web::Query<GroupedQuery>,
+    store: web::Data<ReportStore>,
+) -> impl Responder {
+    let offset = query.offset.unwrap_or(0);
+    match read_report(store, move |store| {
+        Ok((store.sessions_page(offset, 100)?, store.session_count()?))
     })
     .await
     {
-        Ok(sessions) => HttpResponse::Ok().json(sessions),
-        Err(error) => HttpResponse::ServiceUnavailable().json(json!({"error": error.to_string()})),
+        Ok((sessions, total)) => {
+            let mut response = HttpResponse::Ok();
+            response.insert_header(("X-Total-Count", total.to_string()));
+            let next = offset.saturating_add(sessions.len());
+            if next < total {
+                response.insert_header((
+                    "Link",
+                    format!("</api/audit/workflow?offset={next}>; rel=next"),
+                ));
+            }
+            response.json(sessions)
+        }
+        Err(error) => HttpResponse::ServiceUnavailable().json(json!({"error":error.to_string()})),
     }
 }
 
@@ -278,6 +298,62 @@ mod tests {
         assert_eq!(store.raw_summary().unwrap()["events"], 2);
         drop(conn);
         drop(store);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    #[actix_web::test]
+    async fn workflow_next_link_stops_at_last_page() {
+        use actix_web::{test, App};
+        use diesel::{connection::SimpleConnection, Connection, SqliteConnection};
+        let path = std::env::temp_dir().join(format!(
+            "harness-workflow-pages-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = ReportStore::open(path.to_str().unwrap()).unwrap();
+        let app =
+            test::init_service(App::new().app_data(web::Data::new(store)).configure(config)).await;
+        let empty = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/api/audit/workflow")
+                .to_request(),
+        )
+        .await;
+        assert!(empty.status().is_success());
+        assert_eq!(empty.headers().get("X-Total-Count").unwrap(), "0");
+        assert!(!empty.headers().contains_key("Link"));
+        let mut conn = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        conn.batch_execute("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<100) INSERT INTO dashboard_reports(key,document) SELECT 'directory:' || i, json_object('session_id',i,'last_at',i) FROM n;").unwrap();
+        for (offset, length, next) in [
+            (0, 100, true),
+            (1, 100, false),
+            (100, 1, false),
+            (101, 0, false),
+            (999, 0, false),
+        ] {
+            let response = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri(&format!("/api/audit/workflow?offset={offset}"))
+                    .to_request(),
+            )
+            .await;
+            assert!(response.status().is_success());
+            assert_eq!(response.headers().get("X-Total-Count").unwrap(), "101");
+            assert_eq!(response.headers().contains_key("Link"), next);
+            if next {
+                assert_eq!(
+                    response.headers().get("Link").unwrap(),
+                    "</api/audit/workflow?offset=100>; rel=next"
+                );
+            }
+            let body: Vec<serde_json::Value> = test::read_body_json(response).await;
+            assert_eq!(body.len(), length);
+        }
+        drop(app);
+        drop(conn);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));

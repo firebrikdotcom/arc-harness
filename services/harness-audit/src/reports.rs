@@ -11,6 +11,9 @@ use diesel::{
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod orchestration;
+mod session;
+
 type OrchestrationKey = (String, String, String);
 
 fn update_orchestration_fact(
@@ -36,34 +39,7 @@ fn refresh_orchestration(
     conn: &mut SqliteConnection,
     keys: &BTreeSet<OrchestrationKey>,
 ) -> Result<()> {
-    for (category, scope, entity) in keys {
-        let rows = documents(diesel::sql_query("SELECT document FROM dashboard_orchestration_facts WHERE category=? AND scope=? AND entity=? ORDER BY recorded_at_us,position")
-            .bind::<Text,_>(category).bind::<Text,_>(scope).bind::<Text,_>(entity).load::<Document>(conn)?)?;
-        if let Some(fact) = crate::orchestration::entity(&rows, category) {
-            diesel::sql_query("INSERT INTO dashboard_orchestration_entities(category,scope,entity,document) VALUES(?,?,?,?) ON CONFLICT(category,scope,entity) DO UPDATE SET document=excluded.document")
-                .bind::<Text,_>(category).bind::<Text,_>(scope).bind::<Text,_>(entity).bind::<Text,_>(fact.to_string()).execute(conn)?;
-        } else {
-            diesel::sql_query("DELETE FROM dashboard_orchestration_entities WHERE category=? AND scope=? AND entity=?")
-                .bind::<Text,_>(category).bind::<Text,_>(scope).bind::<Text,_>(entity).execute(conn)?;
-        }
-    }
-    let mut entities = |category: &str| -> Result<Vec<Value>> {
-        documents(diesel::sql_query("SELECT document FROM dashboard_orchestration_entities WHERE category=? ORDER BY scope,entity")
-            .bind::<Text,_>(category).load::<Document>(conn)?)
-    };
-    let runs = entities("run")?;
-    let workers = entities("worker")?;
-    let decisions = entities("decision")?;
-    let count = diesel::sql_query(
-        "SELECT COUNT(*) AS position FROM dashboard_events WHERE partition='orchestration'",
-    )
-    .get_result::<Position>(conn)?
-    .position;
-    save(
-        conn,
-        "orchestration",
-        &crate::orchestration::summarize_entities(count as usize, runs, workers, decisions),
-    )
+    orchestration::refresh(conn, keys)
 }
 
 type SessionEntityKey = (String, String, String);
@@ -93,6 +69,17 @@ fn refresh_session_entities(
     keys: &BTreeSet<SessionEntityKey>,
 ) -> Result<()> {
     for (session, category, entity) in keys {
+        if matches!(category.as_str(), "task" | "todo" | "prompt" | "tool") {
+            let head = session::head(conn, session, category, entity)?;
+            session::invalidate(conn, session, category, entity, &head)?;
+            if head.is_null() {
+                diesel::sql_query("DELETE FROM dashboard_session_entities WHERE session=? AND category=? AND entity=?").bind::<Text,_>(session).bind::<Text,_>(category).bind::<Text,_>(entity).execute(conn)?;
+            } else {
+                diesel::sql_query("INSERT INTO dashboard_session_entities(session,category,entity,document) VALUES(?,?,?,?) ON CONFLICT(session,category,entity) DO UPDATE SET document=excluded.document")
+                    .bind::<Text,_>(session).bind::<Text,_>(category).bind::<Text,_>(entity).bind::<Text,_>(head.to_string()).execute(conn)?;
+            }
+            continue;
+        }
         // Metadata can be repeated on every event in a long session. Only its
         // chronological endpoints are needed to derive the current value and
         // timestamps; keep the count in SQLite rather than loading the history.
@@ -243,8 +230,6 @@ struct CheckpointGroup {
     group_key: String,
     #[diesel(sql_type = Text)]
     included: String,
-    #[diesel(sql_type = Text)]
-    excluded: String,
 }
 
 #[derive(QueryableByName)]
@@ -349,32 +334,6 @@ fn refresh_checkpoint_groups(
                 .bind::<Text,_>(key).bind::<Text,_>(included.to_string()).bind::<Text,_>(excluded.to_string()).execute(conn)?;
         }
     }
-    let mut all =
-        diesel::sql_query("SELECT group_key,included,excluded FROM dashboard_checkpoint_groups")
-            .load::<CheckpointGroup>(conn)?;
-    // JSON string order is not Option<String> order (null sorts before a string in the reducer).
-    all.sort_by_cached_key(|g| {
-        serde_json::from_str::<Vec<Option<String>>>(&g.group_key).expect("stored group key")
-    });
-    for fixtures in [false, true] {
-        let mut result = crate::summary::checkpoint_groups(&[], fixtures);
-        for group in &all {
-            let part: Value = serde_json::from_str(if fixtures {
-                &group.included
-            } else {
-                &group.excluded
-            })?;
-            result["excluded_fixture_events"] = json!(
-                result["excluded_fixture_events"].as_u64().unwrap()
-                    + part["excluded_fixture_events"].as_u64().unwrap()
-            );
-            result["groups"]
-                .as_array_mut()
-                .unwrap()
-                .extend(part["groups"].as_array().unwrap().iter().cloned());
-        }
-        save(conn, &format!("checkpoint:{fixtures}"), &result)?;
-    }
     Ok(())
 }
 
@@ -431,16 +390,6 @@ fn update_route_fact(conn: &mut SqliteConnection, row: &Value, position: i64) ->
     Ok(())
 }
 
-#[derive(QueryableByName)]
-struct RouteGroup {
-    #[diesel(sql_type = Text)]
-    group_key: String,
-    #[diesel(sql_type = Text)]
-    included: String,
-    #[diesel(sql_type = Text)]
-    excluded: String,
-}
-
 fn refresh_route_groups(
     conn: &mut SqliteConnection,
     groups: &mut BTreeSet<String>,
@@ -492,32 +441,6 @@ fn refresh_route_groups(
             diesel::sql_query("INSERT INTO dashboard_route_groups(group_key,included,excluded) VALUES(?,?,?) ON CONFLICT(group_key) DO UPDATE SET included=excluded.included,excluded=excluded.excluded")
                 .bind::<Text,_>(key).bind::<Text,_>(included.to_string()).bind::<Text,_>(excluded.to_string()).execute(conn)?;
         }
-    }
-    let mut all =
-        diesel::sql_query("SELECT group_key,included,excluded FROM dashboard_route_groups")
-            .load::<RouteGroup>(conn)?;
-    // JSON string order is not Option<String> order (null sorts before a string in the reducer).
-    all.sort_by_cached_key(|g| {
-        serde_json::from_str::<Vec<Option<String>>>(&g.group_key).expect("stored group key")
-    });
-    for fixtures in [false, true] {
-        let mut result = crate::summary::route_groups(&[], fixtures);
-        for group in &all {
-            let part: Value = serde_json::from_str(if fixtures {
-                &group.included
-            } else {
-                &group.excluded
-            })?;
-            result["excluded_fixture_events"] = json!(
-                result["excluded_fixture_events"].as_u64().unwrap()
-                    + part["excluded_fixture_events"].as_u64().unwrap()
-            );
-            result["groups"]
-                .as_array_mut()
-                .unwrap()
-                .extend(part["groups"].as_array().unwrap().iter().cloned());
-        }
-        save(conn, &format!("route:{fixtures}"), &result)?;
     }
     Ok(())
 }
@@ -617,6 +540,8 @@ impl ReportStore {
             CREATE TABLE IF NOT EXISTS dashboard_route_groups (group_key TEXT PRIMARY KEY, included TEXT NOT NULL, excluded TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS dashboard_session_facts (id TEXT NOT NULL, session TEXT NOT NULL, category TEXT NOT NULL, entity TEXT NOT NULL, position BIGINT NOT NULL, PRIMARY KEY(id,category,entity));
             CREATE INDEX IF NOT EXISTS session_facts_entity ON dashboard_session_facts(session,category,entity,position);
+            CREATE TABLE IF NOT EXISTS dashboard_workflow_annotations (id TEXT PRIMARY KEY, session TEXT NOT NULL, position BIGINT NOT NULL, document TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS workflow_annotations_session ON dashboard_workflow_annotations(session,json_extract(document,'$.payload.occurred_at'),json_extract(document,'$.recorded_at_us'),position);
             CREATE TABLE IF NOT EXISTS dashboard_timeline_rows (session TEXT NOT NULL, view TEXT NOT NULL, ordering TEXT NOT NULL, ordinal BIGINT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(session,view,ordering,ordinal));
             CREATE TABLE IF NOT EXISTS dashboard_session_entities (session TEXT NOT NULL, category TEXT NOT NULL, entity TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY(session,category,entity));
             CREATE TABLE IF NOT EXISTS dashboard_orchestration_facts (id TEXT PRIMARY KEY, position BIGINT NOT NULL, category TEXT NOT NULL, scope TEXT NOT NULL, entity TEXT NOT NULL, recorded_at_us BIGINT NOT NULL, document TEXT NOT NULL);
@@ -625,9 +550,9 @@ impl ReportStore {
         // Change this version when reducer semantics or compact report fields change.
         // Only disposable derived state is rebuilt; events and the legacy view remain intact.
         conn.immediate_transaction::<_, anyhow::Error, _>(|conn| {
-            if cached(conn, "schema_version")? != Some(json!(11)) {
-                conn.batch_execute("DELETE FROM dashboard_events; DELETE FROM dashboard_reports; DELETE FROM dashboard_checkpoint_facts; DELETE FROM dashboard_checkpoint_groups; DELETE FROM dashboard_route_facts; DELETE FROM dashboard_route_groups; DELETE FROM dashboard_orchestration_facts; DELETE FROM dashboard_orchestration_entities; DELETE FROM dashboard_session_facts; DELETE FROM dashboard_session_entities; DELETE FROM dashboard_timeline_rows; UPDATE dashboard_checkpoint SET position=0 WHERE singleton=1;")?;
-                save(conn,"schema_version",&json!(11))?;
+            if cached(conn, "schema_version")? != Some(json!(12)) {
+                conn.batch_execute("DELETE FROM dashboard_events; DELETE FROM dashboard_reports; DELETE FROM dashboard_checkpoint_facts; DELETE FROM dashboard_checkpoint_groups; DELETE FROM dashboard_route_facts; DELETE FROM dashboard_route_groups; DELETE FROM dashboard_orchestration_facts; DELETE FROM dashboard_orchestration_entities; DELETE FROM dashboard_session_facts; DELETE FROM dashboard_session_entities; DELETE FROM dashboard_timeline_rows; DELETE FROM dashboard_workflow_annotations; UPDATE dashboard_checkpoint SET position=0 WHERE singleton=1;")?;
+                save(conn,"schema_version",&json!(12))?;
             }
             Ok(())
         })?;
@@ -635,7 +560,9 @@ impl ReportStore {
     }
     pub(crate) fn connection(&self) -> Result<SqliteConnection> {
         let mut conn = SqliteConnection::establish(&self.database_url)?;
-        conn.batch_execute("PRAGMA busy_timeout=10000;")?;
+        conn.batch_execute(
+            "PRAGMA busy_timeout=10000; PRAGMA cache_size=-8192; PRAGMA temp_store=FILE;",
+        )?;
         Ok(conn)
     }
     /// Refresh only committed source rows after the durable cursor. An invalid source
@@ -684,6 +611,7 @@ impl ReportStore {
                 checkpoint_affected(&row, &mut checkpoint_groups, &mut checkpoint_calls);
                 route_affected(&row, &mut route_groups, &mut route_calls);
                 if let Some(key) = crate::orchestration::entity_key(&row) { orchestration_keys.insert(key); }
+                diesel::sql_query("DELETE FROM dashboard_workflow_annotations WHERE id=?").bind::<Text,_>(&event.aggregate_id).execute(conn)?;
                 update_session_facts(conn, &row, event.position, &mut session_keys)?;
                 update_orchestration_fact(conn, &row, event.position)?;
                 update_route_fact(conn, &row, event.position)?;
@@ -696,52 +624,7 @@ impl ReportStore {
             save(conn,"raw",&raw)?;
             refresh_session_entities(conn, &session_keys)?;
             for id in sessions {
-                // Replay one ordered page at a time, including source position as the
-                // stable tiebreaker used by the slice-based reducer.
-                let mut reducer = crate::workflow::SessionReducer::default();
-                // Keyset pagination keeps each replay page bounded even for long sessions.
-                // The presence flag preserves SQLite's NULL-before-text ordering.
-                let mut cursor: Option<(i64, String, i64, i64)> = None;
-                loop {
-                    let (has_time, occurred_at, recorded_at_us, position) = cursor
-                        .as_ref().map(|(h, t, r, p)| (*h, t.as_str(), *r, *p))
-                        .unwrap_or((-1, "", i64::MIN, i64::MIN));
-                    let page = diesel::sql_query("SELECT position, (json_extract(document, '$.payload.occurred_at') IS NOT NULL) AS has_time, COALESCE(json_extract(document, '$.payload.occurred_at'),'') AS occurred_at, recorded_at_us, document FROM dashboard_events WHERE session_id=? AND partition='workflow' AND ((json_extract(document, '$.payload.occurred_at') IS NOT NULL), COALESCE(json_extract(document, '$.payload.occurred_at'),''), recorded_at_us, position) > (?,?,?,?) ORDER BY (json_extract(document, '$.payload.occurred_at') IS NOT NULL), COALESCE(json_extract(document, '$.payload.occurred_at'),''), recorded_at_us, position LIMIT ?")
-                        .bind::<Text,_>(&id).bind::<BigInt,_>(has_time).bind::<Text,_>(occurred_at).bind::<BigInt,_>(recorded_at_us).bind::<BigInt,_>(position).bind::<BigInt,_>(CATCH_UP_BATCH as i64).load::<TimelineSource>(conn)?;
-                    if page.is_empty() { break; }
-                    for row in page {
-                        reducer.push(&serde_json::from_str(&row.document)?);
-                        cursor = Some((row.has_time, row.occurred_at, row.recorded_at_us, row.position));
-                    }
-                }
-                let key=format!("session:{id}");
-                let reduced=reducer.finish();
-                diesel::sql_query("DELETE FROM dashboard_timeline_rows WHERE session=?").bind::<Text,_>(&id).execute(conn)?;
-                if let Some(session)=reduced.first() {
-                    save(conn,&key,session)?;
-                    let raw: Vec<Value> = session["events"].as_array().into_iter().flatten().filter(|e| e["event_type"] != "workflow.prompt_recorded" || e["payload"]["part_index"].as_u64().unwrap_or(0) == 0).cloned().collect();
-                    let signal = crate::workflow::signal_items(&raw);
-                    // Persist each ordering before constructing the next one. Keeping
-                    // four owned timelines here multiplies peak memory for long sessions.
-                    let mut persist = |view: &str, ordering: &str, items: &[Value], reverse: bool| -> Result<()> {
-                        for ordinal in 0..items.len() {
-                            let index = if reverse { items.len() - ordinal - 1 } else { ordinal };
-                            diesel::sql_query("INSERT INTO dashboard_timeline_rows(session,view,ordering,ordinal,document) VALUES(?,?,?,?,?)").bind::<Text,_>(&id).bind::<Text,_>(view).bind::<Text,_>(ordering).bind::<BigInt,_>(ordinal as i64).bind::<Text,_>(items[index].to_string()).execute(conn)?;
-                        }
-                        Ok(())
-                    };
-                    persist("all", "oldest", &raw, false)?;
-                    persist("all", "newest", &raw, true)?;
-                    drop(raw);
-                    persist("signal", "oldest", &signal, false)?;
-                    let signal = crate::workflow::newest_first(signal);
-                    persist("signal", "newest", &signal, false)?;
-                    let mut compact=compact_session(session);
-                    for field in ["events","prompts","tasks","task_list","metadata_history"] { compact.as_object_mut().unwrap().remove(field); }
-                    save(conn,&format!("directory:{id}"),&compact)?;
-                } else {
-                    diesel::sql_query("DELETE FROM dashboard_reports WHERE key IN (?,?)").bind::<Text,_>(key).bind::<Text,_>(format!("directory:{id}")).execute(conn)?;
-                }
+                session::refresh(conn, &id)?;
                 refresh_session_summary(conn, &id)?;
             }
             refresh_checkpoint_groups(conn, &mut checkpoint_groups, &checkpoint_calls)?;
@@ -801,30 +684,149 @@ impl ReportStore {
         )?)
     }
     pub fn checkpoint_groups(&self, fixtures: bool) -> Result<Value> {
-        self.report(
-            &format!("checkpoint:{fixtures}"),
-            crate::summary::checkpoint_groups(&[], fixtures),
-        )
+        self.groups_page("checkpoint", fixtures, 0)
     }
     pub fn route_groups(&self, fixtures: bool) -> Result<Value> {
-        self.report(
-            &format!("route:{fixtures}"),
-            crate::summary::route_groups(&[], fixtures),
-        )
+        self.groups_page("route", fixtures, 0)
+    }
+    pub fn groups_page(&self, kind: &str, fixtures: bool, offset: usize) -> Result<Value> {
+        let (table, fields, mut result) = if kind == "checkpoint" {
+            (
+                "dashboard_checkpoint_groups",
+                7,
+                crate::summary::checkpoint_groups(&[], fixtures),
+            )
+        } else {
+            (
+                "dashboard_route_groups",
+                6,
+                crate::summary::route_groups(&[], fixtures),
+            )
+        };
+        let column = if fixtures { "included" } else { "excluded" };
+        let order = (0..fields)
+            .map(|i| format!("json_extract(group_key,'$[{i}]')"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut conn = self.connection()?;
+        let rows=documents(diesel::sql_query(format!("SELECT {column} AS document FROM {table} WHERE json_array_length({column},'$.groups')>0 ORDER BY {order} LIMIT 200 OFFSET ?")).bind::<BigInt,_>(offset.min(i64::MAX as usize) as i64).load::<Document>(&mut conn)?)?;
+        for row in rows {
+            result["groups"]
+                .as_array_mut()
+                .unwrap()
+                .extend(row["groups"].as_array().unwrap().iter().cloned());
+        }
+        result["excluded_fixture_events"]=json!(diesel::sql_query(format!("SELECT COALESCE(SUM(json_extract({column},'$.excluded_fixture_events')),0) AS position FROM {table}")).get_result::<Position>(&mut conn)?.position);
+        Ok(result)
+    }
+    pub fn group_totals(&self, fixtures: bool) -> Result<(Value, Value)> {
+        let mut conn = self.connection()?;
+        let column = if fixtures { "included" } else { "excluded" };
+        let mut aggregate = json!({"count":0,"labeled":0,"correct":0});
+        let mut usage_group = json!({"count":0});
+        let mut excluded = 0;
+        for table in ["dashboard_checkpoint_groups", "dashboard_route_groups"] {
+            let mut cursor = String::new();
+            loop {
+                let rows=diesel::sql_query(format!("SELECT group_key,{column} AS included,{column} AS excluded FROM {table} WHERE group_key>? ORDER BY group_key LIMIT 128")).bind::<Text,_>(&cursor).load::<CheckpointGroup>(&mut conn)?;
+                if rows.is_empty() {
+                    break;
+                }
+                for row in rows {
+                    cursor = row.group_key;
+                    let value: Value = serde_json::from_str(&row.included)?;
+                    if table == "dashboard_checkpoint_groups" {
+                        excluded += value["excluded_fixture_events"].as_u64().unwrap_or(0);
+                        for group in value["groups"].as_array().into_iter().flatten() {
+                            for key in ["count", "labeled", "correct"] {
+                                aggregate[key] = json!(
+                                    aggregate[key].as_u64().unwrap_or(0)
+                                        + group[key].as_u64().unwrap_or(0)
+                                );
+                            }
+                        }
+                    }
+                    let usage =
+                        crate::summary::usage_totals(&[&json!({"groups":[usage_group]}), &value]);
+                    usage_group = usage;
+                    usage_group["count"] = usage_group["calls"].clone();
+                }
+            }
+        }
+        let usage = crate::summary::usage_totals(&[&json!({"groups":[usage_group]})]);
+        Ok((
+            json!({"groups":[aggregate],"excluded_fixture_events":excluded}),
+            usage,
+        ))
     }
     pub fn orchestration(&self) -> Result<Value> {
-        self.report("orchestration", crate::orchestration::summarize(&[]))
+        orchestration::report(&mut self.connection()?, 0, 200)
     }
+    #[cfg(test)]
     pub fn session(&self, id: &str) -> Result<Option<Value>> {
-        cached(&mut self.connection()?, &format!("session:{id}"))
+        // Test-only compatibility reader for equivalence against the original
+        // reducer. Production routes never assemble an entire session.
+        let mut conn = self.connection()?;
+        let Some(mut value) = cached(&mut conn, &format!("session:{id}"))? else {
+            return Ok(None);
+        };
+        for key in [
+            "event_count",
+            "task_count",
+            "completed_tasks",
+            "prompt_count",
+            "phases",
+            "search_text",
+            "preview",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        value["events"]=json!(documents(diesel::sql_query("SELECT document FROM dashboard_workflow_annotations WHERE session=? ORDER BY json_extract(document,'$.payload.occurred_at'),json_extract(document,'$.recorded_at_us'),position").bind::<Text,_>(id).load::<Document>(&mut conn)?)?);
+        value["metadata_history"] = json!(value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["event_type"] == "workflow.session_updated")
+            .map(|e| e["payload"].clone())
+            .collect::<Vec<_>>());
+        value["prompts"] = json!(self.session_prompts(id, 0, i64::MAX as usize)?.unwrap().0);
+        value["initial_goal"] = value["prompts"][0]["text"]
+            .as_str()
+            .map_or(json!(""), |s| json!(s));
+        let heads=documents(diesel::sql_query("SELECT document FROM dashboard_session_entities WHERE session=? AND category='task' ORDER BY json_extract(document,'$.first_at'), (SELECT MIN(position) FROM dashboard_session_facts f WHERE f.session=dashboard_session_entities.session AND f.category='task' AND f.entity=dashboard_session_entities.entity), entity").bind::<Text,_>(id).load::<Document>(&mut conn)?)?;
+        let mut tasks = serde_json::Map::new();
+        for head in heads {
+            let key = head["task"]["task_id"].as_str().unwrap();
+            let mut task = session::task(&mut conn, id, key, 0, i64::MAX as usize)?.unwrap();
+            for todo in task["todos"].as_object_mut().unwrap().values_mut() {
+                todo.as_object_mut().unwrap().remove("history_count");
+            }
+            for key in [
+                "todo_list",
+                "todos_done",
+                "todos_total",
+                "todo_count",
+                "plan_count",
+                "detail_offset",
+                "detail_limit",
+                "detail_more",
+            ] {
+                task.as_object_mut().unwrap().remove(key);
+            }
+            tasks.insert(key.into(), task);
+        }
+        value["tasks"] = Value::Object(tasks);
+        value["task_list"] = json!(crate::workflow::ordered_tasks(&value["tasks"]));
+        Ok(Some(value))
+    }
+    pub fn orchestration_page(&self, offset: usize) -> Result<Value> {
+        orchestration::report(&mut self.connection()?, offset, 200)
     }
     pub fn session_without_events(&self, id: &str) -> Result<Option<Value>> {
         let mut conn = self.connection()?;
-        let row = diesel::sql_query("SELECT json_set(json_remove(d.document, '$.events'), '$.event_count', json_array_length(d.document, '$.events'), '$.verdict', json(COALESCE(json_extract(s.document, '$.verdict'), json_extract(d.document, '$.verdict')))) AS document FROM dashboard_reports d LEFT JOIN dashboard_reports s ON s.key='session-summary:' || substr(d.key,9) WHERE d.key=?")
-            .bind::<Text,_>(format!("session:{id}")).get_result::<Document>(&mut conn).optional()?;
-        row.map(|row| Ok(serde_json::from_str(&row.document)?))
-            .transpose()
+        cached(&mut conn, &format!("session:{id}"))
     }
+
     pub fn session_timeline(
         &self,
         id: &str,
@@ -833,14 +835,37 @@ impl ReportStore {
         offset: usize,
         limit: usize,
     ) -> Result<Option<(Vec<Value>, usize)>> {
+        let limit = limit.min(1000);
         let mut conn = self.connection()?;
         if cached(&mut conn, &format!("directory:{id}"))?.is_none() {
             return Ok(None);
         }
-        let total = diesel::sql_query("SELECT COUNT(*) AS position FROM dashboard_timeline_rows WHERE session=? AND view=? AND ordering=?")
-            .bind::<Text,_>(id).bind::<Text,_>(view).bind::<Text,_>(ordering).get_result::<Position>(&mut conn)?.position as usize;
-        let rows = diesel::sql_query("SELECT document FROM dashboard_timeline_rows WHERE session=? AND view=? AND ordering=? ORDER BY ordinal LIMIT ? OFFSET ?")
-            .bind::<Text,_>(id).bind::<Text,_>(view).bind::<Text,_>(ordering).bind::<BigInt,_>(limit as i64).bind::<BigInt,_>(offset as i64).load::<Document>(&mut conn)?;
+        if view == "all" {
+            let condition="session=? AND (json_extract(document,'$.event_type')!='workflow.prompt_recorded' OR COALESCE(json_extract(document,'$.payload.part_index'),0)=0)";
+            let total = diesel::sql_query(format!(
+                "SELECT COUNT(*) AS position FROM dashboard_workflow_annotations WHERE {condition}"
+            ))
+            .bind::<Text, _>(id)
+            .get_result::<Position>(&mut conn)?
+            .position as usize;
+            let order = if ordering == "newest" { "DESC" } else { "ASC" };
+            let rows=documents(diesel::sql_query(format!("SELECT document FROM dashboard_workflow_annotations WHERE {condition} ORDER BY json_extract(document,'$.payload.occurred_at') {order},json_extract(document,'$.recorded_at_us') {order},position {order} LIMIT ? OFFSET ?"))
+                .bind::<Text,_>(id).bind::<BigInt,_>(limit as i64).bind::<BigInt,_>(offset.min(i64::MAX as usize) as i64).load::<Document>(&mut conn)?)?;
+            return Ok(Some((rows, total)));
+        }
+        let total = diesel::sql_query("SELECT COUNT(*) AS position FROM dashboard_timeline_rows WHERE session=? AND view=? AND ordering='oldest'")
+            .bind::<Text,_>(id).bind::<Text,_>(view).get_result::<Position>(&mut conn)?.position as usize;
+        let sql = if ordering == "newest" {
+            "SELECT document FROM (SELECT *,SUM(CASE WHEN json_extract(document,'$.category')='prompt' THEN 1 ELSE 0 END) OVER (ORDER BY ordinal) AS chapter FROM dashboard_timeline_rows WHERE session=? AND view=? AND ordering='oldest') ORDER BY chapter DESC,CASE WHEN json_extract(document,'$.category')='prompt' THEN 0 ELSE 1 END,ordinal DESC LIMIT ? OFFSET ?"
+        } else {
+            "SELECT document FROM dashboard_timeline_rows WHERE session=? AND view=? AND ordering='oldest' ORDER BY ordinal LIMIT ? OFFSET ?"
+        };
+        let rows = diesel::sql_query(sql)
+            .bind::<Text, _>(id)
+            .bind::<Text, _>(view)
+            .bind::<BigInt, _>(limit as i64)
+            .bind::<BigInt, _>(offset.min(i64::MAX as usize) as i64)
+            .load::<Document>(&mut conn)?;
         Ok(Some((documents(rows)?, total)))
     }
     /// Load only the requested prompt rows, leaving the session's other arrays in SQLite.
@@ -850,6 +875,7 @@ impl ReportStore {
         offset: usize,
         limit: usize,
     ) -> Result<Option<(Vec<Value>, usize)>> {
+        let limit = limit.min(100);
         let mut conn = self.connection()?;
         if cached(&mut conn, &format!("directory:{id}"))?.is_none() {
             return Ok(None);
@@ -878,26 +904,49 @@ impl ReportStore {
         offset: usize,
         limit: usize,
     ) -> Result<Option<(Vec<Value>, usize)>> {
+        let limit = limit.min(100);
         let mut conn = self.connection()?;
         if cached(&mut conn, &format!("directory:{id}"))?.is_none() {
             return Ok(None);
         }
         let total = diesel::sql_query("SELECT COUNT(*) AS position FROM dashboard_session_entities WHERE session=? AND category='task'")
             .bind::<Text,_>(id).get_result::<Position>(&mut conn)?.position as usize;
-        let rows = diesel::sql_query("SELECT document FROM dashboard_session_entities WHERE session=? AND category='task' ORDER BY json_extract(document, '$.first_at'), (SELECT MIN(position) FROM dashboard_session_facts f WHERE f.session=dashboard_session_entities.session AND f.category='task' AND f.entity=dashboard_session_entities.entity), entity LIMIT ? OFFSET ?")
+        let rows = diesel::sql_query(format!("SELECT h.document FROM dashboard_session_entities h WHERE h.session=? AND h.category='task' ORDER BY {} LIMIT ? OFFSET ?", session::entity_order()))
             .bind::<Text,_>(id).bind::<BigInt,_>(limit as i64).bind::<BigInt,_>(offset as i64).load::<Document>(&mut conn)?;
         let mut tasks = Vec::new();
-        for (index, entity) in documents(rows)?.into_iter().enumerate() {
-            let mut task = entity["task"].clone();
-            task["sequence"] = json!(offset + index + 1);
-            let mut map = serde_json::Map::new();
-            map.insert("task".into(), task);
-            tasks.extend(crate::workflow::ordered_tasks(&Value::Object(map)));
+        for head in documents(rows)? {
+            if let Some(task) = session::task(
+                &mut conn,
+                id,
+                head["task"]["task_id"].as_str().unwrap_or(""),
+                0,
+                0,
+            )? {
+                tasks.push(task);
+            }
         }
         Ok(Some((tasks, total)))
     }
+    pub fn session_task(
+        &self,
+        id: &str,
+        task: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Option<Value>> {
+        session::task(
+            &mut self.connection()?,
+            id,
+            task,
+            offset,
+            limit.clamp(1, 100),
+        )
+    }
     pub fn sessions(&self) -> Result<Vec<Value>> {
-        let mut rows=documents(diesel::sql_query("SELECT json_set(d.document, '$.verdict', json(COALESCE(json_extract(s.document, '$.verdict'), json_extract(d.document, '$.verdict')))) AS document FROM dashboard_reports d LEFT JOIN dashboard_reports s ON s.key='session-summary:' || substr(d.key,11) WHERE d.key >= 'directory:' AND d.key < 'directory;' ").load::<Document>(&mut self.connection()?)?)?;
+        self.sessions_page(0, 200)
+    }
+    pub fn sessions_page(&self, offset: usize, limit: usize) -> Result<Vec<Value>> {
+        let mut rows=documents(diesel::sql_query("SELECT json_set(d.document, '$.verdict', json(COALESCE(json_extract(s.document, '$.verdict'), json_extract(d.document, '$.verdict')))) AS document FROM dashboard_reports d LEFT JOIN dashboard_reports s ON s.key='session-summary:' || substr(d.key,11) WHERE d.key >= 'directory:' AND d.key < 'directory;' ORDER BY json_extract(d.document,'$.last_at') DESC,d.key LIMIT ? OFFSET ?").bind::<BigInt,_>(limit.min(200) as i64).bind::<BigInt,_>(offset.min(i64::MAX as usize) as i64).load::<Document>(&mut self.connection()?)?)?;
         rows.sort_by(|a, b| b["last_at"].as_str().cmp(&a["last_at"].as_str()));
         Ok(rows)
     }
@@ -1016,96 +1065,6 @@ fn adjust_raw(raw: &mut Value, row: &Value, direction: i64) -> Result<()> {
     Ok(())
 }
 
-fn compact_session(session: &Value) -> Value {
-    let mut compact = Value::Object(session.as_object().unwrap().iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "events" | "prompts" | "tasks" | "task_list" | "metadata_history"))
-        .map(|(key, value)| (key.clone(), value.clone())).collect());
-    let tasks = session["tasks"].as_object();
-    compact["task_count"] = json!(tasks.map_or(0, |t| t.len()));
-    compact["completed_tasks"] = json!(tasks.map_or(0, |t| t
-        .values()
-        .filter(|t| t["status"] == "completed")
-        .count()));
-    compact["prompt_count"] = json!(session["prompts"].as_array().map_or(0, Vec::len));
-    let phases: BTreeSet<&str> = tasks
-        .into_iter()
-        .flat_map(|t| t.values())
-        .filter_map(|t| t["phase"].as_str().filter(|s| !s.is_empty()))
-        .collect();
-    compact["phases"] = json!(phases);
-    let mut words = Vec::new();
-    for key in [
-        "label",
-        "session_name",
-        "herdr_tab",
-        "agent",
-        "model",
-        "cwd",
-        "status",
-        "session_id",
-        "initial_goal",
-    ] {
-        if let Some(text) = session[key].as_str() {
-            words.push(text);
-        }
-    }
-    for task in tasks.into_iter().flat_map(|t| t.values()) {
-        for key in [
-            "name",
-            "description",
-            "outcome",
-            "status",
-            "phase",
-            "task_id",
-        ] {
-            if let Some(text) = task[key].as_str() {
-                words.push(text);
-            }
-        }
-    }
-    for prompt in session["prompts"].as_array().into_iter().flatten() {
-        if let Some(text) = prompt["text"].as_str() {
-            words.push(text);
-        }
-    }
-    for event in session["events"].as_array().into_iter().flatten() {
-        for key in ["name", "description", "outcome", "selected", "tool_name"] {
-            if let Some(text) = event["payload"][key].as_str() {
-                words.push(text);
-            }
-        }
-        for option in event["payload"]["options"].as_array().into_iter().flatten() {
-            if let Some(text) = option.as_str() {
-                words.push(text);
-            }
-        }
-    }
-    compact["search_text"] = json!(words.join(" ").to_lowercase());
-    let description = session["events"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find_map(|e| {
-            if e["payload"]["name"]
-                .as_str()
-                .is_some_and(|n| n != "Session work")
-            {
-                e["payload"]["description"].as_str()
-            } else {
-                None
-            }
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| session["initial_goal"].as_str().unwrap_or(""));
-    let preview: String = description.chars().take(180).collect();
-    compact["preview"] = json!(if description.chars().count() > 180 {
-        format!("{preview}…")
-    } else {
-        preview
-    });
-    compact
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,6 +1098,269 @@ mod tests {
             let _ = std::fs::remove_file(format!("{}-shm", self.path.display()));
         }
     }
+    #[test]
+    fn append_only_refresh_reuses_unchanged_annotations() {
+        let f = Fixture::new();
+        for i in 0..128 {
+            f.append(&format!("d{i}"),"workflow.decision",json!({"session_id":"s","task_id":"t","occurred_at":format!("{i:04}"),"description":"decision"}),i);
+        }
+        f.store.refresh().unwrap();
+        let mut conn = f.store.connection().unwrap();
+        conn.batch_execute("CREATE TABLE annotation_writes(n INTEGER); CREATE TRIGGER annotation_insert AFTER INSERT ON dashboard_workflow_annotations BEGIN INSERT INTO annotation_writes VALUES(1); END;").unwrap();
+        f.append("new","workflow.decision",json!({"session_id":"s","task_id":"t","occurred_at":"0200","description":"new decision"}),200);
+        f.store.refresh().unwrap();
+        assert_eq!(
+            diesel::sql_query("SELECT COUNT(*) AS position FROM annotation_writes")
+                .get_result::<Position>(&mut conn)
+                .unwrap()
+                .position,
+            1
+        );
+        assert_eq!(
+            f.store
+                .session_timeline("s", "all", "oldest", 125, 10)
+                .unwrap()
+                .unwrap()
+                .0
+                .len(),
+            4
+        );
+        let reopened = ReportStore::open(&f.store.database_url).unwrap();
+        assert_eq!(reopened.refresh().unwrap(), 0);
+        assert_eq!(
+            diesel::sql_query("SELECT COUNT(*) AS position FROM annotation_writes")
+                .get_result::<Position>(&mut conn)
+                .unwrap()
+                .position,
+            1
+        );
+    }
+
+    #[test]
+    fn group_and_orchestration_pages_keep_exact_global_totals() {
+        let f = Fixture::new();
+        for i in 0..205 {
+            f.append(&format!("c{i}"),"jev.checkpoint",json!({"family":format!("f{i:03}"),"call_id":format!("c{i}"),"recommendation_confidence":0.8,"input_tokens":2,"output_tokens":1,"tokens":3}),i);
+            f.append(&format!("w{i}"),"orchestration.worker_completed",json!({"run_id":"r","worker_id":format!("w{i:03}"),"parent_session_id":"parent","total_tokens":3,"duration_ms":i}),i);
+        }
+        while f.store.refresh().unwrap() > 0 {}
+        let first = f.store.groups_page("checkpoint", true, 0).unwrap();
+        let last = f.store.groups_page("checkpoint", true, 200).unwrap();
+        assert_eq!(first["groups"].as_array().unwrap().len(), 200);
+        assert_eq!(last["groups"].as_array().unwrap().len(), 5);
+        let (totals, usage) = f.store.group_totals(true).unwrap();
+        assert_eq!(totals["groups"][0]["count"], 205);
+        let all = json!({"groups":first["groups"].as_array().unwrap().iter().chain(last["groups"].as_array().unwrap()).cloned().collect::<Vec<_>>()});
+        assert_eq!(usage, crate::summary::usage_totals(&[&all]));
+        let report = f.store.orchestration().unwrap();
+        assert_eq!(report["worker_count"], 205);
+        assert_eq!(report["workers"].as_array().unwrap().len(), 200);
+        assert_eq!(report["worker_groups"][0]["tokens"]["total"], 615.0);
+        assert_eq!(
+            f.store.orchestration_page(200).unwrap()["workers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        let diagram = f.store.orchestration_diagram(Some("parent"), 0, 0).unwrap();
+        assert_eq!(diagram["child_count"], 205);
+        assert_eq!(diagram["children"].as_array().unwrap().len(), 200);
+        let next = f
+            .store
+            .orchestration_diagram(Some("parent"), 200, 0)
+            .unwrap();
+        assert_eq!(next["session"]["id"], "parent");
+        assert_eq!(next["children"].as_array().unwrap().len(), 5);
+        assert_eq!(next["hidden_children"], 0);
+    }
+
+    #[test]
+    fn disk_history_memory_is_bounded_and_restart_keeps_pages() {
+        const CHILD: &str = "HARNESS_AUDIT_MEMORY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "reports::tests::disk_history_memory_is_bounded_and_restart_keeps_pages",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let f = Fixture::new();
+        let rss = || {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|s| s.starts_with("VmHWM:"))
+                        .and_then(|s| s.split_whitespace().nth(1))
+                        .and_then(|s| s.parse::<u64>().ok())
+                })
+        };
+        let mut before = None;
+        for end in [512, 8192] {
+            let start = if end == 512 { 0 } else { 512 };
+            let mut conn = f.store.connection().unwrap();
+            conn.transaction::<_,anyhow::Error,_>(|conn| {
+                for n in start..end {
+                    let payload=json!({"session_id":"large","task_id":"one","occurred_at":format!("{n:08}"),"description":"x".repeat(1500),"revision":n});
+                    diesel::sql_query("INSERT INTO events(aggregate_id,event_type,payload,sequence,timestamp_utc_us) VALUES(?,'AuditEventRecorded',?,1,?)")
+                        .bind::<Text,_>(format!("large-{n}"))
+                        .bind::<Text,_>(json!({"event_type":"workflow.plan_revised","payload":payload}).to_string()).bind::<BigInt,_>(n as i64).execute(conn)?;
+                } Ok(())
+            }).unwrap();
+            drop(conn);
+            while f.store.refresh().unwrap() > 0 {}
+            let detail = f
+                .store
+                .session_task("large", "one", end - 5, 5)
+                .unwrap()
+                .unwrap();
+            assert_eq!(detail["plan_count"], end);
+            assert_eq!(detail["plan_revisions"].as_array().unwrap().len(), 5);
+            assert_eq!(detail["plan_revisions"][0]["revision"], end - 5);
+            let (page, total) = f
+                .store
+                .session_timeline("large", "all", "oldest", end - 5, 5)
+                .unwrap()
+                .unwrap();
+            assert_eq!(total, end);
+            assert_eq!(page.len(), 5);
+            let summary = f.store.session_without_events("large").unwrap().unwrap();
+            assert!(summary.to_string().len() < 10000);
+            if end == 512 {
+                before = rss();
+            }
+        }
+        let reopened = ReportStore::open(&f.store.database_url).unwrap();
+        assert_eq!(reopened.refresh().unwrap(), 0);
+        let (page, total) = reopened
+            .filtered_timeline("large", false, false, 8180, 12, |row| {
+                row["category"] == "plan"
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(total, 8192);
+        assert_eq!(page.len(), 12);
+        if let (Some(before), Some(after)) = (before, rss()) {
+            eprintln!(
+                "disk history memory: 512 events {before} KiB peak; 8192 events {after} KiB peak"
+            );
+            assert!(
+                after.saturating_sub(before) < 32 * 1024,
+                "peak grew by {} KiB",
+                after.saturating_sub(before)
+            );
+            assert!(after < 96 * 1024, "peak exceeded 96 MiB: {after} KiB");
+        }
+    }
+
+    #[test]
+    fn disk_projection_matches_reducer_with_histories_pairs_and_filtered_signals() {
+        let f = Fixture::new();
+        let inputs = [
+            ("session_started", json!({"agent":"Codex"})),
+            ("task_started", json!({"name":"Repair"})),
+            ("plan_required", json!({"description":"Confirm"})),
+            (
+                "todo_created",
+                json!({"todo_id":"a","description":"First","criterion":"pass","status":"pending"}),
+            ),
+            (
+                "prompt_recorded",
+                json!({"prompt_id":"p","part_index":1,"part_count":2,"text":"world"}),
+            ),
+            (
+                "tool_started",
+                json!({"tool_call_id":"call","tool_name":"shell","tool_command":"check"}),
+            ),
+            ("decision", json!({"description":"Keep"})),
+            (
+                "tool_completed",
+                json!({"tool_call_id":"call","tool_name":"shell","outcome":"succeeded","exit_code":0}),
+            ),
+            (
+                "todo_updated",
+                json!({"todo_id":"a","description":"First","criterion":"pass","status":"completed","evidence":"done"}),
+            ),
+            ("plan_confirmed", json!({"description":"Confirmed"})),
+            ("verification", json!({"exit_code":0})),
+            ("task_completed", json!({"outcome":"Fixed"})),
+            (
+                "prompt_recorded",
+                json!({"prompt_id":"p","part_index":0,"part_count":2,"text":"hello "}),
+            ),
+        ];
+        for (i, (kind, extra)) in inputs.into_iter().enumerate() {
+            let mut payload =
+                json!({"session_id":"s","task_id":"t","occurred_at":format!("{i:03}")});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            f.append(
+                &format!("event-{i}"),
+                &format!("workflow.{kind}"),
+                payload,
+                i as i64,
+            );
+        }
+        f.store.refresh().unwrap();
+        for round in 0..3 {
+            if round == 1 {
+                f.append("event-12","workflow.prompt_recorded",json!({"session_id":"s","task_id":"t","occurred_at":"001","prompt_id":"p","part_index":0,"part_count":2,"text":"hello "}),20);
+            }
+            if round == 2 {
+                f.append("event-8","workflow.todo_updated",json!({"session_id":"other","task_id":"u","occurred_at":"030","todo_id":"a","description":"Moved","status":"pending"}),30);
+            }
+            f.store.refresh().unwrap();
+            let rows = f.store.events(&EventFilter::default(), 1000).unwrap();
+            let expected = crate::workflow::sessions(&rows)
+                .into_iter()
+                .find(|s| s["session_id"] == "s")
+                .unwrap();
+            assert_eq!(f.store.session("s").unwrap().unwrap(), expected);
+            for newest in [false, true] {
+                let raw = expected["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| {
+                        e["event_type"] != "workflow.prompt_recorded"
+                            || e["payload"]["part_index"] == 0
+                    })
+                    .filter(|e| e["category"] != "decision")
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut signal = crate::workflow::signal_items(&raw);
+                if newest {
+                    signal = crate::workflow::newest_first(signal);
+                }
+                let (actual, total) = f
+                    .store
+                    .filtered_timeline("s", true, newest, 0, 100, |e| e["category"] != "decision")
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(total, signal.len());
+                assert_eq!(actual, signal);
+            }
+        }
+    }
+
     #[test]
     fn prompt_pages_keep_order_and_report_total() {
         let f = Fixture::new();
@@ -1681,6 +1903,56 @@ mod tests {
         );
         assert_eq!(f.store.refresh().unwrap(), 0);
     }
+    #[test]
+    fn entity_pages_use_first_chronological_fact_with_recorded_and_position_ties() {
+        let f = Fixture::new();
+        for (event, task, occurred, recorded) in [
+            ("a-new", "a", "02", 1),
+            ("b-first", "b", "01", 10),
+            ("c-first", "c", "01", 5),
+        ] {
+            f.append(
+                event,
+                "workflow.task_started",
+                json!({"session_id":"s","task_id":task,"occurred_at":occurred}),
+                recorded,
+            );
+        }
+        f.store.refresh().unwrap();
+        // A late first fact must replace A's earlier ingestion position as its tie breaker.
+        f.append(
+            "a-first",
+            "workflow.task_started",
+            json!({"session_id":"s","task_id":"a","occurred_at":"01"}),
+            10,
+        );
+        for (event, todo, occurred, recorded) in [
+            ("todo-a-new", "a", "04", 1),
+            ("todo-b-first", "b", "03", 10),
+            ("todo-c-first", "c", "03", 5),
+            ("todo-a-first", "a", "03", 10),
+        ] {
+            f.append(
+                event,
+                "workflow.todo_created",
+                json!({"session_id":"s","task_id":"a","todo_id":todo,"occurred_at":occurred}),
+                recorded,
+            );
+        }
+        f.store.refresh().unwrap();
+        let reopened = ReportStore::open(f.path.to_str().unwrap()).unwrap();
+        for (index, expected) in ["c", "b", "a"].iter().enumerate() {
+            let (tasks, total) = reopened.session_tasks("s", index, 1).unwrap().unwrap();
+            assert_eq!(total, 3);
+            assert_eq!(tasks[0]["task_id"], *expected);
+            assert_eq!(tasks[0]["sequence"], index + 1);
+            let task = reopened.session_task("s", "a", index, 1).unwrap().unwrap();
+            assert_eq!(task["sequence"], 3);
+            assert_eq!(task["todo_list"][0]["id"], *expected);
+            assert_eq!(task["todo_list"][0]["sequence"], index + 1);
+        }
+    }
+
     #[test]
     fn task_projection_pages_preserve_order_and_details() {
         let f = Fixture::new();

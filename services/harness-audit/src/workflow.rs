@@ -240,7 +240,7 @@ fn joined(parts: &[&str]) -> String {
 /// How the signal view shows one event: whether it is kept at all, a one-line
 /// headline, an optional detail line, and a tone for its marker. Tool calls
 /// that did not fail are folded into bursts by `signal_items` instead.
-fn signal_view(
+pub(crate) fn signal_view(
     kind: &str,
     p: &Value,
     status: &str,
@@ -414,53 +414,56 @@ pub fn elapsed(from: &str, to: &str) -> String {
 /// The signal view of a timeline: kept events in order, with each run of tool
 /// calls between them folded into one burst row. A burst counts its calls from
 /// the starts it saw, or from the returns when starts were not collected.
-pub fn signal_items(events: &[Value]) -> Vec<Value> {
-    #[derive(Default)]
-    struct Burst {
-        starts: BTreeMap<String, usize>,
-        returns: BTreeMap<String, usize>,
-        start_calls: Vec<Value>,
-        return_calls: Vec<Value>,
-        first_at: String,
-        last_at: String,
-    }
-    // The flow diagram lists a burst's calls; very long runs keep the first ones.
-    const MAX_CALLS: usize = 200;
-    fn flush(burst: &mut Option<Burst>, items: &mut Vec<Value>, returns: &BTreeMap<&str, Value>) {
-        let Some(b) = burst.take() else { return };
-        let total = |m: &BTreeMap<String, usize>| m.values().sum::<usize>();
-        let mix = if total(&b.starts) >= total(&b.returns) {
-            &b.starts
-        } else {
-            &b.returns
-        };
-        let calls: Vec<Value> = if b.start_calls.is_empty() {
-            b.return_calls.clone()
-        } else {
-            b.start_calls
-                .iter()
-                .map(|start| {
-                    let mut call = start.clone();
-                    match start["id"].as_str().and_then(|id| returns.get(id)) {
-                        Some(done) => {
-                            for key in ["status", "duration_ms", "exit_code"] {
+#[derive(Default)]
+struct Burst {
+    starts: BTreeMap<String, usize>,
+    returns: BTreeMap<String, usize>,
+    start_calls: Vec<Value>,
+    return_calls: Vec<Value>,
+    first_at: String,
+    last_at: String,
+}
+// The flow diagram lists a burst's calls; very long runs keep the first ones.
+const MAX_CALLS: usize = 200;
+fn flush(
+    burst: &mut Option<Burst>,
+    items: &mut Vec<Value>,
+    lookup: &mut impl FnMut(&str) -> Option<Value>,
+) {
+    let Some(b) = burst.take() else { return };
+    let total = |m: &BTreeMap<String, usize>| m.values().sum::<usize>();
+    let mix = if total(&b.starts) >= total(&b.returns) {
+        &b.starts
+    } else {
+        &b.returns
+    };
+    let calls: Vec<Value> = if b.start_calls.is_empty() {
+        b.return_calls.clone()
+    } else {
+        b.start_calls
+            .iter()
+            .map(|start| {
+                let mut call = start.clone();
+                match start["id"].as_str().and_then(|id| lookup(id)) {
+                    Some(done) => {
+                        for key in ["status", "duration_ms", "exit_code"] {
+                            call[key] = done[key].clone();
+                        }
+                        for key in ["label", "command"] {
+                            if call[key].is_null() {
                                 call[key] = done[key].clone();
                             }
-                            for key in ["label", "command"] {
-                                if call[key].is_null() {
-                                    call[key] = done[key].clone();
-                                }
-                            }
                         }
-                        None => call["status"] = json!("no return"),
                     }
-                    call
-                })
-                .collect()
-        };
-        let mut tools: Vec<(&String, &usize)> = mix.iter().collect();
-        tools.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        items.push(json!({
+                    None => call["status"] = json!("no return"),
+                }
+                call
+            })
+            .collect()
+    };
+    let mut tools: Vec<(&String, &usize)> = mix.iter().collect();
+    tools.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    items.push(json!({
             "category": "burst",
             "calls": total(mix),
             "tools": tools.iter().map(|(name, count)| json!({"name": name, "count": count})).collect::<Vec<_>>(),
@@ -469,31 +472,28 @@ pub fn signal_items(events: &[Value]) -> Vec<Value> {
             "duration": elapsed(&b.first_at, &b.last_at),
             "call_list": calls,
         }));
-    }
-    // Each started call takes its return's result and timing when the IDs pair,
-    // even when the return lands after a kept event or is itself a failure row.
-    let returns: BTreeMap<&str, Value> = events
-        .iter()
-        .filter(|e| e["category"] == "tool" && e["event_type"] != "workflow.tool_started")
-        .filter_map(|e| {
-            let p = &e["payload"];
-            p["tool_call_id"].as_str().map(|id| {
-                (id, json!({"status": e["result_status"], "duration_ms": p["duration_ms"], "exit_code": p["exit_code"], "label": p["tool_label"], "command": p["tool_command"]}))
-            })
-        })
-        .collect();
-    let mut items = Vec::new();
-    let mut burst: Option<Burst> = None;
-    let mut last_task = Value::Null;
-    for event in events {
+}
+#[derive(Default)]
+pub(crate) struct SignalStream {
+    burst: Option<Burst>,
+    last_task: Value,
+}
+impl SignalStream {
+    pub(crate) fn push(
+        &mut self,
+        event: &Value,
+        lookup: &mut impl FnMut(&str) -> Option<Value>,
+    ) -> Vec<Value> {
+        let mut items = Vec::new();
+
         if event["signal"] == true {
-            flush(&mut burst, &mut items, &returns);
+            flush(&mut self.burst, &mut items, lookup);
             let mut item = event.clone();
             // Name the task only where the story moves to another one.
             let task = &event["payload"]["task_id"];
-            item["task_changed"] = json!(!task.is_null() && *task != last_task);
+            item["task_changed"] = json!(!task.is_null() && *task != self.last_task);
             if !task.is_null() {
-                last_task = task.clone();
+                self.last_task = task.clone();
             }
             items.push(item);
         } else if event["category"] == "tool" {
@@ -503,7 +503,7 @@ pub fn signal_items(events: &[Value]) -> Vec<Value> {
                 .as_str()
                 .unwrap_or("Tool")
                 .to_owned();
-            let b = burst.get_or_insert_with(|| Burst {
+            let b = self.burst.get_or_insert_with(|| Burst {
                 first_at: at.to_owned(),
                 ..Burst::default()
             });
@@ -528,8 +528,34 @@ pub fn signal_items(events: &[Value]) -> Vec<Value> {
             }
             *side.entry(name).or_default() += 1;
         }
+        items
     }
-    flush(&mut burst, &mut items, &returns);
+    pub(crate) fn finish(&mut self, lookup: &mut impl FnMut(&str) -> Option<Value>) -> Vec<Value> {
+        let mut items = Vec::new();
+        flush(&mut self.burst, &mut items, lookup);
+        items
+    }
+}
+pub fn signal_items(events: &[Value]) -> Vec<Value> {
+    // Each started call takes its return's result and timing when the IDs pair,
+    // even when the return lands after a kept event or is itself a failure row.
+    let returns: BTreeMap<&str, Value> = events
+        .iter()
+        .filter(|e| e["category"] == "tool" && e["event_type"] != "workflow.tool_started")
+        .filter_map(|e| {
+            let p = &e["payload"];
+            p["tool_call_id"].as_str().map(|id| {
+                (id, json!({"status": e["result_status"], "duration_ms": p["duration_ms"], "exit_code": p["exit_code"], "label": p["tool_label"], "command": p["tool_command"]}))
+            })
+        })
+        .collect();
+    let mut stream = SignalStream::default();
+    let mut lookup = |id: &str| returns.get(id).cloned();
+    let mut items = Vec::new();
+    for event in events {
+        items.extend(stream.push(event, &mut lookup));
+    }
+    items.extend(stream.finish(&mut lookup));
     items
 }
 
@@ -558,7 +584,7 @@ pub fn newest_first(items: Vec<Value>) -> Vec<Value> {
 
 /// The verdict strip: latest explicit outcome, latest result of each check,
 /// todo progress and activity, plus the attention flags the directory filters on.
-fn verdict(session: &Value) -> Value {
+pub(crate) fn verdict(session: &Value) -> Value {
     let events = session["events"].as_array().unwrap();
     let mut outcome = json!({"status": "", "text": ""});
     let mut checks = serde_json::Map::new();
@@ -641,7 +667,7 @@ fn verdict(session: &Value) -> Value {
 }
 
 /// `pr-2818-rebase` reads as `PR 2818 rebase`; ordinary titles are unchanged.
-fn humanize(label: &str) -> String {
+pub(crate) fn humanize(label: &str) -> String {
     if label.contains(char::is_whitespace) || !label.contains(['-', '_']) {
         return label.to_owned();
     }
@@ -666,7 +692,7 @@ fn humanize(label: &str) -> String {
 
 /// The project a working directory belongs to: its last path component, and
 /// whether it sits inside a worktree folder (`.../worktrees/...`, `x.worktrees/...`).
-fn project(cwd: &str) -> (String, bool) {
+pub(crate) fn project(cwd: &str) -> (String, bool) {
     if !cwd.starts_with('/') {
         return ("Unknown".into(), false);
     }
@@ -677,7 +703,7 @@ fn project(cwd: &str) -> (String, bool) {
     (parts.last().unwrap_or(&"/").to_string(), worktree)
 }
 
-fn annotate_timeline(session: &mut Value) {
+pub(crate) fn annotate_timeline(session: &mut Value) {
     let tasks = session["tasks"].clone();
     // A plan prompt is only worth showing while it is still the task's latest plan event.
     let mut last_plan = BTreeMap::<String, usize>::new();
@@ -799,7 +825,7 @@ fn annotate_timeline(session: &mut Value) {
 }
 
 /// One line of a prompt for its collapsed list row.
-fn preview(text: &str) -> String {
+pub(crate) fn preview(text: &str) -> String {
     let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
     match line.char_indices().nth(120) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
@@ -839,7 +865,7 @@ pub(crate) fn ordered_tasks(tasks: &Value) -> Vec<Value> {
 /// for sorting by occurred_at, recorded_at_us, and source position.
 #[derive(Default)]
 pub(crate) struct SessionReducer {
-    sessions: BTreeMap<String, Value>,
+    pub(crate) sessions: BTreeMap<String, Value>,
 }
 
 impl SessionReducer {
@@ -1694,6 +1720,18 @@ pub(crate) fn projection_keys(row: &Value) -> Vec<(String, String, String)> {
     ] {
         if let Some(id) = p[field].as_str().filter(|v| !v.is_empty()) {
             keys.push((session.to_owned(), category.to_owned(), id.to_owned()));
+        }
+    }
+    if let (Some(task), Some(todo)) = (p["task_id"].as_str(), p["todo_id"].as_str()) {
+        if row["event_type"]
+            .as_str()
+            .is_some_and(|k| k.starts_with("workflow.todo_"))
+        {
+            keys.push((
+                session.to_owned(),
+                "todo".into(),
+                json!([task, todo]).to_string(),
+            ));
         }
     }
     keys
