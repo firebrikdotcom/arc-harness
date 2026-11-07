@@ -159,7 +159,8 @@ class AttemptTests(unittest.TestCase):
         report_path = directory / "report.json"
         report_path.write_text(json.dumps(report))
         behavior.record(self.root, attempt, report_path)
-        behavior.check(self.root, ["example"])
+        with self.assertRaisesRegex(behavior.Invalid, "runtime freshness cannot be verified"):
+            behavior.check(self.root, ["example"])
         (directory / "proof").write_text("changed")
         with self.assertRaises(behavior.Invalid):
             behavior.check(self.root, ["example"])
@@ -221,7 +222,9 @@ class CliTests(AttemptTests):
         report_file = evidence / "report.json"
         report_file.write_text(json.dumps(report))
         self.assertEqual(run("record", "--attempt", attempt, "--report", str(report_file)).returncode, 0)
-        self.assertEqual(run("check", "--features", "example").returncode, 0)
+        checked = run("check", "--features", "example")
+        self.assertNotEqual(checked.returncode, 0)
+        self.assertIn("runtime freshness cannot be verified", checked.stderr)
         (evidence / "proof").write_text("modified")
         self.assertNotEqual(run("check", "--features", "example").returncode, 0)
 

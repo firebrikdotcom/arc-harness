@@ -261,7 +261,7 @@ def check(project, features):
     missing = set(features) - passing
     if missing:
         raise Invalid("missing current passing evidence: " + ", ".join(sorted(missing)))
-    return "current passing evidence: " + ", ".join(features)
+    raise Invalid("runtime freshness cannot be verified: installed build, device, session and configuration must be checked independently; a passing acceptance claim is blocked")
 
 
 def review_summary(project):
@@ -278,7 +278,7 @@ def review_summary(project):
                 continue
             stale = receipt["tree"] != tree or receipt["definition"] != definition
             intact = validate_report(report, receipt) == data.get("artifacts")
-            state = "stale" if stale else ("intact" if intact else "modified")
+            state = "stale" if stale else ("artifact intact; runtime freshness unverified" if intact else "modified")
             lines.append(f"Attempt {receipt['attempt']}: {report['outcome']} ({state}); features: {', '.join(receipt['features'])}")
             for artifact in data.get("artifacts", [])[:100]:
                 lines.append(f"  artifact: {safe(receipt['evidence_dir'])}/{safe(artifact['path'])} sha256={safe(artifact['sha256'])}")
