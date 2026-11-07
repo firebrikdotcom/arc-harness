@@ -107,6 +107,18 @@ class ReportTests(unittest.TestCase):
         self.report["artifacts"] = []
         self.assertEqual(behavior.validate_report(self.report, self.receipt), [])
 
+    def test_nonpassing_and_unknown_build_cannot_become_passes(self):
+        for outcome in ("failed", "blocked", "inconclusive"):
+            self.report["outcome"] = outcome
+            self.report["reason"] = "not complete"
+            behavior.validate_report(self.report, self.receipt)
+        self.report["outcome"] = "passed"
+        for value in ("none", "unknown"):
+            self.report["source_build"] = value
+            self.report["runtime_build"] = value
+            with self.assertRaises(behavior.Invalid):
+                behavior.validate_report(self.report, self.receipt)
+
     def test_artifact_escape(self):
         (self.root / "escape").symlink_to("/etc/passwd")
         for path in ("../etc/passwd", "/etc/passwd", "escape"):
@@ -182,3 +194,41 @@ class ReviewFindingTests(unittest.TestCase):
         finding["evidence_kind"] = "invented"
         with self.assertRaises(ValueError):
             module.validate(data)
+
+
+class CliTests(AttemptTests):
+    def test_cli_records_and_rechecks_without_driving_project(self):
+        import os
+        import subprocess
+        from datetime import datetime, timezone
+        script = str(Path(__file__).resolve().parents[1] / "scripts/behavior_verification.py")
+        def run(*args):
+            return subprocess.run([sys.executable, script, *args, "--project", str(self.root)],
+                                  text=True, capture_output=True, env=os.environ.copy())
+        evidence = self.root / "evidence/cli"
+        begin = run("begin", "--feature", "example", "--evidence-dir", str(evidence))
+        self.assertEqual(begin.returncode, 0, begin.stderr)
+        attempt = begin.stdout.strip()
+        receipt = json.loads((self.run_dir / "behavior" / (attempt + ".json")).read_text())["receipt"]
+        (evidence / "proof").write_text("observed")
+        now = datetime.now(timezone.utc).isoformat()
+        report = {"version": 1, **{k: receipt[k] for k in ("attempt", "run", "project", "tree", "definition", "features")},
+                  "outcome": "passed", "started_at": now, "ended_at": now, "source_build": "build",
+                  "runtime_build": "build", "platform": "fixture", "configuration": "isolated", "test_data": "owned",
+                  "readiness": [{"description": "ready", "observed": "yes"}],
+                  "actions": [{"action": "inspect", "expected": "yes", "observed": "yes"}],
+                  "cleanup": [{"description": "fixture", "observed": "removed"}], "artifacts": ["proof"], "reason": ""}
+        report_file = evidence / "report.json"
+        report_file.write_text(json.dumps(report))
+        self.assertEqual(run("record", "--attempt", attempt, "--report", str(report_file)).returncode, 0)
+        self.assertEqual(run("check", "--features", "example").returncode, 0)
+        (evidence / "proof").write_text("modified")
+        self.assertNotEqual(run("check", "--features", "example").returncode, 0)
+
+    def test_cli_rejects_wrong_project_and_unknown_feature(self):
+        import subprocess
+        script = str(Path(__file__).resolve().parents[1] / "scripts/behavior_verification.py")
+        result = subprocess.run([sys.executable, script, "check", "--project", str(self.root),
+                                 "--features", "unknown"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("registered IDs", result.stderr)
