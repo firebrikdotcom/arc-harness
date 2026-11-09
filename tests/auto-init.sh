@@ -2,6 +2,8 @@
 # Automatic target initialisation: the registry helper, init --auto, the
 # SessionStart hook, per-target harness state, and the hook installer.
 set -eu
+# Run as a plain shell, not inside the agent session that started the suite.
+unset HARNESS_SESSION_ID CODEX_THREAD_ID CLAUDE_SESSION_ID CLAUDE_CODE_SESSION_ID CLAUDECODE CODEX_SANDBOX HERDR_ENV
 
 ROOT=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P)
 cd "$ROOT"

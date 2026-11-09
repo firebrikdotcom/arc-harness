@@ -428,5 +428,33 @@ class SessionFocusTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout), {"error": "unknown session"})
 
 
+class ChangedPathsTests(unittest.TestCase):
+    def test_stale_local_default_branch_uses_newer_origin_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            ident = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(base / "origin.git")], check=True)
+            work = base / "work"
+            work.mkdir()
+            git(work, "init", "-q", "-b", "main")
+            (work / "a.txt").write_text("a\n")
+            git(work, "add", ".")
+            git(work, *ident, "commit", "-qm", "init")
+            git(work, "remote", "add", "origin", str(base / "origin.git"))
+            git(work, "push", "-q", "origin", "main")
+            (work / "upstream.txt").write_text("u\n")
+            git(work, "add", ".")
+            git(work, *ident, "commit", "-qm", "advance origin")
+            git(work, "push", "-q", "origin", "main")
+            git(work, "branch", "feat")
+            git(work, "reset", "-q", "--hard", "HEAD~1")
+            git(work, "fetch", "-q", "origin")
+            git(work, "checkout", "-q", "feat")
+            (work / "own.txt").write_text("o\n")
+            git(work, "add", ".")
+            git(work, *ident, "commit", "-qm", "own work")
+            self.assertEqual(board.changed_paths(str(work), "main"), {"own.txt"})
+
+
 if __name__ == "__main__":
     unittest.main()

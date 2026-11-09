@@ -709,12 +709,22 @@ def default_branch(root, board):
 def changed_paths(root, base_name):
     """Files changed on this branch since it left the default branch, plus uncommitted and untracked ones."""
     paths = set()
+    best = None
     for ref in (base_name, f"origin/{base_name}") if base_name else ():
         mb = git(root, "merge-base", "HEAD", ref)
-        if mb.returncode == 0 and mb.stdout.strip():
-            out = git(root, "diff", "--name-only", "-z", mb.stdout.decode().strip()).stdout.decode("utf-8", "replace")
-            paths.update(x for x in out.split("\0") if x)
-            break
+        sha = mb.stdout.decode().strip() if mb.returncode == 0 else ""
+        if not sha:
+            continue
+        count = git(root, "rev-list", "--count", f"{sha}..HEAD")
+        try:
+            distance = int(count.stdout.decode().strip())
+        except ValueError:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, sha)
+    if best:
+        out = git(root, "diff", "--name-only", "-z", best[1]).stdout.decode("utf-8", "replace")
+        paths.update(x for x in out.split("\0") if x)
     out = git(root, "status", "--porcelain", "-z", "--untracked-files=all").stdout.decode("utf-8", "replace").split("\0")
     i = 0
     while i < len(out):
