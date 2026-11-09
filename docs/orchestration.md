@@ -181,7 +181,8 @@ list an explicit `"provider": "amp"` profile; that still requires `amp.enabled`.
 
 The orb has no harness, so it gets only the bounded packet, and nothing it
 does counts until the parent checks it here. Read workers report back; edit workers
-push a branch that the parent fetches into the worker's own worktree. Integration,
+push a branch that the parent fetches and checks against the dispatched commit without
+creating a local snapshot. The parent checks changed paths before producing a patch. Integration,
 `verify.sh`, acceptance commands and independent review then run locally as usual.
 
 Before using it:

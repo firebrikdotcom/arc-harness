@@ -392,6 +392,10 @@ def prepare(run, w):
     if orb:
         # Checked again at launch: the tree may have changed since the plan was created.
         orb_base(run, w)
+        # Orbs clone the pushed commit; do not create or commit a local snapshot.
+        w['workspace'] = str(project)
+        w['base_commit'] = w['orb_base']
+        return
     if w['access'] == 'read':
         w['workspace'] = str(project)
         return
@@ -557,7 +561,28 @@ def finish(run_id, worker_id, result):
         w['duration_ms'] = int((w['finished_at'] - w['started_at']) * 1000)
         for key in ('input_tokens', 'cached_input_tokens', 'output_tokens', 'total_tokens', 'cost_usd', 'exit_code'):
             w[key] = result.get(key)
-        if w['access'] == 'edit':
+        if w['access'] == 'edit' and w['profile']['provider'] == 'amp':
+            if w['status'] == 'completed':
+                workspace = Path(w['workspace'])
+                commit = result['orb_commit']
+                changed = [os.fsdecode(p) for p in git(workspace, 'diff', '--no-renames', '--name-only', '-z', w['base_commit'], commit).split(b'\0') if p]
+                unsafe_paths = any(
+                    not any(p == owned or p.startswith(owned + '/') for owned in w['owned_paths'])
+                    or not snapshot_allowed(workspace, p)
+                    or git(workspace, 'ls-tree', '-z', commit, '--', p).split(b' ', 1)[0] in (b'120000', b'160000')
+                    for p in changed
+                )
+                if unsafe_paths:
+                    w['status'] = 'failed'
+                    w['error'] = 'worker changed paths outside ownership'
+                else:
+                    patch = git(workspace, 'diff', '--binary', '--no-renames', w['base_commit'], commit)
+                    artifact = db_path().parent / 'dispatch-artifacts' / run_id / (worker_id + '.patch')
+                    artifact.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    artifact.write_bytes(patch)
+                    artifact.chmod(0o600)
+                    w.update(patch=str(artifact), patch_hash=hashlib.sha256(patch).hexdigest(), changed_paths=changed)
+        elif w['access'] == 'edit':
             workspace = Path(w['workspace'])
             for raw in git(workspace, 'ls-files', '--others', '--exclude-standard', '-z').split(b'\0'):
                 if raw:
@@ -954,8 +979,9 @@ def thread_record(export):
 
 def fetch_orb_branch(w, report):
     workspace = Path(w['workspace'])
-    git(workspace, 'fetch', '--no-tags', 'origin', 'refs/heads/' + w['orb_branch'])
-    commit = git(workspace, 'rev-parse', 'FETCH_HEAD').decode().strip()
+    local_ref = 'refs/harness/dispatch/' + w['orb_branch']
+    git(workspace, 'fetch', '--no-tags', '--no-write-fetch-head', 'origin', 'refs/heads/' + w['orb_branch'] + ':' + local_ref)
+    commit = git(workspace, 'rev-parse', local_ref).decode().strip()
     claimed = str(report.get('commit') or '').lower()
     if not re.fullmatch(r'[0-9a-f]{7,40}', claimed):
         raise ValueError('edit report must include the pushed commit')
@@ -963,9 +989,6 @@ def fetch_orb_branch(w, report):
         raise ValueError('pushed branch does not match the reported commit')
     if subprocess.run(['git', '-C', str(workspace), 'merge-base', '--is-ancestor', w['orb_base'], commit], capture_output=True).returncode != 0:
         raise ValueError('orb branch does not start from the dispatched base commit')
-    patch = git(workspace, 'diff', '--binary', w['orb_base'], commit)
-    if patch:
-        git(workspace, 'apply', '--binary', '-', input=patch)
     return commit
 
 

@@ -486,14 +486,18 @@ report = {'status': 'completed', 'evidence': 'Checked in the orb', 'artifacts': 
           'acceptance': [{'criterion': c, 'passed': True, 'evidence': 'Checked'} for c in criteria],
           'audit': {'commands': [{'cmd': 'cat source.txt', 'exit': 0}], 'files_written': [], 'network': [], 'deviations': []}}
 tools = [{'type': 'tool_use', 'name': 'shell_command', 'input': {'command': 'cat source.txt'}}]
-if mode in ('edit', 'unowned', 'nocommit'):
+if mode in ('edit', 'unowned', 'nocommit', 'symlink'):
     branch, base = re.search(r'git checkout -B (\S+) ([0-9a-f]+)', prompt).groups()
     clone = state / 'clone'
     run = lambda *a: subprocess.run(['git', '-C', str(clone), *a], check=True, capture_output=True, text=True).stdout.strip()
     subprocess.run(['git', 'clone', '-q', os.environ['FAKE_AMP_ORIGIN'], str(clone)], check=True)
     run('checkout', '-q', '-B', branch, base)
-    name = 'source.txt' if mode == 'edit' else 'other.txt'
-    (clone / name).write_text('orb result\n')
+    name = 'source.txt' if mode in ('edit', 'symlink') else 'other.txt'
+    if mode == 'symlink':
+        (clone / name).unlink()
+        (clone / name).symlink_to('/tmp/outside')
+    else:
+        (clone / name).write_text('orb result\n')
     run('add', name)
     run('-c', 'user.name=Orb', '-c', 'user.email=orb@localhost', 'commit', '-q', '-m', 'Orb change')
     run('push', '-q', 'origin', 'HEAD:refs/heads/' + branch)
@@ -620,10 +624,16 @@ class AmpOrbTest(unittest.TestCase):
         self.assertEqual((worker['input_tokens'], worker['cached_input_tokens'], worker['output_tokens'], worker['total_tokens']), (200, 160, 20, 220))
 
     def test_edit_worker_branch_is_fetched_into_owned_paths_and_integrates(self):
+        hook = self.project / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
         run, worker = self.orb_run('edit', access='edit')
         self.assertEqual(worker['status'], 'completed', worker.get('result'))
         self.assertIn('git checkout -B harness/', (self.state / 'prompt.txt').read_text())
         self.assertEqual(worker['changed_paths'], ['source.txt'])
+        self.assertEqual(Path(worker['workspace']), self.project)
+        self.assertEqual((self.project / 'source.txt').read_text(), 'base\n')
+        self.assertEqual(d.git(self.project, 'status', '--porcelain'), b'')
         self.assertIn('+orb result', Path(worker['patch']).read_text())
         self.assertEqual(worker['result']['audit']['unreported_files'], [])
         d.integrate(run, 'one')
@@ -664,6 +674,14 @@ class AmpOrbTest(unittest.TestCase):
     def test_edit_outside_owned_paths_fails(self):
         _, worker = self.orb_run('unowned', access='edit')
         self.assertEqual((worker['status'], worker['error']), ('failed', 'worker changed paths outside ownership'))
+        self.assertFalse((self.project / 'other.txt').exists())
+        self.assertNotIn('patch', worker)
+
+    def test_orb_cannot_return_a_symlink_in_an_owned_path(self):
+        _, worker = self.orb_run('symlink', access='edit')
+        self.assertEqual(worker['status'], 'failed')
+        self.assertNotIn('patch', worker)
+        self.assertFalse((self.project / 'source.txt').is_symlink())
 
     def test_edit_workers_need_a_pushed_base_and_clean_owned_paths(self):
         (self.project / 'new.txt').write_text('untracked\n')
