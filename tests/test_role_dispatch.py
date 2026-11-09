@@ -160,17 +160,22 @@ class DispatcherTest(unittest.TestCase):
         for workers in cases:
             with self.assertRaises(ValueError):
                 d.validate({'workers': workers, 'assessment': self.assessment()}, self.project, self.config)
-    def test_editing_snapshot_skips_tracked_ignored_files(self):
+    def test_editing_snapshot_includes_tracked_but_not_untracked_ignored_files(self):
         self.init_git()
         (self.project / '.gitignore').write_text('ignored/\n')
         (self.project / 'ignored').mkdir()
         (self.project / 'ignored' / 'tracked.txt').write_text('ignored\n')
+        (self.project / 'ignored' / 'tracked.txt').chmod(0o755)
         d.git(self.project, 'add', '-f', '--', 'ignored/tracked.txt')
         d.git(self.project, 'add', '--', '.gitignore')
         d.git(self.project, '-c', 'user.name=Test', '-c', 'user.email=test@localhost', 'commit', '-m', 'Add ignored fixture')
+        (self.project / 'ignored' / 'tracked.txt').write_text('local edits must stay private\n')
+        (self.project / 'ignored' / 'untracked.txt').write_text('not tracked\n')
         run = self.create(self.worker(access='edit'))
         workspace = Path(d.next_workers(run)['workers'][0]['workspace'])
-        self.assertFalse((workspace / 'ignored' / 'tracked.txt').exists())
+        self.assertEqual((workspace / 'ignored' / 'tracked.txt').read_text(), 'ignored\n')
+        self.assertTrue((workspace / 'ignored' / 'tracked.txt').stat().st_mode & 0o111)
+        self.assertFalse((workspace / 'ignored' / 'untracked.txt').exists())
         self.assertTrue((workspace / 'source.txt').exists())
 
     def test_editing_snapshot_and_patch_excludes_parent_changes(self):

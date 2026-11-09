@@ -401,6 +401,7 @@ def prepare(run, w):
     w['workspace'] = str(destination)
     # Build an allowlisted index from current files, never checkout or stage secrets.
     git(destination, 'read-tree', '--empty')
+    tracked = set(git(project, 'ls-files', '--cached', '-z').split(b'\0'))
     candidates = git(project, 'ls-files', '--cached', '--others', '--exclude-standard', '-z').split(b'\0')
     ignored = subprocess.run(
         ['git', '-C', str(project), 'check-ignore', '--no-index', '-z', '--stdin'],
@@ -412,7 +413,7 @@ def prepare(run, w):
     ignored_paths = set(ignored.stdout.split(b'\0'))
     copied = []
     for raw in candidates:
-        if not raw or raw in ignored_paths:
+        if not raw:
             continue
         relative = os.fsdecode(raw)
         if not snapshot_allowed(project, relative):
@@ -421,10 +422,25 @@ def prepare(run, w):
         if not source.is_file():
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        copied.append(relative)
-    for relative in copied:
-        git(destination, 'add', '--', relative)
+        if raw in ignored_paths:
+            # Ignore local edits to ignored files: only committed tracked bytes may enter a snapshot.
+            committed = subprocess.run(
+                ['git', '-C', str(project), 'show', f'HEAD:{relative}'],
+                capture_output=True,
+            )
+            if raw not in tracked or committed.returncode != 0:
+                continue
+            target.write_bytes(committed.stdout)
+            mode = git(project, 'ls-tree', '-z', 'HEAD', '--', relative).split(b' ', 1)[0]
+            target.chmod(0o755 if mode == b'100755' else 0o644)
+        else:
+            shutil.copy2(source, target)
+        copied.append((relative, raw in tracked))
+    for relative, is_tracked in copied:
+        if is_tracked:
+            git(destination, 'add', '-f', '--', relative)
+        else:
+            git(destination, 'add', '--', relative)
     git(destination, '-c', 'user.name=Harness', '-c', 'user.email=harness@localhost', 'commit', '--allow-empty', '-m', 'Snapshot permitted current workspace files')
     with connection() as dep_db:
         dependencies = {item['id']: item for item in workers(dep_db, run['id'])}
