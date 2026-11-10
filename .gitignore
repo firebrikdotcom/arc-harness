@@ -50,3 +50,9 @@ __pycache__/
 
 # Personal Claude Code settings; the shared hook config lives in .claude/settings.json.
 .claude/settings.local.json
+
+# Local investigation and planning artifacts.
+/.playwright-mcp/
+/progress-prior-audit-handoff.md
+/tasks/delegation-worker-review.json
+/tasks/pstack-integration-plan.md
