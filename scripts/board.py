@@ -687,7 +687,7 @@ def start_session(target, session_id):
     for rec in session_records(target):
         if rec.get("session_id") == session_id:
             return {"key": rec["key"], "url": audit_url(target["TARGET_ID"], rec["key"])}
-    key = secrets.token_urlsafe(24)
+    key = "s" + secrets.token_urlsafe(24)
     rec = {"key": key, "session_id": session_id, "target": target["TARGET_ID"], "root": target["TARGET_ROOT"],
            "owner": {"user": getpass.getuser(), "login": tailscale_login()}, "started_at": now()}
     write_json(board_dir(target) / "sessions" / f"{key}.json", rec)
@@ -979,6 +979,11 @@ def main(argv=None):
     ap.add_argument("--removed", action="store_true")
     ap.add_argument("--session-id")
     ap.add_argument("--session")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i in range(len(argv) - 1):
+        if argv[i] == "--session" and re.fullmatch(r"-[A-Za-z0-9_-]{31}", argv[i + 1]):
+            argv[i:i + 2] = ["--session=" + argv[i + 1]]
+            break
     a = ap.parse_args(argv)
     global DB_ROOT
     if a.db_root:

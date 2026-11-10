@@ -407,4 +407,27 @@ else
   printf '%s\n' 'SKIP: python3 is not available for the interrupted-step case'
 fi
 
+# Interrupt immediately after the lock link is created, before ln returns to the shell.
+new_case
+run 0 plan start
+REAL_LN=$(command -v ln)
+SHIM_LN="$TMP_ROOT/slow-ln-bin"
+mkdir -p "$SHIM_LN"
+printf '%s\n' '#!/usr/bin/env sh' "\"$REAL_LN\" \"\$@\" || exit \$?" 'sleep 1' > "$SHIM_LN/ln"
+chmod +x "$SHIM_LN/ln"
+(cd "$WORKDIR" && PATH="$SHIM_LN:$PATH" exec "$CLI" step --note "interrupt during lock acquisition") > "$OUT" 2>&1 &
+victim=$!
+tries=0
+until [ -L "$LOCK" ]; do
+  tries=$((tries + 1))
+  [ "$tries" -lt 400 ] || fail "the delayed ln never created the lock"
+  sleep 0.1 2>/dev/null || sleep 1
+done
+kill -TERM "$victim"
+status=0
+wait "$victim" || status=$?
+[ "$status" -eq 143 ] || fail "interruption during acquisition exited $status, expected 143"
+expect_unlocked "signal during acquisition"
+run 0 step --note "after interrupted acquisition"
+
 printf '%s\n' 'PASS: harness run-state lock serializes concurrent commands, recovers stale locks, and times out clearly'

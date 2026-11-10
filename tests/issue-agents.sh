@@ -34,7 +34,9 @@ cleanup() {
   # Any fake still running belongs to this test: its command line names $TMP.
   pids=$(ps -axo pid=,command= | awk -v t="$TMP" 'index($0, t) { print $1 }')
   # shellcheck disable=SC2086 # one pid per word
-  [ -n "$pids" ] && kill $pids 2>/dev/null || true
+  if [ -n "$pids" ]; then
+    kill $pids 2>/dev/null || true
+  fi
   rm -rf "$TMP"
 }
 trap cleanup EXIT INT TERM
@@ -57,7 +59,7 @@ done
 RECORD='printf "%s\0" "$(pwd -P)" "$@" > "'"$CALLS"'/$(basename "$0")-$$"
 mode=$(cat "'"$TMP"'/mode" 2>/dev/null || true)'
 cat > "$FAKES/claude" <<EOF
-#!/bin/sh
+#!/bin/bash
 $RECORD
 case "\$mode" in
   sleep) trap 'echo "\$\$ TERM" >> "$CALLS/SIGNALS"; exit 143' TERM INT HUP; sleep 60 ;;
@@ -65,7 +67,7 @@ case "\$mode" in
 esac
 EOF
 cat > "$FAKES/codex" <<EOF
-#!/bin/sh
+#!/bin/bash
 $RECORD
 echo '{"type":"thread.started","thread_id":"019a0000-fake-thread"}'
 case "\$mode" in
@@ -116,7 +118,7 @@ case "\$1 \$2" in
 esac
 EOF
 cat > "$FAKES/fake-difit" <<EOF
-#!/bin/sh
+#!/bin/bash
 $RECORD
 sleep 60
 EOF
@@ -349,6 +351,7 @@ take_over_working_herdr_job() {
   out=$(herdr_env jobs takeover --target demo-1 --job "$FP2")
   [ "$(field "$out" 'd["job"]["owner"]')" = you ] || fail "the Herdr job was not taken over: $out"
   wait_unsupervised "$FP2"
+  wait_for "$FP2" 'd["job"].get("stopping") is None'
   rm -f "$TMP/herdr-state/busy"
 }
 
@@ -384,7 +387,9 @@ FP4=$(field "$out" 'd["job"]["fingerprint"]')
 wait_for "$FP4" 'd["job"]["pid"] is not None'
 APID4=$(proc_pid "$FP4" agent)
 SPID4=$(proc_pid "$FP4" supervisor)
-[ -n "$APID4" ] && [ -n "$SPID4" ] || fail "no agent or supervisor recorded for $FP4"
+if [ -z "$APID4" ] || [ -z "$SPID4" ]; then
+  fail "no agent or supervisor recorded for $FP4"
+fi
 # The person drives this agent now: its supervisor is gone and the job is theirs.
 kill -9 "$SPID4"
 i=0

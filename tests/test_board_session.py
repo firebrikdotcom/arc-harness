@@ -189,6 +189,7 @@ class BoardSessionDom(unittest.TestCase):
             proc = subprocess.run(
                 [
                     CHROME, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+                    *(["--no-sandbox"] if os.environ.get("CI") else []),
                     "--disable-extensions", "--disable-sync", "--allow-file-access-from-files",
                     f"--user-data-dir={tmp}/profile", f"--window-size={width},{height}",
                     "--virtual-time-budget=10000", "--dump-dom", path.as_uri(),

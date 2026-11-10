@@ -372,10 +372,18 @@ class SessionFocusTests(unittest.TestCase):
         other = json.loads(self.cli("session", "--target", str(self.wt), "--session-id", "sess-b").stdout)
         self.assertEqual(first, again)
         self.assertNotEqual(first["key"], other["key"])
+        self.assertTrue(first["key"].startswith("s"))
         self.assertEqual(first["url"], f"http://audit.test:9/projects/{self.wt_id}/sessions/{first['key']}")
         record = json.loads((self.db / "targets" / self.wt_id / "board" / "sessions" / f"{first['key']}.json").read_text())
         self.assertEqual((record["session_id"], record["target"], record["root"]), ("sess-a", self.wt_id, str(self.wt)))
         self.assertEqual(set(record["owner"]), {"user", "login"})
+        legacy = "-" + first["key"][2:]
+        record["key"] = legacy
+        sessions = self.db / "targets" / self.wt_id / "board" / "sessions"
+        (sessions / f"{first['key']}.json").unlink()
+        (sessions / f"{legacy}.json").write_text(json.dumps(record))
+        result = self.cli("focus", "--target", self.wt_id, "--session", legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_focus_signals(self):
         wt = self.wt

@@ -38,7 +38,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+    std::fs::write(path, format!("#!/bin/bash\n{body}")).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
@@ -680,7 +680,7 @@ fn codex_job_records_its_thread_and_continues_it_after_hand_back() {
 #[test]
 fn failures_timeouts_and_stops_are_recorded() {
     let mut f = Fixture::new(&["demo-1"]);
-    f.settings.timeout = Duration::from_secs(1);
+    f.settings.timeout = Duration::from_secs(30);
     let target = f.target("demo-1");
     let analyze = |f: &Fixture, reanalyze| {
         actions::analyze(&f.ctx(), "demo-1", "test#1", "app", reanalyze)
@@ -722,6 +722,7 @@ fn failures_timeouts_and_stops_are_recorded() {
     );
     f.settled("demo-1", &fp);
 
+    f.settings.timeout = Duration::from_secs(1);
     f.mode("sleep");
     analyze(&f, true);
     f.run();
@@ -1754,8 +1755,9 @@ fn a_live_background_agent_that_is_yours_is_observed_but_never_signalled() {
         .unwrap()
         .0
         .fingerprint;
-    let mut agent = Command::new("/bin/sh");
-    agent.args(["-c", "sleep 30"]);
+    // Keep a stable executable and enough lifetime for the full suite under load.
+    let mut agent = Command::new("/bin/sleep");
+    agent.arg("120");
     {
         use std::os::unix::process::CommandExt;
         agent.process_group(0);

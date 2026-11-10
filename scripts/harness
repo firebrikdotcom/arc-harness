@@ -259,7 +259,8 @@ owner_gone() {
 }
 
 release_lock() {
-  if [ "$LOCK_HELD" -eq 1 ] && [ "$(lock_owner "$LOCK_PATH")" = "pid:$$" ]; then
+  # A signal can arrive after ln creates our lock but before LOCK_HELD is set.
+  if [ -n "$LOCK_PATH" ] && [ "$(lock_owner "$LOCK_PATH")" = "pid:$$" ]; then
     rm -f "$LOCK_PATH"
   fi
   LOCK_HELD=0

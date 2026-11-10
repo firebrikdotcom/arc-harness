@@ -239,6 +239,17 @@ fn quota_counts_starts_per_utc_day_and_rolls_over() {
     assert_eq!(days.get(&today()), Some(&1));
 }
 
+fn sleep_group_leader() -> std::process::Child {
+    let mut command = Command::new("/bin/sleep");
+    command.arg("120");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().unwrap()
+}
+
 fn group_leader(script: &str) -> std::process::Child {
     let mut command = Command::new("/bin/sh");
     command.args(["-c", script]);
@@ -252,7 +263,7 @@ fn group_leader(script: &str) -> std::process::Child {
 
 #[test]
 fn the_os_identity_is_captured_at_the_start() {
-    let mut child = group_leader("sleep 30");
+    let mut child = sleep_group_leader();
     let proc = process::capture(child.id());
     assert_eq!(proc.pid, child.id());
     assert_eq!(proc.pgid, child.id(), "spawned as its own group leader");
@@ -271,7 +282,7 @@ fn the_os_identity_is_captured_at_the_start() {
 
 #[test]
 fn a_reused_or_changed_pid_is_never_signalled() {
-    let mut child = group_leader("sleep 30");
+    let mut child = sleep_group_leader();
     let real = process::capture(child.id());
     let grace = Duration::from_millis(200);
     // Same pid, another start time: a different process holds the pid now.
