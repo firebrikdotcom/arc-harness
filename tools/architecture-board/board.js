@@ -230,15 +230,22 @@ function mount(root,data,opts={}){
     animateTo({k,x:(b.w-w*k)/2-x*k,y:b.y+(b.h-h*k)/2-y*k},animate);
   }
   function fitAll(animate=true){fitRect(bounds.x,bounds.y,bounds.w,bounds.h,1.15,animate)}
-  let anim=0;
+  let anim=0,animEnd=0;
+  function stopAnim(){cancelAnimationFrame(anim);clearTimeout(animEnd);anim=animEnd=0}
+  /* Progress is read from performance.now(), never from the frame timestamp: a frame's timestamp can be older than the
+     moment the move started (far older in a throttled or headless page), and the ease curve, fed a negative time,
+     flings the view far off the board. The timer lands the move on time even when frames stop (a hidden tab). */
   function animateTo(to,animate){
-    cancelAnimationFrame(anim);
+    stopAnim();
     if(!animate||matchMedia("(prefers-reduced-motion:reduce)").matches){view={...to};apply();return}
     const from={...view},t0=performance.now(),D=280;
-    const step=now=>{const t=Math.min(1,(now-t0)/D),e=1-Math.pow(1-t,3);
+    const land=()=>{stopAnim();view={...to};apply()};
+    const step=()=>{const t=Math.max(0,Math.min(1,(performance.now()-t0)/D));if(t>=1)return land();
+      const e=1-Math.pow(1-t,3);
       view={x:from.x+(to.x-from.x)*e,y:from.y+(to.y-from.y)*e,k:from.k+(to.k-from.k)*e};apply();
-      if(t<1)anim=requestAnimationFrame(step)};
+      anim=requestAnimationFrame(step)};
     anim=requestAnimationFrame(step);
+    animEnd=setTimeout(land,D+20);
   }
   function boxOf(ids){
     const rs=[...ids].map(i=>nodeRect(nodeById.get(i)));
@@ -261,7 +268,7 @@ function mount(root,data,opts={}){
   vp.addEventListener("pointerdown",e=>{
     if(e.pointerType==="mouse"&&e.button!==0)return;
     pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
-    cancelAnimationFrame(anim);
+    stopAnim();
     if(pointers.size===1)drag={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y,moved:false,target:e.target};
     else if(pointers.size===2){const [p,q]=[...pointers.values()];pinch={d:Math.hypot(p.x-q.x,p.y-q.y)||1,k:view.k};if(drag)drag.moved=true}
   });
