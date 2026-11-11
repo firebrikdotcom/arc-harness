@@ -278,7 +278,13 @@ def invoke_router(state: dict[str, Any], router: Path, mode: str) -> tuple[dict[
                           "drift": response.get('model') != pinned_model()},
                 "usage": normalize_usage(response, provider.api_url()), "latency_ms": meta.get('latency_ms') if isinstance(meta, dict) else None}, None
     except Exception as error:
-        return None, "provider_error:" + type(error).__name__
+        failure = advice.provider_failure(error)
+        detail = [failure["fallback_reason"]]
+        if failure["provider_http_status"] is not None:
+            detail.append("http_%d" % failure["provider_http_status"])
+        if failure["provider_error_code"] is not None:
+            detail.append(failure["provider_error_code"])
+        return None, "provider_error:" + ":".join(detail)
 
 
 def write_record(record: dict[str, Any], db_root: Path) -> Path:

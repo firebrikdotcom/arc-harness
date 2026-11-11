@@ -1,5 +1,14 @@
 # Audit RAM repair handoff
 
+## Jev provider diagnostics — 2026-11-11 (v0.2.10)
+
+- The TypeSafe router (vault `agent-skills/typesafe-routing`, live through `~/.agents/skills`) now raises `ProviderRejectedError` carrying `http_status` and `provider_error_code`. The harness kept only the exception type: 58 of the last seven days' advice calls were recorded as a bare `BadInputError`.
+- `context_advice.provider_failure()` now keeps the type plus an HTTP integer (100–599) and a pattern-checked code (`[A-Za-z0-9_.:-]{1,64}`), never exception text. It is used by advice records, decision rows/telemetry, task-route reasons (`provider_error:<Type>:http_<n>:<code>`) and audit checkpoint events.
+- Evidence: `test_context_advice` (new rejection regression), `test_decision_checkpoints`, `test_audit_emit`, `test_jev_moments` and `test_failure_followup` pass. A full `scripts/verify.sh` in a fresh worktree (own empty `.harness-db`, clean env) passed everything except one flaky Python 3.14 `ResourceWarning` in `test_failure_followup`, which passes 4/4 when run alone with or without the change.
+- **Open gate:** the build gate and pre-commit verify do not pass in the developer checkout. Fixtures (`auto-init.sh`, `harness-cli.sh`, `review.sh`, `verify-evidence.sh`, `test_task_routing` history tests) write into the checkout's own `.harness-db` and assume it is empty. A paused fixture run becomes `runs/current` and cascades. These failures happen identically without this change. The owner approved committing and pushing with this gate open; the commit used `--no-verify`.
+- Residue archived (moved, not deleted) to `~/.local/share/harness/archived-test-residue/2026-11-11/`: the stray `/tmp` target `tmp-e9671acd2448` (registered by fixtures since 2026-10-30) and a fixture-created `runs/current` + paused run. Later verify runs created another fixture `runs/current` (`20261111T200854Z-1435853`); it was left in place.
+- **Follow-ups:** isolate harness test fixtures from the developer checkout's database (`HARNESS_DB_ROOT` per fixture). Fix the board ticker framing tests (`test_board_agents.BoardAgentsDom.test_ticker_*`): they have failed in GitHub CI since `39483ee` and block updater activation of any newer master. The vault's local `master` (`1a442630`) and its remote (`f4e9a8bf`) both carry the router fix and have diverged.
+
 ## Audit race regression diagnosis — 2026-11-06
 
 - On preserved master `03e1a5c`, temporary dispatch diagnostics reproduced `conflict-race: [503, 503]`: both real Arc append attempts returned `AppendFailed / DatabaseError: database is locked`; this was not a successful append followed by a publish error. Evidence: `/tmp/audit-race-diagnostic.log`. Temporary diagnostic logging was removed.

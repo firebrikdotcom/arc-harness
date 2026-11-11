@@ -366,6 +366,34 @@ class ContextAdviceTests(unittest.TestCase):
         result = self.evaluate(router=router)
         self.assertEqual(result["status"], "fallback")
         self.assertNotIn("forbidden-token", Path(result["record_path"]).read_text())
+        self.assertEqual((result["fallback_reason"], result["provider_http_status"], result["provider_error_code"]),
+                         ("TimeoutError", None, None))
+
+    def test_provider_rejection_keeps_sanitized_status_and_code(self):
+        # The router's ProviderRejectedError carries http_status and provider_error_code;
+        # a record that keeps only "BadInputError" cannot explain why Jev refused a call.
+        class ProviderRejectedError(ValueError):
+            def __init__(self, message, http_status, provider_error_code):
+                super().__init__(message)
+                self.http_status, self.provider_error_code = http_status, provider_error_code
+
+        for status, code, expected in [
+                (422, "invalid_questions", (422, "invalid_questions")),
+                (400, "sk-live secret body with spaces", (400, None)),
+                (True, "x" * 65, (None, None)),
+                (999, None, (None, None))]:
+            with self.subTest(status=status, code=code):
+                router = self.batch_router()
+                def reject(*args, status=status, code=code):
+                    raise ProviderRejectedError("HTTP 422: forbidden-token in body", status, code)
+                router.post_json = reject
+                result = self.evaluate(router=router)
+                record = json.loads(Path(result["record_path"]).read_text())
+                self.assertEqual(result["status"], "fallback")
+                self.assertEqual(result["fallback_reason"], "ProviderRejectedError")
+                self.assertEqual((result["provider_http_status"], result["provider_error_code"]), expected)
+                self.assertEqual((record["provider_http_status"], record["provider_error_code"]), expected)
+                self.assertNotIn("forbidden-token", json.dumps(record))
 
     def test_input_size_versions_and_secret_rejected(self):
         for mutate in [lambda c: c.update(version=True),

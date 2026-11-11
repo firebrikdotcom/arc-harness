@@ -137,6 +137,8 @@ def checkpoint_payload(record: dict[str, Any]) -> dict[str, Any]:
         "question_hash": scalar(record.get("question_hash")),
         "status": scalar(record.get("status")),
         "fallback_reason": scalar(record.get("fallback_reason")),
+        "provider_http_status": scalar(record.get("provider_http_status")),
+        "provider_error_code": scalar(record.get("provider_error_code")),
         "bypass_reason": scalar(record.get("bypass_reason")),
         "shadow": scalar(record.get("shadow")),
         "min_confidence": scalar(record.get("min_confidence")),

@@ -333,6 +333,25 @@ def validated_answers(batch: dict, response: Any) -> dict:
     return clean
 
 
+PROVIDER_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+
+
+def provider_failure(error: BaseException) -> dict[str, Any]:
+    """Safe facts about a failed provider call: the exception type, plus the HTTP
+    status and provider error code the router attaches to a rejection.
+
+    Exception text can echo credentials or provider content, so it is never kept;
+    the status must be an HTTP integer and the code a short identifier."""
+    status = getattr(error, "http_status", None)
+    code = getattr(error, "provider_error_code", None)
+    return {
+        "fallback_reason": type(error).__name__,
+        "provider_http_status": status if isinstance(status, int) and not isinstance(status, bool)
+        and 100 <= status <= 599 else None,
+        "provider_error_code": code if isinstance(code, str) and PROVIDER_CODE.fullmatch(code) else None,
+    }
+
+
 def request_timeout(router: Any) -> float:
     """Per-attempt timeout; hooks and phase gates bound it with HARNESS_JEV_TIMEOUT."""
     raw = os.environ.get("HARNESS_JEV_TIMEOUT", "").strip()
@@ -433,8 +452,9 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
             elif record["model_returned"] is not None and record["model_returned"] != model:
                 record.update(status="fallback", fallback_reason="model_drift", exit_code=1)
         except Exception as error:
-            # Exception text can echo credentials or provider content. Store only its type.
-            record.update(status="fallback", fallback_reason=type(error).__name__, exit_code=1)
+            # Exception text can echo credentials or provider content. Store only its
+            # type and the sanitized status/code the router attaches to a rejection.
+            record.update(status="fallback", exit_code=1, **provider_failure(error))
         record["evaluation_wall_ms"] = round((time.monotonic() - began) * 1000)
     minimum = max(0.70, harness_config.load()["typesafe"].get("min_confidence", 0.70))
     confidence = ((record["answers"] or {}).get("recommendation") or {}).get("confidence")
@@ -451,6 +471,7 @@ def advise(context: dict[str, Any], router: Any, db_root: Path, delegate: bool |
         router.append_jsonl(router.requests_log_path(started), {k: v for k, v in record.items() if k != "context"})
         audit_emit("checkpoint", "--record", str(record_path))
     result = {k: record[k] for k in ("call_id", "status", "fallback_reason", "latency_ms", "answers", "shadow", "delegation")}
+    result.update({k: record.get(k) for k in ("provider_http_status", "provider_error_code")})
     result.update(advisory=chosen is None, delegated=chosen is not None,
                   action=chosen if chosen is not None else "normal_reasoning", record_path=str(record_path),
                   confidence=confidence, min_confidence=minimum, needs_reasoning=chosen is None,

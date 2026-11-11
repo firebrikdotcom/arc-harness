@@ -37,7 +37,7 @@ def save(root, row):
 def telemetry(kind, row):
     keys = ('id', 'parent_session_id', 'family', 'mode', 'status', 'action', 'confidence', 'min_confidence', 'needs_reasoning', 'escalation_reason', 'action_source',
             'cache_hit', 'duration_ms', 'latency_ms', 'input_tokens', 'output_tokens', 'total_tokens',
-            'state_build_ms', 'fallback_reason', 'action_taken', 'exit_code', 'outcome', 'action_duration_ms', 'interaction_origin', 'context_version')
+            'state_build_ms', 'fallback_reason', 'provider_http_status', 'provider_error_code', 'action_taken', 'exit_code', 'outcome', 'action_duration_ms', 'interaction_origin', 'context_version')
     try:
         emit('orchestration.' + kind, {'decision_id': row['id'], 'usage': {k: row.get(k) for k in ('input_tokens', 'output_tokens', 'total_tokens')}, **{k: row.get(k) for k in keys}}, flush_now=False)
     except Exception:
@@ -174,7 +174,9 @@ def _evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: 
                 advice.validate_context(context, router)
                 result = advice.advise(context, router, root.parent, delegate=(mode == 'active'))
                 row.update(call_id=result['call_id'], status=result['status'], latency_ms=result['latency_ms'],
-                           fallback_reason=result.get('fallback_reason'), confidence=result.get('confidence'))
+                           fallback_reason=result.get('fallback_reason'), confidence=result.get('confidence'),
+                           provider_http_status=result.get('provider_http_status'),
+                           provider_error_code=result.get('provider_error_code'))
                 record = json.loads(Path(result['record_path']).read_text())
                 usage = record.get('usage') or {}
                 row.update({k: usage.get(k) for k in ('input_tokens', 'output_tokens', 'total_tokens')})
@@ -191,7 +193,7 @@ def _evaluate(*, project: Path, session_id: str, family: str, goal: str, facts: 
                 save(root, row)
                 raise
             except Exception as error:
-                row.update(status='fallback', fallback_reason=type(error).__name__)
+                row.update(status='fallback', **advice.provider_failure(error))
         row['escalation_reason'] = (row.get('fallback_reason') or ('shadow_mode' if mode == 'shadow' else 'no_recommendation')) if row['needs_reasoning'] else None
         row['duration_ms'] = round((time.monotonic()-began)*1000)
         save(root, row)
