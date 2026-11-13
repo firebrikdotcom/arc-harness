@@ -144,6 +144,17 @@ class ConfigTests(unittest.TestCase):
             config.update("dispatch", {"profiles": {**profiles, "orb": {**orb, "command": ["amp", "-x"]}}})
         self.assertEqual(config.load()["amp"]["poll_seconds"], 3, "a rejected update changes nothing")
 
+    def test_context_switch_defaults_off_and_needs_workflow_collection(self):
+        config.update()
+        self.assertIs(config.load()["telemetry"]["workflow_context"], False)
+        self.assertFalse(audit_transport.enabled("workflow.context_recorded"))
+        config.update("telemetry", {"workflow_context": True})
+        self.assertTrue(audit_transport.enabled("workflow.context_recorded"))
+        config.update("telemetry", {"workflow": False})
+        self.assertFalse(audit_transport.enabled("workflow.context_recorded"))
+        with self.assertRaises(config.ConfigError):
+            config.update("telemetry", {"workflow_context": "yes"})
+
     def test_collection_master_switch_and_invalid_config(self):
         config.update("telemetry", {"workflow_prompts": True})
         self.assertTrue(audit_transport.enabled("workflow.prompt_recorded"))

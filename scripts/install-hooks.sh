@@ -107,7 +107,7 @@ def entries_for(index: int) -> dict:
             if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
                 entry["matcher"] = ".*"
             entries.setdefault(event, []).append(entry)
-        elif enabled["workflow_audit"] and event != "Stop":
+        elif enabled["workflow_audit"]:
             entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {agent}', "timeout": 3 if event == "SessionEnd" else 10}]}
             if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
                 entry["matcher"] = ".*"

@@ -30,9 +30,11 @@ def enabled(event_type: str = "jev.route") -> bool:
         return False
     if event_type == "workflow.prompt_recorded":
         return config["workflow"] and config["workflow_prompts"]
+    if event_type == "workflow.context_recorded":
+        return config["workflow"] and config["workflow_context"]
     # Preserve opt-in semantics until the consolidated file is initialized.
     if not settings_path().exists():
-        return event_type != "workflow.prompt_recorded" and os.environ.get("HARNESS_AUDIT_ENABLED") == "1"
+        return event_type not in ("workflow.prompt_recorded", "workflow.context_recorded") and os.environ.get("HARNESS_AUDIT_ENABLED") == "1"
     return config[category(event_type)]
 
 def audit_url() -> str:

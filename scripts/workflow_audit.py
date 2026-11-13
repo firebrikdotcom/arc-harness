@@ -30,7 +30,7 @@ def context_db() -> sqlite3.Connection:
     return db
 
 
-def record(kind: str, sid: str, context: dict, **facts) -> None:
+def record(kind: str, sid: str, context: dict, /, **facts) -> None:
     payload = {"schema_version": 1, "session_id": sid, "occurred_at": now(), **facts}
     if context.get("task_id"):
         payload["task_id"] = context["task_id"]
@@ -304,6 +304,145 @@ def check_record(sid: str, context: dict, kind: str, path: Path) -> None:
                                               "tree":facts.get("TREE_HASH", ""),"project":facts.get("PROJECT_ROOT", "")}
 
 
+def chunk_text(text: str, limit: int = 2000) -> list[str]:
+    # UTF-8 chunks preserve long text without truncation or oversized events.
+    chunks, chunk, size = [], [], 0
+    for char in text:
+        width = len(char.encode())
+        if size + width > limit:
+            chunks.append("".join(chunk))
+            chunk, size = [], 0
+        chunk.append(char)
+        size += width
+    if chunk:
+        chunks.append("".join(chunk))
+    return chunks
+
+
+CONTEXT_ENTRY_BYTES = 16000
+CONTEXT_TURN_ENTRIES = 500
+CONTEXT_READ_BYTES = 4_000_000
+DATA_URI = re.compile(r"data:[\w./+-]+;base64,[A-Za-z0-9+/=]{64,}")
+
+
+def _flat(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(part for part in (_flat(item) for item in value) if part)
+    if isinstance(value, dict):
+        if value.get("type") in ("image", "input_image", "output_image"):
+            return "[image omitted]"
+        for key in ("text", "content", "output"):
+            if key in value:
+                return _flat(value[key])
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return "" if value is None else str(value)
+
+
+def log_parts(entry: dict) -> list[tuple[str, str, str, dict]]:
+    """(role, kind, text, usage) for each piece of one session-log line; unknown shapes give none."""
+    kind = entry.get("type")
+    if kind in ("user", "assistant", "system") and not isinstance(entry.get("payload"), dict):
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else entry.get("content")
+        usage = message.get("usage") if isinstance(message, dict) and isinstance(message.get("usage"), dict) else {}
+        if isinstance(content, str):
+            return [(kind, "other" if kind == "system" else "text", content, usage)]
+        parts = []
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                parts.append((kind, "text", _flat(block.get("text")), usage))
+            elif btype == "thinking":
+                parts.append((kind, "thinking", _flat(block.get("thinking")), usage))
+            elif btype == "tool_use":
+                parts.append((kind, "tool_use", str(block.get("name", "")) + " " + _flat(block.get("input")), usage))
+            elif btype == "tool_result":
+                parts.append(("tool", "tool_result", _flat(block.get("content")), usage))
+            elif btype in ("image", "document"):
+                parts.append((kind, "other", "[" + btype + " omitted]", usage))
+        return parts
+    payload = entry.get("payload")
+    if kind == "response_item" and isinstance(payload, dict):
+        ptype = payload.get("type")
+        if ptype == "message":
+            role = payload.get("role")
+            if role == "developer":
+                return [("system", "instruction", _flat(payload.get("content")), {})]
+            return [(role if role in ("user", "assistant", "system") else "other", "text", _flat(payload.get("content")), {})] if role in ("user", "assistant", "system") else []
+        if ptype == "reasoning":
+            return [("assistant", "thinking", _flat(payload.get("summary")), {})]
+        if ptype in ("function_call", "custom_tool_call", "local_shell_call"):
+            return [("assistant", "tool_use", str(payload.get("name", "")) + " " + _flat(payload.get("arguments", payload.get("input", payload.get("action")))), {})]
+        if ptype in ("function_call_output", "custom_tool_call_output"):
+            return [("tool", "tool_result", _flat(payload.get("output")), {})]
+        if isinstance(ptype, str):
+            return [("system", "other", _flat(payload), {})]
+    return []
+
+
+def capture_context(sid: str, context: dict, payload: dict) -> None:
+    """On Stop, record the session-log lines added since the previous turn. Reads only the
+    new bytes, complete lines only, and never raises into the hook."""
+    if not enabled("workflow.context_recorded"):
+        return
+    candidate = payload.get("transcript_path") or context.get("transcript_path")
+    if not isinstance(candidate, str) or not candidate:
+        return
+    try:
+        with open(candidate, "rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            offset = context.get("context_offset", 0)
+            offset = offset if type(offset) is int and 0 <= offset <= size else 0
+            skipped = size - offset > CONTEXT_READ_BYTES
+            if skipped:
+                offset = size - CONTEXT_READ_BYTES
+            stream.seek(offset)
+            data = stream.read(CONTEXT_READ_BYTES + 1)[:size - offset]
+    except OSError:
+        return
+    end = data.rfind(b"\n") + 1
+    lines = data[:end].split(b"\n")
+    if skipped and lines:
+        lines = lines[1:]
+    context["context_offset"] = offset + end
+    prompt_id = context.get("prompt_id")
+    if not prompt_id:
+        prompt_id = context["prompt_id"] = str(uuid.uuid4())
+    index = 0
+    for line in lines:
+        if index >= CONTEXT_TURN_ENTRIES:
+            break
+        try:
+            entry = json.loads(line)
+            parts = log_parts(entry) if isinstance(entry, dict) else []
+        except (ValueError, UnicodeError, AttributeError, TypeError):
+            continue
+        for role, kind, text, usage in parts:
+            if index >= CONTEXT_TURN_ENTRIES:
+                break
+            text = redact(DATA_URI.sub("[image data omitted]", text))
+            if not text.strip():
+                continue
+            full = len(text.encode())
+            facts = {"truncated": full > CONTEXT_ENTRY_BYTES}
+            if facts["truncated"]:
+                facts["sha256"] = hashlib.sha256(text.encode()).hexdigest()
+                text = text.encode()[:CONTEXT_ENTRY_BYTES].decode(errors="ignore")
+            tokens = {"input_tokens": "input_tokens", "output_tokens": "output_tokens",
+                      "cache_read_tokens": "cache_read_input_tokens", "cache_creation_tokens": "cache_creation_input_tokens"}
+            entry_id, chunks = str(uuid.uuid4()), chunk_text(text)
+            for part, chunk in enumerate(chunks):
+                extra = {name: usage[key] for name, key in tokens.items() if part == 0 and role == "assistant" and type(usage.get(key)) is int} if usage else {}
+                record("context_recorded", sid, context, prompt_id=prompt_id, entry_id=entry_id, entry_index=index,
+                       role=role, kind=kind, part_index=part, part_count=len(chunks), text=chunk,
+                       entry_bytes=full, **facts, **extra)
+            index += 1
+
+
 def hook(agent: str | None = None) -> int:
     # Cap hook input in memory; persist only the fields enabled by collection policy.
     try:
@@ -315,7 +454,7 @@ def hook(agent: str | None = None) -> int:
     if not sid or not enabled("workflow.session_started"):
         return 0
     event = payload.get("hook_event_name")
-    if event not in ("SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure"):
+    if event not in ("SessionStart", "SessionEnd", "UserPromptSubmit", "Stop", "PreToolUse", "PostToolUse", "PostToolUseFailure"):
         return 0
     with context_db() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -338,22 +477,21 @@ def hook(agent: str | None = None) -> int:
                   f"{ROOT}/scripts/harness workflow todo plan --items JSON --reason TEXT, then todo update "
                   "--status in_progress; reads, harness commands, verify and review need no todo. "
                   "Commands: docs/setup.md, section Audited todo enforcement.")
-        elif event == "UserPromptSubmit" and enabled("workflow.prompt_recorded"):
+        elif event == "UserPromptSubmit":
             prompt = payload.get("prompt")
             if isinstance(prompt, str) and prompt.strip():
-                prompt_id = str(uuid.uuid4())
-                # UTF-8 chunks preserve long prompts without truncation or oversized events.
-                chunks, chunk = [], ""
-                for char in prompt:
-                    if len((chunk + char).encode()) > 2000:
-                        chunks.append(chunk)
-                        chunk = ""
-                    chunk += char
-                if chunk:
-                    chunks.append(chunk)
-                for index, text in enumerate(chunks):
-                    record("prompt_recorded", sid, context, prompt_id=prompt_id,
-                           part_index=index, part_count=len(chunks), text=text)
+                # The id is kept even when prompt storage is off: context records of the turn carry it.
+                prompt_id = context["prompt_id"] = str(uuid.uuid4())
+                if enabled("workflow.prompt_recorded"):
+                    chunks = chunk_text(prompt)
+                    for index, text in enumerate(chunks):
+                        record("prompt_recorded", sid, context, prompt_id=prompt_id,
+                               part_index=index, part_count=len(chunks), text=text)
+        elif event == "Stop":
+            try:
+                capture_context(sid, context, payload)
+            except Exception:  # noqa: BLE001
+                pass
         elif event == "SessionEnd":
             record("session_ended", sid, {}, status="ended")
         elif event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):

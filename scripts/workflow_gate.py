@@ -483,6 +483,12 @@ def main():
         return collect()
     if payload.get("hook_event_name") == "Stop":
         record_handoff(payload)
+        # Never allowed to fail or block: a Stop hook must not trap the user.
+        try:
+            sys.stdin = io.StringIO(raw)
+            collect()
+        except Exception:
+            pass
     print("{}")
     return 0
 

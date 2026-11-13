@@ -64,8 +64,8 @@ class WorkflowTests(unittest.TestCase):
             handle.write(json.dumps({"timestamp": stamp, "type": "response_item", "payload": {"type": "message", "role": "user",
                                      "content": [{"type": "input_text", "text": text}]}}) + "\n")
 
-    def config(self, jev, workflow, prompts=False):
-        (self.base / "settings.json").write_text(json.dumps({"jev":jev,"workflow":workflow,"workflow_prompts":prompts}))
+    def config(self, jev, workflow, prompts=False, context=False):
+        (self.base / "settings.json").write_text(json.dumps({"jev":jev,"workflow":workflow,"workflow_prompts":prompts,"workflow_context":context}))
     def run_cli(self, *args, payload=None):
         result = subprocess.run([sys.executable, str(ROOT / "scripts/workflow_audit.py"), *args],
             input=json.dumps(payload) if payload is not None else None, env=self.env, text=True, capture_output=True)
@@ -624,6 +624,96 @@ class WorkflowTests(unittest.TestCase):
         self.config(True, False, True)
         self.run_cli("hook", payload={"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":"workflow disabled"})
         self.assertEqual(self.queued(), [])
+
+    def log_lines(self, path, *entries):
+        with path.open("a") as handle:
+            for entry in entries:
+                handle.write(json.dumps(entry) + "\n")
+    def contexts(self):
+        return [e["payload"] for e in self.queued() if e["event_type"] == "workflow.context_recorded"]
+    def stop(self, path):
+        self.run_cli("hook", payload={"hook_event_name":"Stop","session_id":"s","transcript_path":str(path)})
+    def prompt(self, text="go"):
+        self.run_cli("hook", payload={"hook_event_name":"UserPromptSubmit","session_id":"s","prompt":text})
+
+    def test_context_records_only_new_log_entries_with_the_turn_prompt_id(self):
+        self.config(True, True, False, True)
+        log = self.base / "claude.jsonl"
+        self.log_lines(log, {"type":"user","message":{"content":"first question"}},
+            {"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"first answer"}],
+                "usage":{"input_tokens":5,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":1}}})
+        self.prompt("first")
+        self.stop(log)
+        first = self.contexts()
+        self.assertEqual([(p["role"], p["kind"], p["text"]) for p in first],
+            [("user","text","first question"),("assistant","thinking","hmm"),("assistant","text","first answer")])
+        self.assertEqual([p["entry_index"] for p in first], [0, 1, 2])
+        self.assertEqual(first[1]["output_tokens"], 7)
+        self.assertEqual(first[1]["cache_creation_tokens"], 1)
+        self.assertEqual(len({p["prompt_id"] for p in first}), 1)
+        self.assertFalse(first[0]["truncated"])
+        self.run_cli("flush")
+        self.prompt("second")
+        self.log_lines(log, {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"result text"}]}},
+            {"type":"mystery"})
+        with log.open("a") as handle: handle.write('{"type":"user","message":{"cont')
+        self.stop(log)
+        second = self.contexts()
+        fresh = [p for p in second if p["text"] == "result text"]
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual((fresh[0]["role"], fresh[0]["kind"], fresh[0]["entry_index"]), ("tool", "tool_result", 0))
+        self.assertNotEqual(fresh[0]["prompt_id"], first[0]["prompt_id"])
+        self.assertEqual(len([p for p in second if p["text"] == "first question"]), 0, "earlier entries are not recorded again")
+
+    def test_context_is_off_by_default_and_emits_nothing(self):
+        log = self.base / "claude.jsonl"
+        self.log_lines(log, {"type":"user","message":{"content":"private question"}})
+        for config in ((True, True, True, False), (True, False, False, True)):
+            self.config(*config)
+            self.prompt()
+            self.stop(log)
+        self.assertEqual(self.contexts(), [])
+        self.assertFalse(any(e["event_type"] == "workflow.context_recorded" for e in Handler.events))
+        self.config(True, True, False, True)
+        self.stop(log)
+        self.assertEqual(len(self.contexts()), 1)
+        self.config(True, True, False, False)
+        self.run_cli("flush")
+        self.assertEqual(self.contexts(), [])
+
+    def test_context_oversize_entry_is_truncated_with_size_and_digest(self):
+        self.config(True, True, False, True)
+        log = self.base / "claude.jsonl"
+        body = "word " * 8000
+        self.log_lines(log, {"type":"assistant","message":{"content":[{"type":"text","text":body}]}})
+        self.stop(log)
+        parts = self.contexts()
+        self.assertTrue(all(p["truncated"] and p["entry_bytes"] == len(body.encode()) for p in parts))
+        self.assertEqual({p["sha256"] for p in parts}, {__import__("hashlib").sha256(body.encode()).hexdigest()})
+        self.assertEqual(len({p["entry_id"] for p in parts}), 1)
+        self.assertEqual(sum(len(p["text"].encode()) for p in parts), 16000)
+        self.assertTrue(all(len(p["text"].encode()) <= 2000 and p["part_count"] == len(parts) for p in parts))
+
+    def test_context_redacts_secrets_and_image_data(self):
+        self.config(True, True, False, True)
+        log = self.base / "codex.jsonl"
+        self.log_lines(log, {"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"use password=hunter2secret and ghp_abcdefghijklmnop1234 now data:image/png;base64," + "A" * 200}]}},
+            {"type":"response_item","payload":{"type":"function_call_output","output":"token: abcdefgh12345678"}})
+        self.stop(log)
+        text = json.dumps(self.contexts())
+        self.assertEqual(len(self.contexts()), 2)
+        for secret in ("hunter2secret", "ghp_abcdefghijklmnop1234", "abcdefgh12345678", "A" * 100):
+            self.assertNotIn(secret, text)
+        self.assertIn("password=***", text)
+
+    def test_context_missing_or_unreadable_log_does_not_fail(self):
+        self.config(True, True, False, True)
+        self.stop(self.base / "absent.jsonl")
+        self.run_cli("hook", payload={"hook_event_name":"Stop","session_id":"s"})
+        bad = self.base / "bad.jsonl"
+        bad.write_bytes(b"\xff\xfe not json\n[1,2]\n")
+        self.stop(bad)
+        self.assertEqual(self.contexts(), [])
 
     def test_native_runtime_metadata_changes_are_recorded_without_prompt_content(self):
         transcript = self.base / "native.jsonl"

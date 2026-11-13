@@ -60,9 +60,11 @@ DEFAULTS = {
         "jev": True,
         "workflow": True,
         "workflow_prompts": False,
+        "workflow_context": False,
         "_doc_jev": "Collect decision, routing and agent measurements.",
         "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
         "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained.",
+        "_doc_workflow_context": "Record the session-log slice each agent turn considered, at the end of the turn; requires workflow collection. Saved history is retained.",
     },
     "hooks": {
         "_doc": "Install these harness hook groups in Claude Code and Codex settings. Unrelated hooks are preserved.",
@@ -137,7 +139,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("unknown configuration section")
     fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence",
                            "context_request_limit", "read_only_commands", "read_only_tools"},
-              "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"},
+              "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts", "workflow_context"},
               "hooks": {"session_startup", "workflow_audit", "workflow_gate", "command_observer", "failure_tracking", "worktree_cleanup", "session_log_cleanup", "retrieval_reminder"},
               "sites": {"enabled", "url", "token_file"}, "workflow": {"todo_gate"}, "amp": {"enabled", "effort", "poll_seconds"}}
     for section, keys in fields.items():
@@ -158,7 +160,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(model, str) or not model.strip() or model.endswith("-latest"):
         raise ConfigError("typesafe.model must be an exact model pin")
     for section, keys in {"typesafe": ["checkpoints", "enforce_decisions"], "dispatch": ["enabled"],
-                          "telemetry": ["enabled", "jev", "workflow", "workflow_prompts"], "sites": ["enabled"], "amp": ["enabled"]}.items():
+                          "telemetry": ["enabled", "jev", "workflow", "workflow_prompts", "workflow_context"], "sites": ["enabled"], "amp": ["enabled"]}.items():
         for key in keys:
             if type(value[section].get(key)) is not bool:
                 raise ConfigError(f"{section}.{key} must be boolean")
@@ -211,9 +213,9 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def legacy_collection(value: dict[str, Any]) -> dict[str, bool]:
-    if any(type(value.get(k)) is not bool for k in ("jev", "workflow")) or type(value.get("workflow_prompts", False)) is not bool:
+    if any(type(value.get(k)) is not bool for k in ("jev", "workflow")) or any(type(value.get(k, False)) is not bool for k in ("workflow_prompts", "workflow_context")):
         raise ConfigError("invalid audit collection settings")
-    return {k: value.get(k, False) for k in ("jev", "workflow", "workflow_prompts")}
+    return {k: value.get(k, False) for k in ("jev", "workflow", "workflow_prompts", "workflow_context")}
 
 
 def load(file: Path | None = None) -> dict[str, Any]:
