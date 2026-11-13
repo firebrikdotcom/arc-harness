@@ -14,6 +14,34 @@ pub struct CollectionSettings {
     pub workflow_prompts: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HookSettings {
+    pub session_startup: bool,
+    pub workflow_audit: bool,
+    pub workflow_gate: bool,
+    pub command_observer: bool,
+    pub failure_tracking: bool,
+    pub worktree_cleanup: bool,
+    pub session_log_cleanup: bool,
+    pub retrieval_reminder: bool,
+}
+
+impl Default for HookSettings {
+    fn default() -> Self {
+        Self {
+            session_startup: true,
+            workflow_audit: true,
+            workflow_gate: true,
+            command_observer: true,
+            failure_tracking: true,
+            worktree_cleanup: true,
+            session_log_cleanup: true,
+            retrieval_reminder: true,
+        }
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -119,6 +147,68 @@ pub fn save(settings: CollectionSettings) -> io::Result<()> {
     save_to(&path(), settings)
 }
 
+pub fn load_hooks() -> io::Result<HookSettings> {
+    load_hooks_from(&path())
+}
+
+fn load_hooks_from(path: &std::path::Path) -> io::Result<HookSettings> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let value: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+            match value.get("hooks").cloned() {
+                Some(mut settings) => {
+                    let Some(fields) = settings.as_object_mut() else {
+                        return Err(io::Error::other("hooks settings must be an object"));
+                    };
+                    fields.remove("_doc");
+                    let mut merged =
+                        serde_json::to_value(HookSettings::default()).map_err(io::Error::other)?;
+                    merged.as_object_mut().unwrap().extend(fields.clone());
+                    serde_json::from_value(merged).map_err(io::Error::other)
+                }
+                None => Ok(HookSettings::default()),
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(HookSettings::default()),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn save_hooks_and_apply(settings: HookSettings) -> io::Result<()> {
+    let _lock = WRITE_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("settings lock unavailable"))?;
+    let writer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/harness_config.py");
+    let values = serde_json::to_string(&settings).map_err(io::Error::other)?;
+    let output = Command::new("python3")
+        .arg(writer)
+        .arg("update")
+        .arg("--file")
+        .arg(path())
+        .arg("--section")
+        .arg("hooks")
+        .arg("--values")
+        .arg(values)
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+
+    let installer =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/install-hooks.sh");
+    let output = Command::new("sh").arg(installer).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "settings saved but hooks could not be applied: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 fn save_to(path: &std::path::Path, settings: CollectionSettings) -> io::Result<()> {
     let _lock = WRITE_LOCK
         .lock()
@@ -216,6 +306,25 @@ mod tests {
         assert!(document["telemetry"]["_doc"].is_string());
         fs::write(&path, "{}").unwrap();
         assert!(load_from(&path).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hook_settings_default_on_for_existing_config_and_read_saved_selections() {
+        let dir = env::temp_dir().join(format!("audit-hooks-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, r#"{"version":1}"#).unwrap();
+        assert_eq!(load_hooks_from(&path).unwrap(), HookSettings::default());
+        fs::write(
+            &path,
+            r#"{"version":1,"hooks":{"_doc":"selection help","session_startup":false,"workflow_audit":true,"workflow_gate":false,"command_observer":false,"failure_tracking":false,"worktree_cleanup":false,"session_log_cleanup":false,"retrieval_reminder":false}}"#,
+        )
+        .unwrap();
+        let saved = load_hooks_from(&path).unwrap();
+        assert!(!saved.session_startup);
+        assert!(saved.workflow_audit);
+        assert!(!saved.workflow_gate);
         fs::remove_dir_all(dir).unwrap();
     }
 }

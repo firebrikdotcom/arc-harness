@@ -96,3 +96,62 @@
 - Live ingestion during pending catch-up: create HTTP 201 in 11 ms, identical retry HTTP 200 in 1 ms, conflicting retry HTTP 409; authoritative source contained exactly one event for the validation ID. Source advanced to 358,351 while the sidecar cursor was 15,360, confirming collection no longer waits for historical projection.
 - Health/workbench/Workflow/Orchestration returned HTTP 200 in 1–35 ms. Initial new-process RSS was 44,092 KiB; the earlier deployed bounded reducer plateaued near 250,000 KiB during large-history catch-up compared with the original 5,113,344 KiB. Historical sidecar catch-up continues normally; full replay completion is not claimed.
 - Prior same-database lock failures are superseded by this independently reviewed separation and physical-lock regression. Pending final commit and final-head CI are the only delivery gates left.
+
+---
+
+# Session focus handoff
+
+Current task: session focus for the architecture board (contract `tasks/session-focus.json`, run 20261109T134106Z-15293, review phase).
+Prototype: https://claude.ai/artifact/Xp9UHPuLd3Ebo9ZVBgS9id (plain HTML; the target look and behaviour).
+
+## Decisions
+
+- The main folder (TARGET_KIND=repo) owns the one map. A worktree links to it through `git rev-parse --git-common-dir` and reuses its board; it falls back to its own board only when the main folder has none (or is a bare repo).
+- Signals per card: changed (branch diff since merge-base with the default branch, plus uncommitted), planned (this session's run `task.json` deliverables), read (files the session's tool calls touched, from the workflow audit). Read is the weakest signal.
+- Neighbors off by default; neighbors come only from changed or planned cards.
+- Owner only: loopback requests are the machine owner; tailnet requests are matched with `tailscale whois --json <peer ip>` against the owner login recorded at session start. Anyone else gets 404. No sharing in v1.
+- A finished session keeps a read-only view until its worktree is gone.
+- `scripts/hooks/` is guard-protected, so the session link is printed by `harness brief` (which auto-init already runs) instead of a hook edit.
+
+## Shared data format (both workers code to this)
+
+`board.py list --json` rows gain: `kind` ("repo"|"worktree"|"dir"), `parent` (main folder target id or null), `branch` (string or null), and for worktrees `task` = {`title`, `phase`, `run_id`, `live`, `last_active`} or null, and `owner` = {`user`, `login`}. A worktree's parent row is always present in the list.
+
+`board.py session --target PATH --session-id ID` creates (idempotent) `targets/<id>/board/sessions/<key>.json` = {`key` (secrets.token_urlsafe(24)), `session_id`, `target`, `root`, `owner`: {`user`, `login`|null}, `started_at`} and prints `{"key":..., "url": "<HARNESS_AUDIT_URL or http://127.0.0.1:18080>/projects/<target>/sessions/<key>"}`.
+
+`board.py focus --target ID --session KEY` prints:
+```json
+{"target": "...", "board_target": "...", "parent": "..."|null,
+ "session": {"key": "...", "owner": {"user": "...", "login": "..."|null}, "branch": "...", "base": "develop",
+             "root": "...", "run_id": "...", "phase": "plan|build|review|done", "title": "...", "live": true, "last_active": "..."},
+ "signals": {"<card id>": {"edited": ["path"], "scope": ["path"], "touched": ["path"]}},
+ "unmapped": ["path"], "summary": "plain sentence"}
+```
+Unknown key: exit 3 and `{"error": "unknown session"}`.
+
+Audit service routes: `GET /projects/{id}/sessions/{key}` (page) and `GET /projects/{id}/sessions/{key}/focus.json`; both 404 for non-owners. `board.json` for the view comes from `board_target`.
+
+## Tasks
+
+1. [done] Stop race fix + baseline: 5be6649.
+2. [done] Data layer: 5640391. Check: `bash tests/board.sh`.
+3. [done] Dashboard: 8157360. Check: audit cargo test + `tests/test_board_session.py`.
+4. [done] Merge, base-ref fix and auto-init test isolation: 2b04d45; `scripts/verify.sh --project .` passed, build done.
+5. [running] Independent review; then user `approved`, `review submit --chat-approved`, `review done`.
+
+## Follow-ups
+
+- Clean up the ~126 per-worktree DollarWise boards once worktrees reuse the main map (not in this task).
+- Worktree rows show the board state as NOT MAPPED/READY though they reuse the main map.
+- Tailnet access from another device untested (only unit tests).
+- Changes reach real sessions only after the published harness picks them up.
+
+## Hook preferences and verification repair
+
+- [done] Confirmed upstream `master` still points to `c0e86b4005da9e9e07543ec7ff128003c52bac8d`.
+- [done] Preserved the existing hook-preference UI candidate and restored the current hardened `scripts/role_dispatch.py` behavior while retaining its user comment.
+- [done] Fixed `process::alive` for a child reaped between the signal-0 probe and `ps`; added regression coverage for zombie and reaped states.
+- [done] Verified the candidate with `/Users/me/.local/bin/harness-runtime exec scripts/verify.sh --project /Users/me/Code/harness-template-fix-harness-verification`: `ran=3, skipped=3, failures=0`.
+- [done] Copied the verified `scripts/role_dispatch.py` and `services/harness-signals/src/jobs/process.rs` into this checkout; both match the verified candidate byte-for-byte. Published harness runtime restored; Claude worker tab and task-owned dashboards closed.
+- [note] An initial direct, unwrapped verify run wrote run `20261112T202120Z-71134` into the primary `.harness-db` and failed on fixture isolation. The database record was left untouched; the required pinned wrapper run passed.
+- [retained] Worktree `/Users/me/Code/harness-template-fix-harness-verification` and branch `fix/harness-verification` remain because their changes are uncommitted and unmerged.

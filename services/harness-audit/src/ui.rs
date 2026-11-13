@@ -517,6 +517,11 @@ async fn workbench(
         Err(error) => return unavailable(error),
     };
     context.insert("collection_settings", &settings);
+    let hook_settings = match crate::settings::load_hooks() {
+        Ok(settings) => settings,
+        Err(error) => return unavailable(error),
+    };
+    context.insert("hook_settings", &hook_settings);
     context.insert("workflow_sessions", &session_count);
     render(
         &registry,
@@ -3312,6 +3317,9 @@ mod tests {
         assert!(!html.contains("run_full_verification-&gt;run_full_verification"));
         assert!(html.contains("reasoning_model"));
         assert!(html.contains("class=\"workbench\""));
+        assert!(html.contains("Harness hooks"));
+        assert!(html.contains("Save and apply hook settings"));
+        assert!(html.contains("/api/hooks/settings"));
         assert!(html.contains("/public/styles.css"));
         assert!(html.contains("<script src=\"/public/workbench.js\"></script>"));
         assert!(html.contains("data-rail-toggle"));
@@ -3484,6 +3492,7 @@ mod tests {
             "collection_settings",
             &crate::settings::CollectionSettings::default(),
         );
+        context.insert("hook_settings", &crate::settings::HookSettings::default());
         context.insert("workflow_sessions", &0);
         decorate(&mut context, "Audit workbench");
         // Keys that `UiRegistry::render` injects at request time.

@@ -1,0 +1,54 @@
+{
+  "goal": "Ship claude-nohooks and codex-nohooks launchers in the harness and tell installs and updates to symlink them into ~/.local/bin.",
+  "deliverables": [
+    "bin/claude-nohooks",
+    "bin/codex-nohooks",
+    "AGENTS.md"
+  ],
+  "constraints": [
+    "No new dependencies."
+  ],
+  "non_goals": [
+    {
+      "description": "No installer or updater code changes.",
+      "paths": [
+        "scripts/"
+      ]
+    },
+    {
+      "description": "Leave the pre-existing arc upgrade edits in services/ untouched."
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "claude-launcher",
+      "criterion": "claude-nohooks passes disableAllHooks",
+      "command": [
+        "grep",
+        "-q",
+        "disableAllHooks",
+        "bin/claude-nohooks"
+      ]
+    },
+    {
+      "id": "codex-launcher",
+      "criterion": "codex-nohooks disables the hooks feature",
+      "command": [
+        "grep",
+        "-q",
+        "disable hooks",
+        "bin/codex-nohooks"
+      ]
+    },
+    {
+      "id": "agents-direction",
+      "criterion": "AGENTS.md tells installs to symlink the launchers",
+      "command": [
+        "grep",
+        "-q",
+        "claude-nohooks",
+        "AGENTS.md"
+      ]
+    }
+  ]
+}

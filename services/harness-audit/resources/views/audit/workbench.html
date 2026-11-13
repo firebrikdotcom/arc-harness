@@ -25,6 +25,38 @@
  });
 })();
 </script>
+<section class="panel collection-controls" aria-labelledby="hooks-title"><div class="panel__head"><h2 id="hooks-title">Harness hooks</h2></div>
+<p class="section-note">Choose which harness hook groups are installed in Claude Code and Codex on this machine. For audit-only, keep Workflow audit on, turn the other groups off, and keep Workflow enabled in Audit collection above. Saving updates both agent settings files; restart agent sessions to load the new hooks.</p>
+<form id="hook-settings"><div class="audit-switches">
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-session-startup"{% if hook_settings.session_startup %} checked{% endif %}><span><strong>Session startup</strong><small>Register the project, bootstrap dependencies, run the session route, and check its architecture board.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-workflow-audit"{% if hook_settings.workflow_audit %} checked{% endif %}><span><strong>Workflow audit</strong><small>Record session, prompt, plan, and tool activity for the dashboard.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-workflow-gate"{% if hook_settings.workflow_gate %} checked{% endif %}><span><strong>Workflow gate</strong><small>Check plans and todos. Audit mode records activity without blocking.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-command-observer"{% if hook_settings.command_observer %} checked{% endif %}><span><strong>Repeated-command observer</strong><small>Notice repeated shell commands in the current session.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-failure-tracking"{% if hook_settings.failure_tracking %} checked{% endif %}><span><strong>Failure tracking</strong><small>Track tool failures and stop after repeated identical failures.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-worktree-cleanup"{% if hook_settings.worktree_cleanup %} checked{% endif %}><span><strong>Worktree cleanup</strong><small>Remove eligible merged, clean worktrees at session start and after merges.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-session-log-cleanup"{% if hook_settings.session_log_cleanup %} checked{% endif %}><span><strong>Session-log cleanup</strong><small>Trim embedded images from idle agent session logs.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-retrieval-reminder"{% if hook_settings.retrieval_reminder %} checked{% endif %}><span><strong>Code search reminder</strong><small>Show the semantic-search reminder before Claude Code Grep and Glob.</small></span></label>
+</div><div class="settings-actions"><button class="button" type="submit">Save and apply hook settings</button><span id="hook-status" role="status" aria-live="polite">Settings apply to new agent sessions.</span></div></form>
+<noscript>Enable JavaScript to save hook settings.</noscript>
+</section>
+<script>
+(() => {
+ const form = document.getElementById('hook-settings');
+ const status = document.getElementById('hook-status');
+ const fields = ['session_startup','workflow_audit','workflow_gate','command_observer','failure_tracking','worktree_cleanup','session_log_cleanup','retrieval_reminder'];
+ form.addEventListener('submit', async event => {
+  event.preventDefault(); const button = form.querySelector('button'); button.disabled = true; status.textContent = 'Saving and applying…';
+  try {
+   const settings = Object.fromEntries(fields.map(key => [key, document.getElementById(`hook-${key.replaceAll('_','-')}`).checked]));
+   const response = await fetch('/api/hooks/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(settings)});
+   const result = await response.json();
+   if (!response.ok) throw new Error(result.error || 'Hook settings could not be applied.');
+   status.textContent = 'Saved and applied to Claude Code and Codex. Restart agent sessions to load changes.';
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+ });
+})();
+</script>
 <section class="panel confidence-chart" data-client-calendar="{{ client_timezone | default(value='') }}"><div class="panel__head"><h2>Jev confidence over time</h2>{% if confidence_chart.latest %}<span class="mono">Latest {{ confidence_chart.latest.date }}: {{ confidence_chart.latest.percent }}%</span>{% endif %}</div>
 <p class="section-note">Daily mean of Jev’s self-reported recommendation confidence in your timezone, pooling all checkpoint families except legacy advice (calls sent without a checkpoint, listed in the table below). This is not measured accuracy. Missing or invalid confidence is unknown; days without valid samples leave gaps.</p>
 {% if confidence_chart.points %}<div class="chart-wrap"><svg class="chart" viewBox="0 0 {{ confidence_chart.width }} {{ confidence_chart.height }}" role="img" aria-labelledby="confidence-chart-title"><title id="confidence-chart-title">Daily Jev confidence, {{ confidence_chart.points | length }} days with confidence samples</title>

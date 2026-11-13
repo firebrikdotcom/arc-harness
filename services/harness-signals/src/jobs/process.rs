@@ -16,22 +16,29 @@ pub fn alive(pid: u32) -> bool {
     }
     // SAFETY: signal 0 only checks that the process exists and may be signalled.
     if unsafe { libc::kill(pid, 0) } == 0 {
-        return !zombie(pid);
+        return listed_running(pid);
     }
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// An exited child nobody has reaped still answers signal 0.
-fn zombie(pid: libc::pid_t) -> bool {
+/// Whether `ps` still lists the process, in a state other than zombie. An
+/// exited child nobody has reaped still answers signal 0, and one reaped right
+/// after that signal is no longer listed at all: both have ended. Without a
+/// working `ps` the process cannot be shown to have ended.
+fn listed_running(pid: libc::pid_t) -> bool {
     Command::new("/bin/ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .stderr(Stdio::null())
         .output()
-        .is_ok_and(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .trim_start()
-                .starts_with('Z')
+        .map_or(true, |out| {
+            running_state(&String::from_utf8_lossy(&out.stdout))
         })
+}
+
+/// A `ps -o stat=` line that names a live, non-zombie process.
+fn running_state(stat: &str) -> bool {
+    let stat = stat.trim();
+    !stat.is_empty() && !stat.starts_with('Z')
 }
 
 /// What the OS says about a live process.
@@ -263,4 +270,59 @@ pub fn terminate_child(child: &mut Child, grace: Duration) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_listed_non_zombie_state_is_running() {
+        assert!(running_state("S\n"));
+        assert!(running_state("  R+ "));
+        assert!(!running_state("Z+\n"), "a zombie has exited");
+        assert!(!running_state(""), "an unlisted process has been reaped");
+        assert!(!running_state("\n"));
+    }
+
+    /// A child that has exited is not alive, even when its parent reaps it
+    /// between the signal-0 probe and the zombie check (as a job supervisor
+    /// polling `try_wait` does while `stop` asks whether the agent is gone).
+    #[test]
+    fn a_child_reaped_during_the_check_is_not_alive() {
+        for round in 0..40u64 {
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            // Wait until it has exited but is not yet reaped: a zombie.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !Command::new("/bin/ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .is_ok_and(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .trim_start()
+                        .starts_with('Z')
+                })
+            {
+                assert!(Instant::now() < deadline, "the child never exited");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let reaper = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(round % 8));
+                child.wait().unwrap();
+            });
+            assert!(
+                !alive(pid),
+                "round {round}: an exited child is reported alive"
+            );
+            reaper.join().unwrap();
+            assert!(
+                !alive(pid),
+                "round {round}: a reaped child is reported alive"
+            );
+        }
+    }
 }

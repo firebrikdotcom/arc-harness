@@ -64,6 +64,17 @@ DEFAULTS = {
         "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
         "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained.",
     },
+    "hooks": {
+        "_doc": "Install these harness hook groups in Claude Code and Codex settings. Unrelated hooks are preserved.",
+        "session_startup": True,
+        "workflow_audit": True,
+        "workflow_gate": True,
+        "command_observer": True,
+        "failure_tracking": True,
+        "worktree_cleanup": True,
+        "session_log_cleanup": True,
+        "retrieval_reminder": True,
+    },
     "workflow": {
         "_doc": "Todo gate mode for every agent's hooks. audit records prompts, plans, tool calls and checks but denies nothing; enforce requires plans and decision checkpoints. A .harness-enforce file at a project root enforces that project in audit mode.",
         "todo_gate": "enforce",
@@ -86,7 +97,7 @@ DEFAULTS = {
         "_doc_token_file": "File holding a personal API token from Settings > API tokens; FIREBRIK_SITES_TOKEN overrides it.",
     },
 }
-SECTIONS = ("typesafe", "dispatch", "telemetry", "sites", "workflow", "amp")
+SECTIONS = ("typesafe", "dispatch", "telemetry", "hooks", "sites", "workflow", "amp")
 
 
 class ConfigError(ValueError):
@@ -127,6 +138,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence",
                            "context_request_limit", "read_only_commands", "read_only_tools"},
               "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts"},
+              "hooks": {"session_startup", "workflow_audit", "workflow_gate", "command_observer", "failure_tracking", "worktree_cleanup", "session_log_cleanup", "retrieval_reminder"},
               "sites": {"enabled", "url", "token_file"}, "workflow": {"todo_gate"}, "amp": {"enabled", "effort", "poll_seconds"}}
     for section, keys in fields.items():
         part = value.get(section)
@@ -150,6 +162,8 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         for key in keys:
             if type(value[section].get(key)) is not bool:
                 raise ConfigError(f"{section}.{key} must be boolean")
+    if any(type(value["hooks"].get(key)) is not bool for key in fields["hooks"]):
+        raise ConfigError("hooks selections must be boolean")
     for key, pattern in (("read_only_commands", r"^[A-Za-z0-9_./-]+( [A-Za-z0-9_.-]+){0,3}$"), ("read_only_tools", r"^[A-Za-z0-9_.-]+$")):
         items = typesafe.get(key, [])
         if not isinstance(items, list) or len(items) > 64 or any(
@@ -211,7 +225,7 @@ def load(file: Path | None = None) -> dict[str, Any]:
             value["telemetry"].update(legacy_collection(stored))
             return validate(value)
         # Sections added after a file was written start from their defaults.
-        for section in ("sites", "workflow", "amp"):
+        for section in ("sites", "workflow", "amp", "hooks"):
             if section not in stored:
                 stored[section] = copy.deepcopy(DEFAULTS[section])
         for section in SECTIONS:

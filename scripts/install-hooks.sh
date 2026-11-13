@@ -50,7 +50,11 @@ import time
 from pathlib import Path
 
 root, mode, dry_run, *targets = sys.argv[1:]
+sys.path.insert(0, str(Path(root) / "scripts"))
+import harness_config
+
 dry_run = dry_run == "1"
+enabled = (harness_config.DEFAULTS["hooks"] if mode == "uninstall" else harness_config.load()["hooks"])
 SESSION = str(Path(root) / "scripts/hooks/auto-init.sh")
 OBSERVE = str(Path(root) / "scripts/observe_commands.py")
 SESSION_BIND = str(Path(root) / "scripts/session_hook.py")
@@ -72,16 +76,16 @@ SLIM_HOOK = {"hooks": [{"type": "command", "command": f'python3 "{SLIM}" --spawn
 CLEANUP_HOOK = {"hooks": [{"type": "command", "command": f'python3 "{CLEANUP}" --hook', "timeout": 5}]}
 CLEANUP_AFTER_MERGE = {"matcher": "Bash|shell|exec_command", **CLEANUP_HOOK}
 SHARED = {
-    "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}, SLIM_HOOK, CLEANUP_HOOK],
-    "SessionEnd": [SLIM_HOOK],
-    "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}],
-    "PostToolUse": [FAILURE_HOOK, CLEANUP_AFTER_MERGE],
+    "SessionStart": ([{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f'python3 "{SESSION_BIND}" "{SESSION}"', "timeout": 30}]}] if enabled["session_startup"] else []) + ([SLIM_HOOK] if enabled["session_log_cleanup"] else []) + ([CLEANUP_HOOK] if enabled["worktree_cleanup"] else []),
+    "SessionEnd": [SLIM_HOOK] if enabled["session_log_cleanup"] else [],
+    "PreToolUse": ([{"matcher": "Bash", "hooks": [{"type": "command", "command": f'python3 "{OBSERVE}"', "timeout": 15}]}] if enabled["command_observer"] else []),
+    "PostToolUse": ([FAILURE_HOOK] if enabled["failure_tracking"] else []) + ([CLEANUP_AFTER_MERGE] if enabled["worktree_cleanup"] else []),
 }
 # Codex has no Grep or Glob tool, so the retrieval reminder goes to Claude Code only;
 # Claude Code reports failed calls on their own event.
 CLAUDE_ONLY = {
-    "PreToolUse": [{"matcher": "Grep|Glob", "hooks": [{"type": "command", "command": f'"{REMIND}"', "timeout": 10}]}],
-    "PostToolUseFailure": [FAILURE_HOOK],
+    "PreToolUse": ([{"matcher": "Grep|Glob", "hooks": [{"type": "command", "command": f'"{REMIND}"', "timeout": 10}]}] if enabled["retrieval_reminder"] else []),
+    "PostToolUseFailure": [FAILURE_HOOK] if enabled["failure_tracking"] else [],
 }
 
 
@@ -92,13 +96,22 @@ def entries_for(index: int) -> dict:
     events = ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
     if index == 0:
         events.append("PostToolUseFailure")
+    agent = "claude-code" if index == 0 else "codex"
     for event in events:
-        entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {"claude-code" if index == 0 else "codex"}', "timeout": 3 if event == "SessionEnd" else 10}]}
-        if event in ("PreToolUse", "UserPromptSubmit", "Stop", "PostToolUse", "PostToolUseFailure"):
-            entry["hooks"][0]["command"] = f'python3 "{TODO_GATE}" {"claude-code" if index == 0 else "codex"}'
-        if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
-            entry["matcher"] = ".*"
-        entries.setdefault(event, []).append(entry)
+        gated = enabled["workflow_gate"] and event in ("UserPromptSubmit", "PreToolUse", "Stop", "PostToolUse", "PostToolUseFailure")
+        # The gate already collects its events. Installing a second collector
+        # would duplicate prompts and tool activity.
+        if gated:
+            prefix = "" if enabled["workflow_audit"] else "env HARNESS_AUDIT_ENABLED=0 "
+            entry = {"hooks": [{"type": "command", "command": f'{prefix}python3 "{TODO_GATE}" {agent}', "timeout": 10}]}
+            if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+                entry["matcher"] = ".*"
+            entries.setdefault(event, []).append(entry)
+        elif enabled["workflow_audit"] and event != "Stop":
+            entry = {"hooks": [{"type": "command", "command": f'python3 "{WORKFLOW}" hook --agent {agent}', "timeout": 3 if event == "SessionEnd" else 10}]}
+            if event in ("PreToolUse", "PostToolUse", "PostToolUseFailure"):
+                entry["matcher"] = ".*"
+            entries.setdefault(event, []).append(entry)
     return entries
 
 
@@ -167,7 +180,7 @@ for index, target in enumerate(targets):
         backup.write_bytes(path.read_bytes())
         print(f"backup: {backup}")
     path.write_text(rendered, encoding="utf-8")
-    print(f"{mode}ed Jev and Workflow hooks in {path}")
+    print(f"{mode}ed configured harness hooks in {path}")
 PY
 
 if [ "$DRY_RUN" = "1" ]; then

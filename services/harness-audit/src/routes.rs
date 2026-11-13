@@ -227,6 +227,28 @@ async fn update_settings(
     }
 }
 
+#[put("/hooks/settings")]
+async fn update_hook_settings(
+    request: HttpRequest,
+    body: web::Json<crate::settings::HookSettings>,
+) -> impl Responder {
+    if let Some(origin) = request.headers().get("Origin") {
+        let expected = format!(
+            "{}://{}",
+            request.connection_info().scheme(),
+            request.connection_info().host()
+        );
+        if origin.to_str().ok() != Some(expected.as_str()) {
+            return HttpResponse::Forbidden()
+                .json(json!({"error": "same-origin request required"}));
+        }
+    }
+    match crate::settings::save_hooks_and_apply(body.into_inner()) {
+        Ok(()) => HttpResponse::Ok().json(json!({"saved": true, "applied": true})),
+        Err(error) => HttpResponse::InternalServerError().json(json!({"error": error.to_string()})),
+    }
+}
+
 #[get("/audit/workflow")]
 async fn workflow_events(
     query: web::Query<GroupedQuery>,
@@ -259,6 +281,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         web::scope("/api")
             .service(collection_settings)
             .service(update_settings)
+            .service(update_hook_settings)
             .service(workflow_events)
             .service(orchestration_summary)
             .service(record_event)

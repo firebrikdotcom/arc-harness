@@ -74,7 +74,7 @@ Every software project the harness touches gets a whiteboard of its components i
 
 ### Automatic initialisation at session start
 
-`scripts/install-hooks.sh` registers `scripts/hooks/auto-init.sh` as a Claude Code and Codex `SessionStart` hook (`startup`, `resume`, and `clear`). Every session then initialises the project it starts in, whether that is a linked git worktree, a main checkout, or a plain directory:
+When **Session startup** is enabled in Workbench → Harness hooks, `scripts/install-hooks.sh` registers the automatic initializer for Claude Code and Codex. Each new session then initializes its project, whether that is a linked git worktree, a main checkout, or a plain directory:
 
 1. The project root (the git toplevel when inside a repository, otherwise the directory itself) is registered as a harness target with `scripts/harness-target.sh register`. Registration lives under `HARNESS_DB_ROOT/targets/<name>-<hash>/` and never writes inside the project, so tracked files stay clean. The home directory, `/`, and the harness root are never registered.
 2. `scripts/init.sh --project ROOT --auto` runs the detected project-owned setup commands non-interactively, but only when the fingerprint of the bootstrap inputs (`Makefile`, `package.json`, the Node lockfiles listed below, `composer.json`, `composer.lock`, `go.mod`, `go.sum`, `Cargo.toml`, `Cargo.lock`) differs from the last successful run for that target. The commands run in the background with their output in `targets/<id>/bootstrap.log`; `targets/<id>/bootstrap.state` records `STATUS` (`running`, `ok`, `failed`), `FINGERPRINT`, `EXIT`, and `PID`. A failed bootstrap is reported on later starts but not retried until the inputs change or someone runs `scripts/init.sh --project ROOT --yes`.
@@ -867,6 +867,11 @@ scripts/harness config update --section telemetry --values '{"enabled":true}'
   `insufficient_information` results (0 to 2, default 2) may block a tool call per prompt and
   active todo before the main agent decides; `0` never blocks.
 - `workflow.todo_gate`: `enforce` or `audit`; see [Gate modes and waivers](#gate-modes-and-waivers).
+- `hooks.*`: choose each installed harness hook group from Workbench → **Harness hooks**.
+  Saving applies the selection to Claude Code and Codex settings; restart agent sessions to load it.
+  To keep only audit recording, leave `workflow_audit` on and turn the other groups off. Keep
+  `telemetry.workflow` enabled in Audit collection for those events to be stored in the dashboard.
+  Missing preferences default to the existing all-enabled installation.
 - `typesafe.read_only_commands`, `typesafe.read_only_tools`: extra read-only shell command
   prefixes and tool names (or `__suffixes`) that count as evidence reads and skip the decision
   checkpoint; see [Jev decision checkpoints](jev-checkpoints.md#two-context-requests-then-the-agent-decides).

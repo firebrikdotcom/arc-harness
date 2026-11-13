@@ -70,6 +70,17 @@
     "_doc_workflow": "Collect session, task, todo and tool lifecycle events.",
     "_doc_workflow_prompts": "Store full future user prompts; requires workflow collection. Saved history is retained."
   },
+  "hooks": {
+    "_doc": "Install these harness hook groups in Claude Code and Codex settings. Unrelated hooks are preserved.",
+    "session_startup": true,
+    "workflow_audit": true,
+    "workflow_gate": true,
+    "command_observer": true,
+    "failure_tracking": true,
+    "worktree_cleanup": true,
+    "session_log_cleanup": true,
+    "retrieval_reminder": true
+  },
   "amp": {
     "_doc": "Run dispatch workers in Amp orb threads (amp -ox). On: every worker is offered an orb first and falls back to its listed profiles when an orb cannot take it. Off: no orb is started.",
     "enabled": false,

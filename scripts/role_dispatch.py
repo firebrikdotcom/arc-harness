@@ -392,7 +392,7 @@ def prepare(run, w):
     if orb:
         # Checked again at launch: the tree may have changed since the plan was created.
         orb_base(run, w)
-        # Orbs clone the pushed commit; do not create or commit a local snapshot.
+        # An orb works from the remote commit, so a local snapshot is unnecessary.
         w['workspace'] = str(project)
         w['base_commit'] = w['orb_base']
         return

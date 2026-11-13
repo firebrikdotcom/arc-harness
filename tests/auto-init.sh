@@ -189,4 +189,6 @@ for path in sys.argv[1:]:
     assert not any("session-route.sh" in h["command"] for g in data["hooks"]["SessionStart"] for h in g["hooks"])
 PY
 
+python3 tests/test_hook_preferences.py || fail "hook preference configuration and installation failed"
+
 printf '%s\n' 'PASS: session start registers the project, bootstraps once per fingerprint, and keeps per-target harness state'

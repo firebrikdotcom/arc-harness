@@ -1,0 +1,32 @@
+{
+  "goal": "Let the user enable or disable each harness hook group in the audit dashboard and apply the selection to Claude Code and Codex.",
+  "deliverables": [
+    "config.example.json",
+    "scripts/harness_config.py",
+    "scripts/install-hooks.sh",
+    "services/harness-audit/src/routes.rs",
+    "services/harness-audit/src/settings.rs",
+    "services/harness-audit/src/ui.rs",
+    "services/harness-audit/resources/views/audit/workbench.html",
+    "tests/test_hook_preferences.py",
+    "docs/setup.md"
+  ],
+  "constraints": [
+    "Preserve unrelated existing agent hooks and harness hooks on install.",
+    "Keep existing behavior when no hook preferences have been saved.",
+    "Use the shared config writer to preserve concurrent machine settings."
+  ],
+  "non_goals": [
+    {
+      "description": "Do not change unrelated dispatch, audit projection, or architecture-board behavior.",
+      "paths": ["scripts/role_dispatch.py", "services/harness-audit/src/store.rs", "tools/architecture-board/"]
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "hook-selection",
+      "criterion": "Dashboard hook selections persist and installation emits only enabled harness hook groups while preserving unrelated hooks.",
+      "command": ["./scripts/verify.sh"]
+    }
+  ]
+}
