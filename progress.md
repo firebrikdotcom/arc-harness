@@ -6,13 +6,15 @@ Contract: `tasks/turn-context-capture.json` (run `20261113T181625Z-12323`). Inte
 
 Wire contract (decided): setting `telemetry.workflow_context` (bool, default false, needs `workflow`); event `workflow.context_recorded` with `prompt_id`, `entry_id`, `entry_index`, `role`, `kind`, `part_index`, `part_count`, `text` (≤2000 bytes), `entry_bytes`, `truncated`, optional `sha256` and token counts (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`). Entry cap 16000 bytes; turn cap 500 entries.
 
-Tasks (each in its own worktree and branch):
-- [ ] hook — Stop-hook capture in `scripts/workflow_audit.py`, `workflow_gate.py`, `install-hooks.sh`, `harness_config.py`, `audit_transport.py`, tests. Check: `python3 -m unittest tests.test_workflow_audit tests.test_unified_config`.
-- [ ] service — `services/harness-audit/src/`: switch, validation, Workflow page. Check: `cargo test --manifest-path services/harness-audit/Cargo.toml`.
-- [ ] docs — `docs/setup.md`.
-- [ ] integrate — merge, `scripts/verify.sh --project .`, review.
+Done (worktrees and task branches removed after fast-forward merge):
+- [x] docs — `830e90f`.
+- [x] hook — `79b958d`; `python3 -m unittest tests.test_workflow_audit tests.test_unified_config tests.test_hook_preferences`: 63 OK.
+- [x] service — `cbef86e`; `cargo test --manifest-path services/harness-audit/Cargo.toml`: 126 passed.
+- [ ] integrate — `scripts/verify.sh --project .`, independent review, then PR.
 
-Follow-ups: API recording proxy for hidden system instructions and tool definitions (non-goal here).
+Decisions by workers: `record()` is positional-only (wire fact `kind`); unread log slices over 4 MB keep only the newest 4 MB; Codex logs carry no token counts; the page reads at most 300 chunks per turn; turns without a stored prompt show in their own panel (10 most recent).
+
+Follow-ups: API recording proxy for hidden system instructions and tool definitions (non-goal here); Cursor `stop` path does not run capture; the raw `/events` explorer lists context events with their text.
 
 ## Jev provider diagnostics — 2026-11-11 (v0.2.10)
 
