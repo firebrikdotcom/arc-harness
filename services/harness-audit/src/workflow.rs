@@ -11,6 +11,7 @@ const TYPES: &[&str] = &[
     "todo_updated",
     "todo_removed",
     "prompt_recorded",
+    "context_recorded",
     "session_updated",
     "session_started",
     "session_ended",
@@ -25,6 +26,19 @@ const TYPES: &[&str] = &[
     "phase_changed",
     "verification",
     "review",
+];
+const CONTEXT_KEYS: &[&str] = &[
+    "entry_id",
+    "entry_index",
+    "role",
+    "kind",
+    "entry_bytes",
+    "truncated",
+    "sha256",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
 ];
 const KEYS: &[&str] = &[
     "todo_id",
@@ -42,6 +56,17 @@ const KEYS: &[&str] = &[
     "part_index",
     "part_count",
     "text",
+    "entry_id",
+    "entry_index",
+    "role",
+    "kind",
+    "entry_bytes",
+    "truncated",
+    "sha256",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
     "cwd",
     "session_name",
     "herdr_tab",
@@ -143,16 +168,80 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
             {
                 return Err("invalid decision options");
             }
-        } else if !value.is_null() && !value.is_number() {
+        } else if !value.is_null()
+            && !value.is_number()
+            && !(key == "truncated" && value.is_boolean())
+        {
             return Err("invalid Workflow field value");
         }
     }
     if event_type != "workflow.prompt_recorded"
+        && event_type != "workflow.context_recorded"
         && ["prompt_id", "part_index", "part_count", "text"]
             .iter()
             .any(|key| object.contains_key(*key))
     {
         return Err("prompt fields require a prompt event");
+    }
+    if event_type != "workflow.context_recorded"
+        && CONTEXT_KEYS.iter().any(|key| object.contains_key(*key))
+    {
+        return Err("context fields require a context event");
+    }
+    if event_type == "workflow.context_recorded" {
+        let count = payload["part_count"]
+            .as_u64()
+            .filter(|n| *n > 0 && *n <= 2000)
+            .ok_or("invalid context part count")?;
+        let index = payload["part_index"]
+            .as_u64()
+            .ok_or("invalid context part index")?;
+        let id = |key: &str| {
+            payload[key]
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 256)
+        };
+        if index >= count
+            || !id("prompt_id")
+            || !id("entry_id")
+            || payload["entry_index"].as_u64().is_none()
+            || payload["entry_bytes"].as_u64().is_none()
+            || payload["truncated"].as_bool().is_none()
+            || payload["text"].as_str().is_none_or(|s| s.len() > 2000)
+        {
+            return Err("invalid context chunk");
+        }
+        if !["user", "assistant", "system", "tool"].contains(&payload["role"].as_str().unwrap_or(""))
+            || ![
+                "text",
+                "thinking",
+                "tool_use",
+                "tool_result",
+                "instruction",
+                "other",
+            ]
+            .contains(&payload["kind"].as_str().unwrap_or(""))
+        {
+            return Err("invalid context role or kind");
+        }
+        if object.contains_key("sha256")
+            && payload["sha256"].as_str().is_none_or(|s| {
+                s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+        {
+            return Err("invalid context digest");
+        }
+        for key in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+        ] {
+            if object.contains_key(key) && !payload[key].is_null() && payload[key].as_u64().is_none()
+            {
+                return Err("token counts must be nonnegative integers");
+            }
+        }
     }
     if event_type == "workflow.prompt_recorded" {
         let count = payload["part_count"]
@@ -216,6 +305,72 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// One turn's stored context chunks (already ordered by entry, then part), joined
+/// into entries with the turn's token totals. `limit` caps the chunks considered.
+pub(crate) fn context_turn(chunks: &[Value], limit: usize) -> Value {
+    let more = chunks.len() > limit;
+    let mut order: Vec<String> = Vec::new();
+    let mut entries: BTreeMap<String, (BTreeMap<u64, String>, Value)> = BTreeMap::new();
+    let mut occurred_at = Value::Null;
+    for chunk in chunks.iter().take(limit) {
+        let p = &chunk["payload"];
+        let Some(entry) = p["entry_id"].as_str() else {
+            continue;
+        };
+        if occurred_at.is_null() {
+            occurred_at = p["occurred_at"].clone();
+        }
+        if !entries.contains_key(entry) {
+            order.push(entry.to_owned());
+        }
+        let slot = entries
+            .entry(entry.to_owned())
+            .or_insert_with(|| (BTreeMap::new(), p.clone()));
+        slot.0
+            .entry(p["part_index"].as_u64().unwrap_or(0))
+            .or_insert_with(|| p["text"].as_str().unwrap_or("").to_owned());
+        if p["part_index"].as_u64() == Some(0) {
+            slot.1 = p.clone();
+        }
+    }
+    order.sort_by_key(|entry| entries[entry].1["entry_index"].as_u64().unwrap_or(0));
+    let mut totals = [0u64; 4];
+    let mut counted = [false; 4];
+    let mut list = Vec::new();
+    for entry in &order {
+        let (parts, head) = &entries[entry];
+        for (n, key) in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+        ]
+        .iter()
+        .enumerate()
+        {
+            if let Some(v) = head[*key].as_u64() {
+                totals[n] = totals[n].saturating_add(v);
+                counted[n] = true;
+            }
+        }
+        let expected = head["part_count"].as_u64().unwrap_or(0);
+        list.push(json!({
+            "entry_id": entry, "entry_index": head["entry_index"],
+            "role": head["role"], "kind": head["kind"],
+            "entry_bytes": head["entry_bytes"], "truncated": head["truncated"] == true,
+            "text": parts.values().cloned().collect::<String>(),
+            "incomplete": parts.len() as u64 != expected,
+        }));
+    }
+    json!({
+        "entries": list, "entry_count": order.len(), "more": more, "occurred_at": occurred_at,
+        "input_tokens": counted[0].then_some(totals[0]),
+        "output_tokens": counted[1].then_some(totals[1]),
+        "cache_read_tokens": counted[2].then_some(totals[2]),
+        "cache_creation_tokens": counted[3].then_some(totals[3]),
+    })
+}
+
 /// The collector's stand-in description for a task nobody has named yet.
 const PLACEHOLDER: &str = "Task summary has not been supplied.";
 
@@ -250,6 +405,7 @@ pub(crate) fn signal_view(
     let count = |key: &str| p[key].as_u64().map(|n| n.to_string());
     match kind {
         "prompt_recorded" => (true, String::new(), String::new(), "prompt"),
+        "context_recorded" => (false, String::new(), String::new(), "neutral"),
         "plan_registered" | "plan_revised" => {
             let todos = count("todo_count").map(|n| format!("{n} todos"));
             let head = if kind == "plan_revised" {
@@ -767,6 +923,7 @@ pub(crate) fn annotate_timeline(session: &mut Value) {
             "phase_changed" => ("Harness phase changed", "phase", p["phase_status"].as_str().unwrap_or("unknown"), "This records a harness phase transition; it is separate from the final task outcome."),
             "decision" => ("Decision recorded", "decision", "recorded", "The supplied options, selection and description record the reason for this decision."),
             "prompt_recorded" => ("User prompt captured", "prompt", "recorded", "A user submission was captured while prompt storage was enabled. The complete text is shown under User prompts."),
+            "context_recorded" => ("Turn context captured", "context", "recorded", "A reply's reading and writing was captured while turn context storage was enabled. It is shown under its prompt."),
             "task_completed" => ("Task marked completed", "task", "completed", "An explicit task outcome was supplied. Review the associated verification and review events as evidence."),
             "task_blocked" => ("Task blocked", "task", "blocked", "An explicit blocker was recorded; the description or outcome explains the remaining work."),
             "task_started" => ("Task started", "task", "running", "A task was registered in this session. Its name and description provide the intended scope."),
@@ -874,6 +1031,9 @@ impl SessionReducer {
             .as_str()
             .is_some_and(|s| s.starts_with("workflow."))
         {
+            return;
+        }
+        if row["event_type"] == "workflow.context_recorded" {
             return;
         }
         let p = &row["payload"];
@@ -1255,6 +1415,61 @@ mod tests {
         let session = sessions(&rows).remove(0);
         let items = signal_items(session["events"].as_array().unwrap());
         assert_eq!(items[1]["detail"], "make test");
+    }
+    #[test]
+    fn context_chunks_validate_and_assemble_in_entry_order() {
+        let good = json!({"schema_version":1,"session_id":"s","task_id":"t","occurred_at":"2026-10-02T00:00:00Z","prompt_id":"p","entry_id":"e1","entry_index":0,"role":"assistant","kind":"text","part_index":0,"part_count":1,"text":"hello","entry_bytes":5,"truncated":false,"input_tokens":3,"output_tokens":4});
+        assert!(validate("workflow.context_recorded", &good).is_ok());
+        let mut digest = good.clone();
+        digest["truncated"] = json!(true);
+        digest["sha256"] = json!("a".repeat(64));
+        assert!(validate("workflow.context_recorded", &digest).is_ok());
+        digest["sha256"] = json!("xyz");
+        assert!(validate("workflow.context_recorded", &digest).is_err());
+        for (key, value) in [
+            ("role", json!("robot")),
+            ("kind", json!("image")),
+            ("text", json!("x".repeat(2001))),
+            ("part_index", json!(1)),
+            ("entry_bytes", json!(-1)),
+            ("input_tokens", json!(-2)),
+            ("truncated", json!("no")),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert!(validate("workflow.context_recorded", &bad).is_err(), "{key}");
+        }
+        let mut missing = good.clone();
+        missing.as_object_mut().unwrap().remove("entry_id");
+        assert!(validate("workflow.context_recorded", &missing).is_err());
+        // Context fields belong to context events only.
+        assert!(validate("workflow.task_updated", &good).is_err());
+        let chunk = |entry: &str, index: u64, part: u64, text: &str, tokens: u64| {
+            let mut p = good.clone();
+            p["entry_id"] = json!(entry);
+            p["entry_index"] = json!(index);
+            p["part_index"] = json!(part);
+            p["part_count"] = json!(if entry == "e2" { 2 } else { 1 });
+            p["text"] = json!(text);
+            p["input_tokens"] = json!(tokens);
+            json!({"event_type":"workflow.context_recorded","payload":p})
+        };
+        let turn = context_turn(
+            &[
+                chunk("e2", 1, 1, "ld", 5),
+                chunk("e2", 1, 0, "wor", 5),
+                chunk("e1", 0, 0, "hello", 2),
+            ],
+            10,
+        );
+        assert_eq!(turn["entry_count"], 2);
+        assert_eq!(turn["entries"][0]["text"], "hello");
+        assert_eq!(turn["entries"][1]["text"], "world");
+        assert_eq!(turn["input_tokens"], 7);
+        assert_eq!(turn["cache_read_tokens"], Value::Null);
+        // A session replay never lists context among its events.
+        let session = sessions(&[chunk("e1", 0, 0, "hello", 2)]);
+        assert!(session.is_empty() || session[0]["events"].as_array().unwrap().is_empty());
     }
     #[test]
     fn prompt_chunks_reassemble_only_when_complete_and_preserve_initial_goal() {
@@ -1695,6 +1910,13 @@ pub(crate) fn projection_keys(row: &Value) -> Vec<(String, String, String)> {
         .is_some_and(|v| v.starts_with("workflow."))
     {
         return vec![];
+    }
+    if row["event_type"] == "workflow.context_recorded" {
+        return p["prompt_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(|id| vec![(session.to_owned(), "context".to_owned(), id.to_owned())])
+            .unwrap_or_default();
     }
     let mut keys = Vec::new();
     // Independent facts keep updates bounded and allow a replaced source event to

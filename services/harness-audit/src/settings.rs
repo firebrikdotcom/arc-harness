@@ -12,6 +12,8 @@ pub struct CollectionSettings {
     pub workflow: bool,
     #[serde(default)]
     pub workflow_prompts: bool,
+    #[serde(default)]
+    pub workflow_context: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -53,6 +55,7 @@ impl Default for CollectionSettings {
             jev: true,
             workflow: true,
             workflow_prompts: false,
+            workflow_context: false,
         }
     }
 }
@@ -136,6 +139,7 @@ fn load_from(path: &std::path::Path) -> io::Result<CollectionSettings> {
                 jev: flag("jev")?,
                 workflow: flag("workflow")?,
                 workflow_prompts: flag("workflow_prompts")?,
+                workflow_context: telemetry["workflow_context"].as_bool().unwrap_or(false),
             })
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(CollectionSettings::default()),
@@ -246,6 +250,8 @@ impl CollectionSettings {
         }
         if event_type == "workflow.prompt_recorded" {
             self.workflow && self.workflow_prompts
+        } else if event_type == "workflow.context_recorded" {
+            self.workflow && self.workflow_context
         } else if event_type.starts_with("workflow.") {
             self.workflow
         } else {
@@ -267,6 +273,7 @@ mod tests {
             jev: false,
             workflow: true,
             workflow_prompts: false,
+            workflow_context: false,
         };
         save_to(&path, config).unwrap();
         assert_eq!(load_from(&path).unwrap(), config);
@@ -277,6 +284,24 @@ mod tests {
         let legacy = load_from(&path).unwrap();
         assert!(!legacy.workflow_prompts);
         assert!(!legacy.permits("workflow.prompt_recorded"));
+        assert!(!legacy.workflow_context);
+        assert!(!legacy.permits("workflow.context_recorded"));
+        let context = CollectionSettings {
+            workflow_context: true,
+            ..legacy
+        };
+        assert!(context.permits("workflow.context_recorded"));
+        assert!(!context.permits("workflow.prompt_recorded"));
+        assert!(!CollectionSettings {
+            workflow: false,
+            ..context
+        }
+        .permits("workflow.context_recorded"));
+        assert!(!CollectionSettings {
+            enabled: false,
+            ..context
+        }
+        .permits("workflow.context_recorded"));
         let prompts = CollectionSettings {
             workflow_prompts: true,
             ..legacy

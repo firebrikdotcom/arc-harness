@@ -69,6 +69,9 @@ fn refresh_session_entities(
     keys: &BTreeSet<SessionEntityKey>,
 ) -> Result<()> {
     for (session, category, entity) in keys {
+        if category == "context" {
+            continue;
+        }
         if matches!(category.as_str(), "task" | "todo" | "prompt" | "tool") {
             let head = session::head(conn, session, category, entity)?;
             session::invalidate(conn, session, category, entity, &head)?;
@@ -939,6 +942,36 @@ impl ReportStore {
             .collect();
         Ok(Some((prompts, total)))
     }
+    /// Assemble the stored turn context for the given prompt IDs, one bounded read each.
+    pub fn session_context(
+        &self,
+        id: &str,
+        prompt_ids: &[String],
+    ) -> Result<BTreeMap<String, Value>> {
+        let mut conn = self.connection()?;
+        let mut turns = BTreeMap::new();
+        for prompt_id in prompt_ids {
+            if let Some(turn) = context_turn(&mut conn, id, prompt_id)? {
+                turns.insert(prompt_id.clone(), turn);
+            }
+        }
+        Ok(turns)
+    }
+    /// The newest turns that have stored context but no complete stored prompt.
+    pub fn session_orphan_context(&self, id: &str) -> Result<Vec<Value>> {
+        let mut conn = self.connection()?;
+        let ids = diesel::sql_query("SELECT f.entity AS document FROM dashboard_session_facts f WHERE f.session=? AND f.category='context' AND NOT EXISTS (SELECT 1 FROM dashboard_session_entities e WHERE e.session=f.session AND e.category='prompt' AND e.entity=f.entity AND json_extract(e.document,'$.complete')=1) GROUP BY f.entity ORDER BY MAX(f.position) DESC LIMIT ?")
+            .bind::<Text,_>(id).bind::<BigInt,_>(ORPHAN_TURNS as i64).load::<Document>(&mut conn)?;
+        let mut turns = Vec::new();
+        for row in ids {
+            if let Some(mut turn) = context_turn(&mut conn, id, &row.document)? {
+                turn["prompt_id"] = json!(row.document);
+                turns.push(turn);
+            }
+        }
+        turns.sort_by(|a, b| a["occurred_at"].as_str().cmp(&b["occurred_at"].as_str()));
+        Ok(turns)
+    }
     /// Read task projections without loading the session's timeline or prompt bodies.
     pub fn session_tasks(
         &self,
@@ -1033,6 +1066,8 @@ fn partition(kind: &str) -> &'static str {
     match kind {
         "jev.checkpoint" | "jev.checkpoint_outcome" => "checkpoint",
         "jev.route" | "jev.outcome" => "route",
+        // Turn context is read by prompt, never replayed into the session timeline.
+        "workflow.context_recorded" => "context",
         s if s.starts_with("workflow.") => "workflow",
         s if s.starts_with("orchestration.") => "orchestration",
         _ => "other",
@@ -1046,6 +1081,22 @@ fn affected(row: &Value, sessions: &mut BTreeSet<String>, parts: &mut BTreeSet<&
             sessions.insert(id.into());
         }
     }
+}
+/// Most context chunks read for one turn, and most prompt-less turns shown.
+const CONTEXT_CHUNKS: usize = 300;
+const ORPHAN_TURNS: usize = 10;
+
+fn context_turn(
+    conn: &mut SqliteConnection,
+    session: &str,
+    prompt_id: &str,
+) -> Result<Option<Value>> {
+    let rows = documents(diesel::sql_query("SELECT e.document FROM dashboard_session_facts f JOIN dashboard_events e ON e.id=f.id WHERE f.session=? AND f.category='context' AND f.entity=? ORDER BY json_extract(e.document,'$.payload.entry_index'), json_extract(e.document,'$.payload.part_index'), e.recorded_at_us LIMIT ?")
+        .bind::<Text,_>(session).bind::<Text,_>(prompt_id).bind::<BigInt,_>(CONTEXT_CHUNKS as i64 + 1).load::<Document>(conn)?)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(crate::workflow::context_turn(&rows, CONTEXT_CHUNKS)))
 }
 fn documents(rows: Vec<Document>) -> Result<Vec<Value>> {
     rows.into_iter()
@@ -1406,6 +1457,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn turn_context_is_read_by_prompt_and_stays_out_of_the_timeline() {
+        let f = Fixture::new();
+        f.append("prompt-1", "workflow.prompt_recorded", json!({"session_id":"s", "prompt_id":"p1", "part_count":1, "part_index":0, "text":"first", "occurred_at":"2026-01-01T00:00:01Z"}), 1);
+        let context = |id: &str, prompt: &str, entry: &str, index: u64, text: &str, at: i64| {
+            f.append(id, "workflow.context_recorded", json!({"session_id":"s","task_id":"t","prompt_id":prompt,"entry_id":entry,"entry_index":index,"role":"assistant","kind":"text","part_index":0,"part_count":1,"text":text,"entry_bytes":text.len(),"truncated":false,"occurred_at":format!("2026-01-01T00:00:0{at}Z")}), at);
+        };
+        context("c-b", "p1", "b", 1, "second <b>", 3);
+        context("c-a", "p1", "a", 0, "first", 2);
+        context("c-orphan", "p9", "z", 0, "stray", 4);
+        f.store.refresh().unwrap();
+        let turns = f.store.session_context("s", &["p1".to_owned()]).unwrap();
+        assert_eq!(turns["p1"]["entries"][0]["text"], "first");
+        assert_eq!(turns["p1"]["entries"][1]["text"], "second <b>");
+        assert!(!turns.contains_key("p9"));
+        let orphans = f.store.session_orphan_context("s").unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0]["prompt_id"], "p9");
+        assert_eq!(f.store.session_prompts("s", 0, 10).unwrap().unwrap().1, 1);
+        let (rows, _) = f.store.session_timeline("s", "all", "oldest", 0, 50).unwrap().unwrap();
+        assert!(rows.iter().all(|row| row["event_type"] != "workflow.context_recorded"));
+    }
     #[test]
     fn prompt_pages_keep_order_and_report_total() {
         let f = Fixture::new();

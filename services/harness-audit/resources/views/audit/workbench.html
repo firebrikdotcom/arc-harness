@@ -7,6 +7,7 @@
 <label class="audit-switch"><input type="checkbox" role="switch" id="collect-jev"{% if collection_settings.jev %} checked{% endif %}><span><strong>Jev</strong><small>Routing decisions, confidence, tokens, and costs</small></span></label>
 <label class="audit-switch"><input type="checkbox" role="switch" id="collect-workflow"{% if collection_settings.workflow %} checked{% endif %}><span><strong>Workflow</strong><small>Session tasks, phases, decisions, and results</small></span></label>
 <label class="audit-switch"><input type="checkbox" role="switch" id="collect-prompts"{% if collection_settings.workflow_prompts %} checked{% endif %}><span><strong>Store user prompts</strong><small>Capture future prompts when Workflow is enabled. Saved prompts remain visible when turned off.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="collect-context"{% if collection_settings.workflow_context %} checked{% endif %}><span><strong>Store turn context</strong><small>Store what the agent read and wrote during each reply; requires Workflow. Saved history is retained.</small></span></label>
 </div><div class="settings-actions"><button class="button" type="submit">Save collection settings</button><span id="collection-status" role="status" aria-live="polite">Changes apply after saving.</span></div></form>
 <noscript>Enable JavaScript to save settings, or use the settings API.</noscript>
 </section>
@@ -17,7 +18,7 @@
  form.addEventListener('submit', async event => {
   event.preventDefault(); const button = form.querySelector('button'); button.disabled = true; status.textContent = 'Saving…';
   try {
-   const response = await fetch('/api/audit/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jev:document.getElementById('collect-jev').checked,workflow:document.getElementById('collect-workflow').checked,workflow_prompts:document.getElementById('collect-prompts').checked})});
+   const response = await fetch('/api/audit/settings', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({jev:document.getElementById('collect-jev').checked,workflow:document.getElementById('collect-workflow').checked,workflow_prompts:document.getElementById('collect-prompts').checked,workflow_context:document.getElementById('collect-context').checked})});
    if (!response.ok) throw new Error('The settings could not be saved.');
    status.textContent = 'Saved. Collection settings are active.';
   } catch (error) { status.textContent = error.message; }

@@ -566,3 +566,8 @@ details[open] > .row-summary::after { content:"\2212"; }
 .ia-alert--stale { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 10%, var(--panel)); }
 .ia-chip--end { --ia: var(--ink-muted); }
 .ia-quiet { color: var(--warning); font-weight: 600; }
+.turn-context { margin:.5rem 0 0; }
+.turn-context summary { cursor:pointer; color:var(--ink-muted); font-size:.8rem; }
+.turn-context__list { list-style:none; margin:.5rem 0 0; padding:0; display:grid; gap:.6rem; }
+.turn-entry__meta { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin:0 0 .25rem; }
+.turn-entry .prompt-text { margin:0; font-size:.8rem; }

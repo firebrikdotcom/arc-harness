@@ -124,6 +124,10 @@ const HOST_TEMPLATES: &[TemplateDef] = &[
         source: include_str!("../resources/views/audit/partials/timeline-items.html"),
     },
     TemplateDef {
+        name: TemplateName("audit/partials/turn-context.html"),
+        source: include_str!("../resources/views/audit/partials/turn-context.html"),
+    },
+    TemplateDef {
         name: TemplateName("audit/partials/signal-items.html"),
         source: include_str!("../resources/views/audit/partials/signal-items.html"),
     },
@@ -1349,6 +1353,9 @@ async fn workflow_page(
                                 .0
                         );
                     }
+                    if indexed_query.list.is_none() {
+                        session["orphan_context"] = json!(store.session_orphan_context(&id)?);
+                    }
                     session["todo_rows"] = json!(store.session_todos(
                         &id,
                         indexed_query.todos_offset.unwrap_or(0),
@@ -1495,6 +1502,7 @@ fn timeline<'a>(session: &'a Value, query: &WorkflowQuery) -> Vec<&'a Value> {
             // A long prompt arrives in parts; the timeline shows it once.
             (e["event_type"] != "workflow.prompt_recorded"
                 || p["part_index"].as_u64().unwrap_or(0) == 0)
+                && e["event_type"] != "workflow.context_recorded"
                 && query.task_id.as_deref().is_none_or(|id| p["task_id"] == id)
                 && query.todo_id.as_deref().is_none_or(|id| p["todo_id"] == id)
                 && (category.is_empty() || e["category"] == category.as_str())
@@ -1534,6 +1542,47 @@ fn timeline<'a>(session: &'a Value, query: &WorkflowQuery) -> Vec<&'a Value> {
 }
 
 fn stored_timeline(
+    store: &ReportStore,
+    id: &str,
+    query: &WorkflowQuery,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<Option<(Vec<Value>, usize)>> {
+    let Some((mut rows, total)) = stored_timeline_rows(store, id, query, offset, limit)? else {
+        return Ok(None);
+    };
+    attach_turn_context(store, id, &mut rows)?;
+    Ok(Some((rows, total)))
+}
+
+/// Give each prompt row on this page its stored turn context, read by prompt ID.
+fn attach_turn_context(store: &ReportStore, id: &str, rows: &mut [Value]) -> anyhow::Result<()> {
+    let is_prompt = |row: &Value| {
+        row["category"] == "prompt" && row["payload"]["prompt_id"].as_str().is_some()
+    };
+    let mut ids: Vec<String> = rows
+        .iter()
+        .filter(|row| is_prompt(row))
+        .filter_map(|row| row["payload"]["prompt_id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let turns = store.session_context(id, &ids)?;
+    for row in rows.iter_mut().filter(|row| is_prompt(row)) {
+        if let Some(turn) = row["payload"]["prompt_id"]
+            .as_str()
+            .and_then(|prompt| turns.get(prompt))
+        {
+            row["turn_context"] = turn.clone();
+        }
+    }
+    Ok(())
+}
+
+fn stored_timeline_rows(
     store: &ReportStore,
     id: &str,
     query: &WorkflowQuery,
@@ -4194,6 +4243,48 @@ mod tests {
         registry_tera(&registry)
             .render("audit/workflow.html", &context)
             .expect("Workflow session renders")
+    }
+
+    #[test]
+    fn workflow_page_shows_turn_context_under_its_prompt_and_for_unstored_prompts() {
+        let rows = vec![
+            json!({"event_type":"workflow.task_started","payload":{"session_id":"s","task_id":"t","name":"Repair parser","status":"running","occurred_at":"2026-10-02T00:00:01Z"}}),
+            json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t","prompt_id":"p1","part_index":0,"part_count":1,"text":"Fix it","occurred_at":"2026-10-02T00:00:02Z"}}),
+        ];
+        let mut session = crate::workflow::sessions(&rows).remove(0);
+        let chunk = |entry: &str, index: u64, text: &str, kind: &str, truncated: bool| {
+            json!({"payload":{"session_id":"s","prompt_id":"p1","entry_id":entry,"entry_index":index,"role":"assistant","kind":kind,"part_index":0,"part_count":1,"text":text,"entry_bytes":text.len(),"truncated":truncated,"input_tokens":10,"output_tokens":4,"occurred_at":"2026-10-02T00:00:03Z"}})
+        };
+        let turn = crate::workflow::context_turn(
+            &[
+                chunk("a", 0, "read the <file>", "tool_use", false),
+                chunk("b", 1, "all done", "text", true),
+            ],
+            10,
+        );
+        let query = WorkflowQuery {
+            session_id: Some("s".into()),
+            ..WorkflowQuery::default()
+        };
+        let mut indexed = timeline_rows(&session, &query);
+        for row in indexed.iter_mut().filter(|row| row["category"] == "prompt") {
+            row["turn_context"] = turn.clone();
+        }
+        session["indexed_total"] = json!(indexed.len());
+        session["indexed_rows"] = json!(indexed);
+        let mut orphan = crate::workflow::context_turn(&[chunk("o", 0, "lone <i>reply</i>", "text", false)], 10);
+        orphan["prompt_id"] = json!("p-unstored");
+        session["orphan_context"] = json!([orphan]);
+        let html = render_session(&session, &query);
+        assert!(html.contains("Turn context · 2 entries · 20 input · 8 output tokens"));
+        assert!(html.find("read the &lt;file&gt;").unwrap() < html.find("all done").unwrap());
+        assert!(html.contains("tool_use") && html.contains("truncated") && html.contains("bytes"));
+        assert!(!html.contains("<file>"));
+        assert!(html.contains("Turn context without a stored prompt"));
+        assert!(html.contains("lone &lt;i&gt;reply&lt;&#x2F;i&gt;"));
+        assert!(html.contains("p-unstored"));
+        session["orphan_context"] = json!([]);
+        assert!(!render_session(&session, &query).contains("without a stored prompt"));
     }
 
     #[test]
