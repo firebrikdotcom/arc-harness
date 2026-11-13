@@ -44,6 +44,10 @@ const WORKBENCH_SCRIPT: &str = include_str!("../public/workbench.js");
 
 const HOST_TEMPLATES: &[TemplateDef] = &[
     TemplateDef {
+        name: TemplateName("components/session-directory-live.html"),
+        source: include_str!("../resources/views/components/session-directory-live.html"),
+    },
+    TemplateDef {
         name: TemplateName("components/favicon.html"),
         source: include_str!("../resources/views/components/favicon.html"),
     },
@@ -3685,6 +3689,63 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}.dashboard.sqlite{suffix}", path.display()));
+        }
+    }
+
+    #[test]
+    fn directory_refresh_moves_new_interaction_first_and_keeps_applied_filters() {
+        use diesel::connection::SimpleConnection;
+        use diesel::prelude::*;
+        use diesel::sql_types::{BigInt, Text};
+        let path =
+            std::env::temp_dir().join(format!("audit-recency-{}.sqlite", uuid::Uuid::new_v4()));
+        let mut connection = SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+        connection.batch_execute("CREATE TABLE events (id INTEGER PRIMARY KEY, aggregate_type TEXT NOT NULL DEFAULT 'AuditEvent', aggregate_id TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL, sequence BIGINT NOT NULL, timestamp_utc_us BIGINT NOT NULL)").unwrap();
+        let store = ReportStore::open(path.to_str().unwrap()).unwrap();
+        let query = WorkflowQuery {
+            agent: Some("Codex".into()),
+            sort: Some("latest".into()),
+            per_page: Some(1),
+            page: Some(1),
+            ..Default::default()
+        };
+        for (index, (id, day, agent)) in [
+            ("older", "01", "Codex"),
+            ("newer", "02", "Codex"),
+            ("excluded", "03", "Other"),
+            ("older", "04", "Codex"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let payload = json!({"event_type":"workflow.prompt_recorded", "payload":{"session_id":id,"agent":agent,"prompt_id":format!("p-{index}"),"text":"Repair session","occurred_at":format!("2026-11-{day}T12:00:00Z")}});
+            diesel::sql_query("INSERT INTO events (id,aggregate_id,event_type,payload,sequence,timestamp_utc_us) VALUES (?,?,'AuditEventRecorded',?,1,?)")
+                .bind::<BigInt,_>(index as i64+1).bind::<Text,_>(format!("event-{index}"))
+                .bind::<Text,_>(payload.to_string()).bind::<BigInt,_>(index as i64+1).execute(&mut connection).unwrap();
+            store.refresh().unwrap();
+            if index >= 1 {
+                let directory = stored_directory(&store, &query).unwrap();
+                assert_eq!(
+                    directory["rows"][0]["session_id"],
+                    if index == 3 { "older" } else { "newer" }
+                );
+                assert_eq!(directory["total"], 2);
+                assert_eq!(directory["page"], 1);
+                assert!(directory["next"].as_str().unwrap().contains("agent=Codex"));
+                assert!(directory["next"].as_str().unwrap().contains("sort=latest"));
+            }
+        }
+        drop(store);
+        drop(connection);
+        for suffix in [
+            "",
+            "-wal",
+            "-shm",
+            ".dashboard.sqlite",
+            ".dashboard.sqlite-wal",
+            ".dashboard.sqlite-shm",
+        ] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
     }
 

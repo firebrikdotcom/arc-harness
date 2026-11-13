@@ -1,0 +1,10 @@
+{
+  "goal": "Keep recently interacted-with Workflow sessions at the top and refresh the list live.",
+  "deliverables": ["services/harness-audit/", "progress.md"],
+  "constraints": ["Preserve filters and pagination.", "Do not change secrets or existing event history."],
+  "non_goals": [{"description": "No changes to collection hooks or unrelated services."}],
+  "acceptance": [
+    {"id": "audit-tests", "criterion": "Audit service regression tests pass", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked", "-q"]},
+    {"id": "live", "criterion": "Rebuilt dashboard serves live recency ordering after restart"}
+  ]
+}

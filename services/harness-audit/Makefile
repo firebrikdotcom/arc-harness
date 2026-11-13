@@ -11,3 +11,4 @@ check:
 
 test:
 	cargo test
+	node --test tests/session-directory-live.test.cjs

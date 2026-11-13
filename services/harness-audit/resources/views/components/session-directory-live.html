@@ -1,0 +1,33 @@
+<script>
+(() => {
+ const selector = '[data-directory-live]';
+ let pending = false;
+ const interacting = () => [...document.querySelectorAll(selector)].some(node => node.contains(document.activeElement) || node.querySelector('a:hover, button:hover'));
+ async function refresh() {
+  if (document.hidden || pending || interacting()) return;
+  pending = true;
+  const url = location.href;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+   // Use the applied URL, never the form's unsubmitted edits.
+   const response = await fetch(url, {cache: 'no-store', signal: controller.signal});
+   if (!response.ok || response.redirected) return;
+   const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+   if (document.hidden || location.href !== url || interacting()) return;
+   const regions = [...document.querySelectorAll(selector)];
+   const replacements = regions.map(node => page.querySelector(`[data-directory-live="${node.dataset.directoryLive}"]`));
+   if (replacements.some(node => !node)) return;
+   regions.forEach((node, index) => node.replaceWith(replacements[index]));
+   window.localizeClientTimes?.();
+  } catch {
+   // Retain the current directory on transient failures; retry on the next tick.
+  } finally {
+   clearTimeout(timeout);
+   pending = false;
+  }
+ }
+ setInterval(refresh, 5000);
+ document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+})();
+</script>
