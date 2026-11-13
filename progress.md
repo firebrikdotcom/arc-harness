@@ -1,5 +1,19 @@
 # Audit RAM repair handoff
 
+## Turn context capture — 2026-11-13
+
+Contract: `tasks/turn-context-capture.json` (run `20261113T181625Z-12323`). Integration branch: `feature/turn-context-capture` (from master `e0fd3d7`).
+
+Wire contract (decided): setting `telemetry.workflow_context` (bool, default false, needs `workflow`); event `workflow.context_recorded` with `prompt_id`, `entry_id`, `entry_index`, `role`, `kind`, `part_index`, `part_count`, `text` (≤2000 bytes), `entry_bytes`, `truncated`, optional `sha256` and token counts (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`). Entry cap 16000 bytes; turn cap 500 entries.
+
+Tasks (each in its own worktree and branch):
+- [ ] hook — Stop-hook capture in `scripts/workflow_audit.py`, `workflow_gate.py`, `install-hooks.sh`, `harness_config.py`, `audit_transport.py`, tests. Check: `python3 -m unittest tests.test_workflow_audit tests.test_unified_config`.
+- [ ] service — `services/harness-audit/src/`: switch, validation, Workflow page. Check: `cargo test --manifest-path services/harness-audit/Cargo.toml`.
+- [ ] docs — `docs/setup.md`.
+- [ ] integrate — merge, `scripts/verify.sh --project .`, review.
+
+Follow-ups: API recording proxy for hidden system instructions and tool definitions (non-goal here).
+
 ## Jev provider diagnostics — 2026-11-11 (v0.2.10)
 
 - The TypeSafe router (vault `agent-skills/typesafe-routing`, live through `~/.agents/skills`) now raises `ProviderRejectedError` carrying `http_status` and `provider_error_code`. The harness kept only the exception type: 58 of the last seven days' advice calls were recorded as a bare `BadInputError`.

@@ -1,0 +1,34 @@
+{
+  "goal": "When each agent reply ends, record the context the agent considered during that turn (the new slice of the session log: prompt, injected instructions, tool inputs and results, replies, token counts) as audit events linked to the stored prompt, behind an off-by-default switch.",
+  "deliverables": [
+    "scripts/workflow_audit.py",
+    "scripts/workflow_gate.py",
+    "scripts/install-hooks.sh",
+    "scripts/harness_config.py",
+    "scripts/audit_transport.py",
+    "services/harness-audit/src/",
+    "tests/test_workflow_audit.py",
+    "tests/test_unified_config.py",
+    "docs/setup.md"
+  ],
+  "constraints": [
+    "New switch workflow_context, default false, requires Workflow; mirrors workflow_prompts (re-read on every hook, turning it off stops capture and discards queued records, stored history stays).",
+    "Capture at the Stop hook (turn end) for both Claude Code and Codex: read the session log from the byte offset saved in the session state, never the whole file, and save the new offset.",
+    "Each record carries the prompt_id of the turn's prompt, the entry's role and kind, its text in 2000-byte UTF-8 chunks, and the turn's token counts.",
+    "Pass text through the existing redact(); drop base64 images; cap any single entry at a fixed size and record its full byte length and SHA-256 when cut.",
+    "Hooks stay fail-open and within their timeout; a missing or unreadable session log records nothing and does not block the turn.",
+    "No new dependencies."
+  ],
+  "non_goals": [
+    {"description": "No API recording proxy; hidden system instructions and tool definitions are not captured in this task."},
+    {"description": "Do not change the phase guard, denylist, or failure budget.", "paths": ["scripts/hooks/", "scripts/permit.py", "scripts/failure_budget.py", "schemas/"]},
+    {"description": "No changes to Jev routing or the signals service.", "paths": ["services/harness-signals/", "scripts/jev_moments.py"]}
+  ],
+  "acceptance": [
+    {"id": "turn-slice", "criterion": "A Stop hook with the switch on emits context records for only the log entries added since the previous turn, linked to that turn's prompt_id", "command": ["python3", "-m", "unittest", "tests.test_workflow_audit", "-k", "context"]},
+    {"id": "switch-off", "criterion": "With workflow_context off (the default) no context record is emitted or queued", "command": ["python3", "-m", "unittest", "tests.test_unified_config"]},
+    {"id": "audit-suite", "criterion": "The existing workflow audit tests still pass", "command": ["python3", "-m", "unittest", "tests.test_workflow_audit"]},
+    {"id": "service", "criterion": "The audit service builds, accepts the new event, and the Workflow page lists a turn's context under its prompt", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml"]},
+    {"id": "docs", "criterion": "docs/setup.md documents the workflow_context switch and what is and is not captured"}
+  ]
+}
