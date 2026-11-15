@@ -331,12 +331,40 @@ impl HostPort {
     }
 }
 
+/// A configured repository: `name` is its key in the configuration (the value
+/// forms and events carry), `label` what a person reads: `OWNER/NAME` from the
+/// checkout's origin, else what the CLI could tell about it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Repository {
+    pub name: String,
+    pub path: String,
+    pub slug: Option<String>,
+    pub label: String,
+}
+
+/// A label or path from `check`, kept only when it is short and printable.
+fn display_text(value: &Value, max: usize) -> Option<String> {
+    value
+        .as_str()
+        .filter(|text| {
+            !text.trim().is_empty()
+                && text.chars().count() <= max
+                && !text.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
+}
+
 /// What `check` says about this machine's task-manager setup.
 #[derive(Debug, Clone, Default)]
 pub struct Check {
     pub enabled: bool,
     pub owner_login: Option<String>,
+    /// The names (keys of `repos` in the configuration) of the git repositories.
     pub repos: Vec<String>,
+    /// The configured repositories that are git checkouts, sorted by label.
+    pub repositories: Vec<Repository>,
+    /// One line per configured entry that is not a git checkout.
+    pub repo_problems: Vec<String>,
     pub mappings: BTreeMap<String, String>,
     /// `{id, label, connected, account, token_expires_at}`, ids safe for a link.
     pub providers: Vec<Value>,
@@ -370,16 +398,50 @@ impl Check {
                     .collect()
             })
             .unwrap_or_default();
-        let repos: Vec<String> = document["repos"]
-            .as_array()
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(Value::as_str)
-                    .filter(|name| TargetId::parse(name).is_some())
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut repositories = Vec::new();
+        let mut repo_problems = Vec::new();
+        match document["repositories"].as_array() {
+            Some(rows) => {
+                for row in rows {
+                    let Some(name) = row["name"]
+                        .as_str()
+                        .filter(|name| TargetId::parse(name).is_some())
+                    else {
+                        continue;
+                    };
+                    let path = display_text(&row["path"], 4096).unwrap_or_default();
+                    if row["git"].as_bool() != Some(true) {
+                        repo_problems.push(format!("{name}: {path} is not a git repository"));
+                        continue;
+                    }
+                    repositories.push(Repository {
+                        name: name.to_owned(),
+                        label: display_text(&row["label"], 200).unwrap_or_else(|| name.to_owned()),
+                        slug: display_text(&row["slug"], 200),
+                        path,
+                    });
+                }
+            }
+            // A CLI from before `repositories`: every name, labelled by itself.
+            None => {
+                let names = document["repos"].as_array().into_iter().flatten();
+                for name in names.filter_map(Value::as_str) {
+                    if TargetId::parse(name).is_none() {
+                        continue;
+                    }
+                    repositories.push(Repository {
+                        name: name.to_owned(),
+                        path: display_text(&document["repo_paths"][name], 4096).unwrap_or_default(),
+                        slug: None,
+                        label: name.to_owned(),
+                    });
+                }
+            }
+        }
+        let repos: Vec<String> = repositories
+            .iter()
+            .map(|repository| repository.name.clone())
+            .collect();
         let mappings = document["mappings"]
             .as_object()
             .map(|rows| {
@@ -396,6 +458,8 @@ impl Check {
                 .filter(|login| !login.is_empty())
                 .map(str::to_owned),
             repos,
+            repositories,
+            repo_problems,
             mappings,
             providers,
             allowed_hosts: document["allowed_hosts"]
@@ -416,6 +480,31 @@ impl Check {
         self.providers
             .iter()
             .find(|row| row["id"].as_str() == Some(id.as_str()))
+    }
+
+    /// What a person reads for the repository `name`; the name itself when
+    /// the configuration no longer lists it.
+    pub fn label<'a>(&'a self, name: &'a str) -> &'a str {
+        self.repositories
+            .iter()
+            .find(|repository| repository.name == name)
+            .map_or(name, |repository| repository.label.as_str())
+    }
+
+    /// The checkout of the repository `name`, when `check` gave an absolute one.
+    pub fn repo_path(&self, name: &str) -> Option<&Path> {
+        self.repositories
+            .iter()
+            .find(|repository| repository.name == name)
+            .map(|repository| Path::new(repository.path.as_str()))
+            .filter(|path| path.is_absolute())
+    }
+
+    /// The repositories and what is wrong with the rest, for a page that
+    /// offers them.
+    fn offer(&self, context: &mut Context) {
+        context.insert("repos", &self.repositories);
+        context.insert("repo_problems", &self.repo_problems);
     }
 
     fn mapped_repo(&self, provider: &ProviderId, list: &str) -> Option<&str> {
@@ -1040,7 +1129,7 @@ fn waiting_gate(state: &str) -> Option<Gate> {
 }
 
 /// The fields shared by a run summary and a run document.
-fn shape_run(run: &Value) -> Option<Value> {
+fn shape_run(run: &Value, check: &Check) -> Option<Value> {
     let id = RunId::parse(run["id"].as_str()?)?;
     let state = text(run, "state");
     let (label, tone) = state_badge(&state);
@@ -1051,6 +1140,7 @@ fn shape_run(run: &Value) -> Option<Value> {
         .zip(item_id.as_ref())
         .map(|(provider, item)| format!("/tasks/{}/items/{item}", provider.as_str()));
     let agent = text(run, "agent");
+    let repo = text(run, "repo");
     let updated_at = Some(text(run, "updated_at"))
         .filter(|at| !at.is_empty())
         .or_else(|| {
@@ -1065,7 +1155,8 @@ fn shape_run(run: &Value) -> Option<Value> {
         "provider": provider.as_ref().map(ProviderId::as_str),
         "item_id": item_id,
         "item_href": item_href,
-        "repo": text(run, "repo"),
+        "repo_label": check.label(&repo),
+        "repo": repo,
         "agent_label": agent_label(&agent),
         "state": state,
         "label": label,
@@ -1351,7 +1442,7 @@ async fn sources_page(
         .count();
     let mut context = Context::new();
     context.insert("connected_count", &connected);
-    context.insert("repos", &page.check.repos);
+    page.check.offer(&mut context);
     page.show(
         VIEW_SOURCES,
         "Task Managers",
@@ -1441,8 +1532,10 @@ async fn project_page(
             rows.iter()
                 .filter_map(|row| {
                     let list = num_id(&row["id"])?;
+                    let repo = page.check.mapped_repo(&provider, &list);
                     Some(json!({
-                        "repo": page.check.mapped_repo(&provider, &list),
+                        "repo": repo,
+                        "repo_label": repo.map(|repo| page.check.label(repo)),
                         "id": list,
                         "name": text(row, "name"),
                         "open_count": row["open_count"].as_u64().unwrap_or(0),
@@ -1469,7 +1562,7 @@ async fn project_page(
     context.insert("project", &json!({"id": id.as_str(), "name": name}));
     context.insert("lists", &lists);
     context.insert("can_associate", &associations.is_some());
-    context.insert("repos", &page.check.repos);
+    page.check.offer(&mut context);
     page.show(
         VIEW_PROJECT,
         &name,
@@ -1539,7 +1632,9 @@ async fn list_page(
     context.insert("source", source);
     context.insert("project", &project);
     context.insert("list", &json!({"id": id.as_str(), "name": name}));
-    context.insert("repo", &page.check.mapped_repo(&provider, id.as_str()));
+    let mapped = page.check.mapped_repo(&provider, id.as_str());
+    context.insert("repo", &mapped);
+    context.insert("repo_label", &mapped.map(|repo| page.check.label(repo)));
     let associations = edit::associations(
         &request,
         &page.check,
@@ -1552,7 +1647,7 @@ async fn list_page(
         &associations.as_ref().map(|found| found.get(id.as_str())),
     );
     context.insert("can_associate", &associations.is_some());
-    context.insert("repos", &page.check.repos);
+    page.check.offer(&mut context);
     context.insert("status", if done { "done" } else { "open" });
     context.insert("items", &items);
     page.show(VIEW_LIST, &name, provider.as_str(), context, breadcrumbs)
@@ -1602,7 +1697,7 @@ async fn item_page(
                         && num_id(&run["item_id"]).as_deref() == Some(id.as_str())
                         && !TERMINAL.contains(&run["state"].as_str().unwrap_or_default())
                 })
-                .find_map(shape_run)
+                .find_map(|run| shape_run(run, &page.check))
         }),
         Err(_) => None,
     };
@@ -1634,8 +1729,12 @@ async fn item_page(
     context.insert("prev", &num_id(&document["prev"]));
     context.insert("next", &num_id(&document["next"]));
     context.insert("up", &up);
-    context.insert("repos", &page.check.repos);
+    page.check.offer(&mut context);
     context.insert("default_repo", &default_repo);
+    context.insert(
+        "default_repo_label",
+        &default_repo.map(|repo| page.check.label(repo)),
+    );
     context.insert("active_run", &active_run);
     context.insert("full", &full);
     let panel = agent_pages::panel(&request, &page.check, &provider, &id, up.clone()).await;
@@ -1658,7 +1757,11 @@ async fn runs_page(
     };
     let runs: Vec<Value> = document["runs"]
         .as_array()
-        .map(|rows| rows.iter().filter_map(shape_run).collect())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|run| shape_run(run, &page.check))
+                .collect()
+        })
         .unwrap_or_default();
     let waiting = runs.iter().filter(|run| run["tone"] == "warning").count();
     let mut context = Context::new();
@@ -1690,7 +1793,7 @@ async fn run_page(
         Ok(document) => document,
         Err(failure) => return page.failed("runs", failure).await,
     };
-    let Some(mut run) = shape_run(&document) else {
+    let Some(mut run) = shape_run(&document, &page.check) else {
         return not_found();
     };
     let state = text(&document, "state");
@@ -2111,7 +2214,8 @@ if rest[0] == "check":
     if not ENABLED:
         out({"enabled": False, "owner_login": None, "repos": [], "mappings": {}, "providers": []})
     out(dict({"enabled": True, "owner_login": "me@example.com", "repos": ["arc", "harness-template", "../bad"],
-         "mappings": {"basecamp:20": "arc"}, "repo_paths": {"arc": os.path.join(here, "app")},
+         "mappings": {"basecamp:20": "arc"},
+         "repo_paths": {"arc": os.path.join(here, "app"), "harness-template": os.path.join(here, "ht")},
          "providers": [
              {"id": "basecamp", "label": "Basecamp", "connected": True, "account": "9999999", "token_expires_at": "2026-12-01T00:00:00Z"},
              {"id": "linear", "label": "Linear", "connected": False, "account": None, "token_expires_at": None},
@@ -2601,7 +2705,7 @@ sys.exit(2)
         assert_eq!(num_id(&json!("30")).as_deref(), Some("30"));
         assert_eq!(num_id(&json!(30)).as_deref(), Some("30"));
         assert!(num_id(&json!("../x")).is_none() && num_id(&json!(null)).is_none());
-        assert!(shape_run(&json!({"id": "nope", "state": "queued"})).is_none());
+        assert!(shape_run(&json!({"id": "nope", "state": "queued"}), &Check::default()).is_none());
         assert!(shape_item(&json!({"id": "x", "title": "t"})).is_none());
     }
 
@@ -3500,8 +3604,10 @@ sys.exit(2)
         assert!(!html.contains("javascript:"));
         // The forms: the list's mapped repository preselected, the plan gate ticked.
         assert!(html.contains("action=\"/tasks/basecamp/items/30/delegate\""));
-        assert!(html.contains("<option value=\"arc\" selected>arc</option>"));
-        assert!(html.contains("<option value=\"harness-template\">harness-template</option>"));
+        // A CLI without `repositories`: each name is its own label, beside its path.
+        assert!(html.contains("<option value=\"arc\" selected>arc — "));
+        assert!(html.contains("<option value=\"harness-template\">harness-template — "));
+        assert!(!html.contains("data-tm-repo-problems"));
         assert!(!html.contains("../bad"));
         assert!(html.contains("name=\"plan_gate\" value=\"on\" checked"));
         assert!(html.contains("action=\"/tasks/basecamp/items/30/comment\""));

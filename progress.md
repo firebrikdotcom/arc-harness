@@ -6,6 +6,8 @@ Updated 2026-11-14 (local). Read this first; earlier versions are in git history
 
 Shipped on `master` in `d2555c3`: create/edit lists and to-dos, full descriptions, list associations (repo + directory), open items with filter presets, attachable agents (`harness tasks agent ...`, `harness tasks attach`), dashboard pages for all of it. Verified (`scripts/verify.sh` exit 0, `make -C services/harness-audit test` 181 tests), independently reviewed, review findings fixed. Nothing is in progress.
 
+Uncommitted follow-up (contract `tasks/task-repositories-git.json`): the Repository menus show the git repository (`OWNER/NAME` or `host/path`, with its path) instead of the config nickname, a configured path that is not a git checkout is not offered, and an association's directory is checked against the repository when saved. Independently reviewed; its two findings are fixed (a plain directory inside another checkout no longer counts as a repository, in `check`, the save check and worktree creation; inherited `GIT_DIR` and kin are dropped from git calls). Left from that review, low: `check` runs up to two 2-second git calls per repository in sequence under a 20-second read timeout; the "separate clone" wording is missed for non-GitHub clones whose origin URLs differ in form; a token placed in an origin URL's path would show in a label.
+
 Where to read:
 
 | Need | File |
@@ -40,7 +42,7 @@ From the review (not acted on; also in `docs/task-managers.md` "Known gaps"):
 
 1. Fresh agent worktrees branch from the checkout's local `HEAD` with no fetch, so unpushed local commits ride into the pull request. Fix: fetch and base on `origin/HEAD`, as runs do.
 2. `done` on an `attached` agent removes the worktree while the owner's interactive session may still be in it.
-3. An association's directory is checked at agent start, not when saved (`src/tasks/edit.rs` could call `worktree::require_in_repo`).
+3. (Done in the uncommitted follow-up above.) An association's directory is checked when saved.
 4. Dashboard agent views take the SSH destination from `HARNESS_TASKS_SSH` only; call `rt.resolve_ssh()` where `main.rs` builds the runtime.
 5. The supervisor loop does blocking database and file reads on the async executor every 2 seconds; move it to the blocking pool.
 6. `attach --print` takes the agent over and records `attached` although it only prints.

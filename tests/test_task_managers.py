@@ -134,7 +134,7 @@ class Base(unittest.TestCase):
 
 class Off(Base):
     def test_absent_config_is_off(self):
-        self.assertEqual(self.json("check"), {"enabled": False, "owner_login": None, "repos": [], "mappings": {}, "repo_paths": {}, "ssh": None, "allowed_hosts": [], "require_login_header": False, "providers": [
+        self.assertEqual(self.json("check"), {"enabled": False, "owner_login": None, "repos": [], "mappings": {}, "repo_paths": {}, "repositories": [], "ssh": None, "allowed_hosts": [], "require_login_header": False, "providers": [
             {"id": name, "label": label, "connected": False, "account": None, "token_expires_at": None} for name, label in tm.SOURCES]})
         for args in (["projects"], ["lists", "--project", "1001"], ["todos", "--list", "3001"], ["get", "--item", "4001", "--json"],
                      ["seed", "--item", "4001"], ["refresh"], ["complete", "--item", "4001"], ["run", "list"]):
@@ -193,6 +193,83 @@ class Off(Base):
         os.chmod(self.token_file, 0o644)
         self.assertFalse(self.json("check")["providers"][0]["connected"])
         self.assertEqual(self.json("projects", expect=3)["error"]["code"], "token_mode")
+
+    def test_check_lists_repositories_by_their_git_identity(self):
+        self.write_config()
+        git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+        def repo(name, origin=None):
+            path = self.tmp / "repos" / name
+            path.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(path)], check=True, env=git_env, capture_output=True)
+            if origin:
+                subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True, env=git_env, capture_output=True)
+            return str(path)
+
+        (self.tmp / "repos" / "plain").mkdir(parents=True)
+        # A plain directory inside a checkout is not a repository of its own.
+        inside = Path(repo("outer")) / "inside"
+        inside.mkdir()
+        repos = {"ssh": repo("one", "git@github.com:Own-1/app.git"),
+                 "https": repo("two", "https://user:hunter2@github.com/o/web.git"),
+                 "twin": repo("three", "ssh://git@github.com:22/o/web"),
+                 "other": repo("four", "https://token:hunter2@git.example.invalid:8443/team/tool.git"),
+                 "bare": repo("local-only"),
+                 "plain": str(self.tmp / "repos" / "plain"),
+                 "inside": str(inside),
+                 "gone": str(self.tmp / "repos" / "missing")}
+        file = self.config_home / "task-managers.json"
+        config = json.loads(file.read_text())
+        file.write_text(json.dumps({**config, "repos": repos, "mappings": {}}))
+        out = self.cli("check")
+        self.assertNotIn("hunter2", out)
+        got = json.loads(out)
+        self.assertEqual((got["repos"], got["repo_paths"]), (sorted(repos), dict(sorted(repos.items()))))
+        rows = got["repositories"]
+        self.assertEqual([row["label"] for row in rows], sorted((row["label"] for row in rows), key=str.lower))
+        self.assertEqual({row["name"]: (row["git"], row["slug"], row["label"], row["path"]) for row in rows}, {
+            "ssh": (True, "Own-1/app", "Own-1/app", repos["ssh"]),
+            "https": (True, "o/web", "o/web (https)", repos["https"]),
+            "twin": (True, "o/web", "o/web (twin)", repos["twin"]),
+            "other": (True, None, "git.example.invalid/team/tool", repos["other"]),
+            "bare": (True, None, "local-only", repos["bare"]),
+            "plain": (False, None, "plain", repos["plain"]),
+            "inside": (False, None, "inside", repos["inside"]),
+            "gone": (False, None, "missing", repos["gone"])})
+
+    def test_repo_slug_reads_github_origins_only(self):
+        # The table of github_repo_from_origin_urls in the audit service.
+        for url, slug in (("https://github.com/o/r.git", "o/r"),
+                          ("https://user:secret@GitHub.com/Own-1/my.repo_x/", "Own-1/my.repo_x"),
+                          ("ssh://git@github.com:22/o/r.git", "o/r"), ("git@github.com:o/r.git\n", "o/r"),
+                          ("github.com:o/r", "o/r"), ("https://github.com/o/.git", "o/.git"),
+                          ("../origin.git", None), ("/srv/git/o/r.git", None), ("https://gitlab.com/o/r.git", None),
+                          ("https://github.com.evil.example/o/r", None), ("https://evil.example/github.com/o/r", None),
+                          ("https://github.com/o/r/extra", None), ("https://github.com/-o/r", None),
+                          ("https://github.com/o/..", None), ("https://github.com/o/r;x", None),
+                          ("git@github.com:o/r --flag", None), ("https://github.com:port/o/r", None), ("", None)):
+            self.assertEqual(tm.repo_slug(url), slug, url)
+        for url, label in (("https://user:secret@gitlab.com/o/r.git", "gitlab.com/o/r"), ("git@git.example.invalid:/srv/x.git", "git.example.invalid/srv/x"),
+                           ("https://h.example.invalid/o/r?token=secret", None), ("../origin.git", None), ("/srv/git/o/r.git", None),
+                           ("https://secret@/o/r", None)):
+            self.assertEqual(tm._remote_label(url), label, url)
+
+    def test_git_identity_ignores_an_inherited_git_dir(self):
+        git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+        real, plain = self.tmp / "real", self.tmp / "plain"
+        plain.mkdir()
+        subprocess.run(["git", "init", "-q", str(real)], check=True, env=git_env, capture_output=True)
+        with mock.patch.dict(os.environ, {"GIT_DIR": str(real / ".git"), "GIT_WORK_TREE": str(plain)}):
+            self.assertEqual(tm._git_identity(str(plain)), (False, None))
+            self.assertEqual(tm._git_identity(str(real)), (True, None))
+
+    def test_git_identity_never_raises(self):
+        self.assertEqual(tm._git_identity(str(self.tmp / "nowhere")), (False, None))
+        with mock.patch.object(tm.subprocess, "run", side_effect=subprocess.TimeoutExpired("git", 2)):
+            self.assertEqual(tm._git_identity(str(self.tmp)), (False, None))
+        with mock.patch.object(tm.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.assertEqual(tm.repositories({"demo": "/srv/demo"}),
+                             [{"name": "demo", "path": "/srv/demo", "git": False, "slug": None, "label": "demo"}])
 
     def test_unreachable_server_is_an_upstream_failure(self):
         self.write_config()

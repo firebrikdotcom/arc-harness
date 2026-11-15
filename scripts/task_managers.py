@@ -23,6 +23,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -645,6 +646,112 @@ def ssh_destination(value: Any) -> str | None:
     return value if ok else None
 
 
+def _remote_parts(url: str) -> tuple[str, str] | None:
+    """(host, path) of a remote URL in https, ssh or scp-like form, userinfo and port dropped; else None."""
+    url = url.strip()
+    if not url or any(c.isspace() for c in url):
+        return None
+    scheme = next((s for s in ("https://", "http://", "ssh://", "git://") if url.lower().startswith(s)), None)
+    if scheme:
+        authority, slash, path = url[len(scheme):].partition("/")
+        if not slash:
+            return None
+        user, at, host = authority.partition("@")
+        if not at:
+            host = authority
+        elif not user:
+            return None
+        host, colon, port = host.partition(":")
+        if colon and not re.fullmatch(r"[0-9]{1,5}", port):
+            return None
+        return host, path
+    left, colon, path = url.partition(":")
+    if not colon:
+        return None
+    user, at, host = left.partition("@")
+    if not at:
+        host = left
+    elif not user or "/" in user:
+        return None
+    return host, path
+
+
+def repo_slug(url: str) -> str | None:
+    """`OWNER/NAME` of a github.com remote URL, else None (the rule of github_repo in the audit service).
+    Only the two validated names are returned: never the URL or a credential in it."""
+    parts = _remote_parts(url)
+    if not parts or parts[0].lower() != "github.com":
+        return None
+    path = parts[1][:-1] if parts[1].endswith("/") else parts[1]
+    owner, slash, name = path.partition("/")
+    if not slash:
+        return None
+    if len(name) > 4 and name[-4:].lower() == ".git":
+        name = name[:-4]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}", owner):
+        return None
+    if name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]{1,100}", name):
+        return None
+    return f"{owner}/{name}"
+
+
+def _remote_label(url: str) -> str | None:
+    """`host/path` of a remote that is not on github.com, without userinfo, port or `.git`; else None."""
+    parts = _remote_parts(url)
+    if not parts or not re.fullmatch(r"[A-Za-z0-9.-]{1,100}", parts[0]):
+        return None
+    path = parts[1].strip("/")
+    if len(path) > 4 and path[-4:].lower() == ".git":
+        path = path[:-4]
+    label = f"{parts[0].lower()}/{path}"
+    return label if path and re.fullmatch(r"[A-Za-z0-9._~/-]{1,150}", label) else None
+
+
+GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_CEILING_DIRECTORIES")
+
+
+def _git_identity(path: str) -> tuple[bool, str | None]:
+    """(is a git checkout, its origin URL or None). Never raises; each git call is given 2 seconds."""
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, timeout=2,
+                                  stdin=subprocess.DEVNULL, env=env)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    # An inherited GIT_DIR and its kin would answer for every path, whatever -C says.
+    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_ENV}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    # The path must be the checkout's own top level: a plain directory inside some other checkout is not one.
+    top = git("rev-parse", "--show-toplevel")
+    try:
+        if not top or os.path.realpath(top) != os.path.realpath(path):
+            return False, None
+    except (OSError, ValueError):
+        return False, None
+    return True, git("config", "--get", "remote.origin.url") or None
+
+
+def repositories(repos: dict[str, str]) -> list[dict[str, Any]]:
+    """Each configured repository as the git repository it is: `OWNER/NAME` from origin when that is on
+    github.com, else `host/path`, else the checkout's directory name. The label never carries a credential."""
+    rows = []
+    for name, path in repos.items():
+        is_git, url = _git_identity(path)
+        slug = repo_slug(url) if url else None
+        folder = os.path.basename(path.rstrip("/"))
+        if not folder.isprintable() or len(folder) > 100:
+            folder = ""
+        rows.append({"name": name, "path": path, "git": is_git, "slug": slug,
+                     "label": slug or (_remote_label(url) if url else None) or folder or name})
+    shared = {row["label"] for row in rows if sum(other["label"] == row["label"] for other in rows) > 1}
+    for row in rows:
+        if row["label"] in shared:
+            row["label"] = f"{row['label']} ({row['name']})"
+    return sorted(rows, key=lambda row: (row["label"].lower(), row["name"]))
+
+
 def check(ctx: Ctx) -> dict[str, Any]:
     config = ctx.config
     providers = []
@@ -661,6 +768,7 @@ def check(ctx: Ctx) -> dict[str, Any]:
     return {"enabled": config is not None, "owner_login": (config or {}).get("owner_login"),
             "repos": sorted((config or {}).get("repos") or {}), "mappings": dict((config or {}).get("mappings") or {}),
             "repo_paths": dict(sorted(((config or {}).get("repos") or {}).items())),
+            "repositories": repositories((config or {}).get("repos") or {}),
             "ssh": ssh_destination((config or {}).get("ssh")),
             "allowed_hosts": [h.lower() for h in (config or {}).get("allowed_hosts") or []],
             "require_login_header": bool((config or {}).get("require_login_header", False)),

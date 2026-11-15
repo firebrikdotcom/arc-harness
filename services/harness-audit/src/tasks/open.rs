@@ -188,6 +188,7 @@ fn shape_row(
     repos: &BTreeMap<String, String>,
     agents: &BTreeMap<String, String>,
     today: &str,
+    check: &Check,
 ) -> Option<Value> {
     let id = num_id(&item["id"])?;
     let list = named(&item["list"]);
@@ -218,6 +219,7 @@ fn shape_row(
         "due_on": due_on,
         "overdue": overdue,
         "url": http_url(&item["url"]),
+        "repo_label": repo.as_deref().map(|repo| check.label(repo)),
         "repo": repo,
     }))
 }
@@ -264,6 +266,7 @@ pub(super) async fn open_view(
         .map_err(OpenFailure::Cli)?;
     let today = today();
     let day = today.clone();
+    let labels = check.clone();
     let (page, repos, agents) = blocking(move || {
         let default_repo = |list: &str| check.mapped_repo(&provider, list).map(str::to_owned);
         let page = tm.open_items(&walk, &given, me.as_deref(), &day, &default_repo, limit)?;
@@ -299,7 +302,7 @@ pub(super) async fn open_view(
     let rows = page
         .items
         .iter()
-        .filter_map(|item| shape_row(item, &repos, &agents, &today))
+        .filter_map(|item| shape_row(item, &repos, &agents, &today, &labels))
         .collect();
     let presets = presets
         .iter()
@@ -440,7 +443,7 @@ pub(super) async fn open_page(
     context.insert("default_applied", &view.preset.is_some());
     context.insert("truncated", &view.truncated);
     context.insert("presets", &view.presets);
-    context.insert("repos", &page.check.repos);
+    page.check.offer(&mut context);
     page.show(
         VIEW_OPEN,
         "Open items",

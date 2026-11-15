@@ -18,7 +18,8 @@ use super::{
     act, acted, item_target, not_found, plain, words, Check, Failure, NumId, Outcome, ProviderId,
     Tasks, TextFile, READ_TIMEOUT,
 };
-use crate::task_managers::{valid_date, PROVIDER};
+use crate::task_managers::agents::worktree;
+use crate::task_managers::{valid_date, TaskError, PROVIDER};
 
 /// A list name or a to-do title, in characters.
 pub(super) const NAME_LIMIT: usize = 200;
@@ -235,11 +236,14 @@ pub(super) fn directory(raw: &str) -> Result<Option<PathBuf>, HttpResponse> {
     Ok(Some(PathBuf::from(text)))
 }
 
-/// A repository name from a form, kept only when `check` lists it.
+/// A repository name from a form, kept only when `check` lists it as a git
+/// repository.
 pub(super) fn listed_repo(check: &Check, raw: &str) -> Result<Option<String>, HttpResponse> {
     match raw.trim() {
         "" => Ok(None),
-        repo if check.repos.iter().any(|name| name == repo) => Ok(Some(repo.to_owned())),
+        repo if check.repositories.iter().any(|found| found.name == repo) => {
+            Ok(Some(repo.to_owned()))
+        }
         _ => Err(bad_request("Choose a configured repository.")),
     }
 }
@@ -282,11 +286,12 @@ pub(super) async fn associations(
             let association = tm
                 .store()
                 .resolve_association(&list, default.as_deref())
-                .map_err(|error| crate::task_managers::TaskError::Internal(error.to_string()))?;
+                .map_err(|error| TaskError::Internal(error.to_string()))?;
             if let Some(association) = association {
                 found.insert(
                     list,
                     json!({
+                        "repo_label": check.label(&association.repo),
                         "repo": association.repo,
                         "dir": association.dir,
                         "source": association.source,
@@ -552,13 +557,23 @@ pub(super) async fn associate(
         Ok(dir) => dir,
         Err(response) => return response,
     };
-    let Some((tm, _)) = state::facade(&request) else {
+    let Some((tm, rt)) = state::facade(&request) else {
         return state::unavailable();
     };
     let back = association_back(&provider, &list, &form.back_project);
     let allowed = check.repos.clone();
     let list_id = list.as_str().to_owned();
     let done = on_runtime(move || async move {
+        // A directory is checked against its repository when it is chosen,
+        // and again when an agent starts in it.
+        if let Some(dir) = dir.as_deref() {
+            let path = check.repo_path(&repo).ok_or_else(|| {
+                TaskError::Usage(format!(
+                    "repos of task-managers.json has no path for {repo}"
+                ))
+            })?;
+            worktree::require_in_repo(&rt, dir, path, check.label(&repo))?;
+        }
         tm.associate(&list_id, &repo, dir.as_deref(), &allowed)
             .await
             .map(|_| ())

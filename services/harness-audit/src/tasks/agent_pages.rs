@@ -47,7 +47,7 @@ fn timestamp(seconds: i64) -> String {
 
 /// One agent for the templates. Only the checked code and item id go into
 /// attributes; nothing here is task-manager text.
-fn shape_agent(view: &AgentView) -> Option<Value> {
+fn shape_agent(view: &AgentView, check: &Check) -> Option<Value> {
     let record = &view.record;
     if !valid_code(&record.code) || !valid_id(&record.item_id) {
         return None;
@@ -69,6 +69,7 @@ fn shape_agent(view: &AgentView) -> Option<Value> {
         "live": live,
         "agent_label": agent_label(record.agent_kind.as_str()),
         "repo": record.repo,
+        "repo_label": check.label(&record.repo),
         "worktree": record.worktree,
         "branch": record.branch,
         "created_worktree": record.created_worktree,
@@ -96,6 +97,7 @@ pub(super) async fn panel(
         return None;
     }
     let (tm, rt) = state::facade(request)?;
+    let labels = check.clone();
     let check = check.clone();
     let provider = provider.clone();
     let item = item.as_str().to_owned();
@@ -119,15 +121,16 @@ pub(super) async fn panel(
     .await;
     Some(match found {
         Ok((live, association)) => json!({
-            "agent": live.as_ref().and_then(shape_agent),
+            "agent": live.as_ref().and_then(|view| shape_agent(view, &labels)),
             "repo": association.as_ref().map(|a| a.repo.clone()),
+            "repo_label": association.as_ref().map(|a| labels.label(&a.repo)),
             "dir": association.as_ref().and_then(|a| a.dir.clone()),
             "source": association.as_ref().map(|a| a.source),
             "error": null,
         }),
         Err(error) => {
             tracing::warn!(error = %error, "task agent panel could not be read");
-            json!({"agent": null, "repo": null, "dir": null, "source": null, "error": super::clip(&error.to_string(), 400)})
+            json!({"agent": null, "repo": null, "repo_label": null, "dir": null, "source": null, "error": super::clip(&error.to_string(), 400)})
         }
     })
 }
@@ -148,7 +151,10 @@ pub(super) async fn agents_page(
     };
     let listed = blocking(move || agents::list(&tm, &rt)).await;
     let rows: Vec<Value> = match listed {
-        Ok(views) => views.iter().filter_map(shape_agent).collect(),
+        Ok(views) => views
+            .iter()
+            .filter_map(|view| shape_agent(view, &page.check))
+            .collect(),
         Err(error) => return task_refused(&error),
     };
     let live = rows.iter().filter(|row| row["live"] == true).count();

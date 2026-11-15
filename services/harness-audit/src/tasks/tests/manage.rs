@@ -401,7 +401,47 @@ async fn associations_are_stored_shown_and_removed() {
     let fixture = Fixture::new(true);
     let app = service!(fixture);
     let (cookie, token) = signed_in!(app);
-    let dir = fixture.directory.display().to_string();
+    // The repository's checkout, a linked worktree of it, another clone of
+    // the same origin, and a repository of its own.
+    sh(
+        &fixture.directory,
+        "git init -q -b main ht && cd ht && git config user.name t && git config user.email t@example.com \
+         && echo hi > README && git add README && git commit -qm init \
+         && git remote add origin https://github.com/example/ht.git \
+         && git worktree add -q -b feature ../ht-wt && cd .. \
+         && git clone -q ht ht-clone && git -C ht-clone remote set-url origin git@github.com:example/ht.git \
+         && git init -q foreign",
+    );
+    let checkout = fixture.directory.join("ht").display().to_string();
+    for (name, said) in [
+        ("foreign", "dir must be the checkout of harness-template at"),
+        (
+            "ht-clone",
+            "dir is a separate clone of harness-template; use the checkout at",
+        ),
+        ("missing", "dir must be the checkout of harness-template at"),
+    ] {
+        let dir = fixture.directory.join(name).display().to_string();
+        let (status, _, body) = post!(
+            app,
+            loopback(),
+            "/tasks/basecamp/lists/20/associate",
+            Some(cookie.clone()),
+            Some(vec![
+                ("csrf_token", token.as_str()),
+                ("repo", "harness-template"),
+                ("dir", dir.as_str()),
+            ])
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert!(body.contains(said), "{name}: {body}");
+        assert!(body.contains(&checkout), "{name}: {body}");
+        assert!(body.contains("linked worktree of it"), "{name}: {body}");
+    }
+    let state = fixture.state().await;
+    assert!(state.store().association("20").unwrap().is_none());
+
+    let dir = fixture.directory.join("ht-wt").display().to_string();
     let (status, location, body) = post!(
         app,
         loopback(),
@@ -416,7 +456,7 @@ async fn associations_are_stored_shown_and_removed() {
     );
     assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
     assert_eq!(location, "/tasks/basecamp/projects/10");
-    let state = fixture.state().await;
+    state.refresh().unwrap();
     let stored = state.store().association("20").unwrap().unwrap();
     assert_eq!(
         (stored.repo.as_str(), stored.dir.as_deref()),
@@ -426,14 +466,14 @@ async fn associations_are_stored_shown_and_removed() {
     let (_, html) = get!(app, loopback(), "/tasks/basecamp/projects/10");
     assert!(html.contains("action=\"/tasks/basecamp/lists/20/associate\""));
     assert!(html.contains("action=\"/tasks/basecamp/lists/20/unassociate\""));
-    assert!(html.contains("<option value=\"harness-template\" selected>harness-template</option>"));
+    assert!(html.contains("<option value=\"harness-template\" selected>harness-template — "));
     assert!(html.contains("name=\"back_project\" value=\"10\""));
     // List 21 has neither a stored association nor a mapping.
     assert!(html.contains("Not associated"));
     let (_, html) = get!(app, loopback(), "/tasks/basecamp/lists/20");
     assert!(html.contains("Repository harness-template"));
 
-    // A directory that does not exist is refused by the facade.
+    // A directory that does not exist is refused.
     let (status, _, _) = post!(
         app,
         loopback(),
@@ -466,6 +506,68 @@ async fn associations_are_stored_shown_and_removed() {
         .calls()
         .iter()
         .all(|call| !call[0].contains("associate")));
+}
+
+#[actix_web::test]
+async fn repositories_are_offered_by_their_git_identity() {
+    let fixture = Fixture::with(
+        true,
+        r#"{"repos": ["arc", "harness-template", "odd", "../bad"], "repositories": [
+            {"name": "arc", "path": os.path.join(here, "app"), "git": True, "slug": "example/arc", "label": "example/arc"},
+            {"name": "harness-template", "path": os.path.join(here, "ht"), "git": False, "slug": None, "label": "ht"},
+            {"name": "odd", "path": os.path.join(here, "odd"), "git": True, "slug": None, "label": "o\x01dd"},
+            {"name": "../bad", "path": "/x", "git": True, "slug": None, "label": "bad"}]}"#,
+        |_| (),
+    );
+    let app = service!(fixture);
+    let (cookie, token) = signed_in!(app);
+    // The label and the path are what a person reads; the configuration key is the value.
+    let (_, html) = get!(app, loopback(), "/tasks/basecamp/items/30");
+    assert!(html.contains("<option value=\"arc\" selected>example&#x2F;arc — "));
+    assert!(html.contains("&#x2F;app</option>"));
+    // A label that cannot be shown falls back to the key.
+    assert!(html.contains("<option value=\"odd\">odd — "));
+    // An entry that is not a git repository is named, not offered.
+    assert!(!html.contains("value=\"harness-template\""));
+    assert!(html.contains("data-tm-repo-problems"));
+    assert!(html.contains("harness-template: "));
+    assert!(!html.contains("..&#x2F;bad") && !html.contains("../bad"));
+    let (_, html) = get!(app, loopback(), "/tasks/basecamp/open");
+    assert!(html.contains("<option value=\"arc\">example&#x2F;arc — "));
+    assert!(html.contains("<span class=\"mono tm-path\">example&#x2F;arc</span>"));
+    let (_, html) = get!(app, loopback(), "/tasks/basecamp/lists/20");
+    assert!(html.contains("Repository example&#x2F;arc"));
+    let (_, html) = get!(app, loopback(), "/tasks");
+    assert!(html.contains("<span class=\"mono tm-path\">example&#x2F;arc</span>"));
+
+    for repo in ["harness-template", "../bad", "example/arc"] {
+        let (status, _, body) = post!(
+            app,
+            loopback(),
+            "/tasks/basecamp/lists/20/associate",
+            Some(cookie.clone()),
+            Some(vec![("csrf_token", token.as_str()), ("repo", repo)])
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repo}");
+        assert!(body.contains("Choose a configured repository."), "{body}");
+    }
+    let (status, _) = get!(
+        app,
+        loopback(),
+        "/tasks/basecamp/open?repo=harness-template"
+    );
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A stored association whose key left the configuration shows the key.
+    let state = fixture.state().await;
+    state
+        .associate("21", "gone", None, &["gone".to_string()])
+        .await
+        .unwrap();
+    let (_, html) = get!(app, loopback(), "/tasks/basecamp/projects/10");
+    assert!(html.contains("<span class=\"mono tm-path\">gone</span>"));
+    assert!(html.contains("<span class=\"mono tm-path\">example&#x2F;arc</span>"));
+    assert!(html.contains("data-tm-repo-problems"));
 }
 
 #[actix_web::test]

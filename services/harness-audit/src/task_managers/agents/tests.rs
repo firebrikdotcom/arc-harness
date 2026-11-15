@@ -469,9 +469,11 @@ async fn start_refuses_a_directory_outside_the_repository() {
     // Another clone of the same origin, a repository of its own, and a plain directory.
     sh(
         &f.root,
-        "git clone -q origin.git clone && git init -q other && mkdir plain",
+        "git clone -q origin.git clone && git init -q other && mkdir plain \
+         && git clone -q origin.git twin && git -C twin remote set-url origin git@github.com:o/r.git",
     );
-    for name in ["clone", "other", "plain"] {
+    let checkout = f.root.join("app").display().to_string();
+    for name in ["clone", "other", "plain", "twin"] {
         let error = start(
             &tm,
             &f.rt,
@@ -485,8 +487,53 @@ async fn start_refuses_a_directory_outside_the_repository() {
         .await
         .unwrap_err();
         assert_eq!(error.kind(), "usage", "{name}");
-        assert!(error.to_string().contains("linked worktree"), "{error}");
+        // The refusal names the repository and where its checkout is; a clone
+        // of the same origin is told apart from an unrelated directory.
+        let said = if name == "twin" {
+            format!("dir is a separate clone of app; use the checkout at {checkout} or a linked worktree of it")
+        } else {
+            format!("dir must be the checkout of app at {checkout} or a linked worktree of it")
+        };
+        assert_eq!(error.to_string(), said, "{name}");
     }
+    // A plain directory inside some other checkout does not stand for it.
+    sh(&f.root, "mkdir other/inside");
+    let error = worktree::require_in_repo(
+        &f.rt,
+        &f.root.join("other"),
+        &f.root.join("other/inside"),
+        "inside",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.ends_with("is not a git repository"), "{error}");
+    let error = worktree::create(&f.rt, &f.root.join("other/inside"), "30")
+        .unwrap_err()
+        .to_string();
+    assert!(error.ends_with("is not a git repository"), "{error}");
+    // The label is what the caller passes; no origin URL or credential is echoed.
+    sh(
+        &f.root,
+        "git -C twin remote set-url origin https://user:hunter2@github.com/o/r.git",
+    );
+    let error = worktree::require_in_repo(&f.rt, &f.root.join("twin"), &f.root.join("app"), "o/r")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("separate clone of o/r;"), "{error}");
+    assert!(
+        !error.contains("hunter2") && !error.contains("github.com"),
+        "{error}"
+    );
+    let plain = f.root.join("plain");
+    let error = worktree::require_in_repo(&f.rt, &f.root.join("app"), &plain, "o/r").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the repository path of o/r ({}) is not a git repository",
+            plain.display()
+        )
+    );
+    worktree::require_in_repo(&f.rt, &f.root.join("app2"), &f.root.join("app"), "o/r").unwrap();
     // A stored association's directory is checked the same way.
     tm.associate(
         "100",

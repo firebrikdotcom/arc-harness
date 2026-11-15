@@ -211,7 +211,7 @@ pub async fn start(
                 ));
             }
             // Only the allowlisted repository's checkout or a linked worktree of it.
-            worktree::require_in_repo(rt, &dir, repo_path, &repo)?;
+            worktree::require_in_repo(rt, &dir, repo_path, config.label(&repo))?;
             let branch = worktree::current_branch(rt, &dir).ok().flatten();
             (dir, branch, false)
         }

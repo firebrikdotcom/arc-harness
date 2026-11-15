@@ -183,6 +183,18 @@ impl Runtime {
                 .map(|(name, path)| (name, PathBuf::from(path)))
                 .filter(|(_, path)| path.is_absolute())
                 .collect(),
+            labels: check["repositories"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| {
+                    let (name, label) = (row["name"].as_str()?, row["label"].as_str()?);
+                    let shown = !label.trim().is_empty()
+                        && label.chars().count() <= 200
+                        && !label.chars().any(char::is_control);
+                    shown.then(|| (name.to_string(), label.to_string()))
+                })
+                .collect(),
             mappings: map(&check["mappings"]),
             ssh: self.ssh.clone().or_else(|| {
                 check["ssh"]
@@ -199,12 +211,19 @@ impl Runtime {
 pub struct Config {
     pub repos: Vec<String>,
     pub repo_paths: BTreeMap<String, PathBuf>,
+    /// repo -> what a person reads for it (`OWNER/NAME` from its origin).
+    pub labels: BTreeMap<String, String>,
     /// `basecamp:<list id>` -> repo.
     pub mappings: BTreeMap<String, String>,
     pub ssh: Option<String>,
 }
 
 impl Config {
+    /// What a person reads for `repo`; the name itself when `check` gave no label.
+    pub fn label<'a>(&'a self, repo: &'a str) -> &'a str {
+        self.labels.get(repo).map_or(repo, String::as_str)
+    }
+
     /// The configured default repo of a list, when it is an allowed repo.
     pub fn default_repo(&self, list_id: &str) -> Option<String> {
         self.mappings

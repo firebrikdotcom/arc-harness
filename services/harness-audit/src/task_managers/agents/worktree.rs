@@ -6,12 +6,23 @@ use std::process::Command;
 
 use rand::Rng;
 
+use super::done::github_repo;
 use super::{path_str, run_ok, Runtime};
 use crate::task_managers::{TaskError, PROVIDER};
 
 pub(crate) fn git(rt: &Runtime, dir: &Path, args: &[&str]) -> Result<String, TaskError> {
     let mut command = Command::new(&rt.git);
     command.arg("-C").arg(dir).args(args);
+    // An inherited GIT_DIR and its kin would answer for every directory, whatever -C says.
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
+    ] {
+        command.env_remove(name);
+    }
     run_ok(
         command,
         &format!("git {}", args.first().copied().unwrap_or("")),
@@ -27,6 +38,12 @@ pub fn create(
     if !repo_path.is_absolute() || !repo_path.is_dir() {
         return Err(TaskError::Usage(format!(
             "the repository path {} is not an existing absolute directory",
+            repo_path.display()
+        )));
+    }
+    if !is_checkout(rt, repo_path) {
+        return Err(TaskError::Usage(format!(
+            "the repository path {} is not a git repository",
             repo_path.display()
         )));
     }
@@ -77,25 +94,62 @@ pub fn common_dir(rt: &Runtime, dir: &Path) -> Result<PathBuf, TaskError> {
         .map_err(|e| TaskError::Internal(format!("could not resolve the git directory: {e}")))
 }
 
+/// The origin a checkout fetches from, reduced to what two clones of one
+/// repository share: `OWNER/NAME` on github.com, else the URL without a
+/// trailing `/` or `.git`. Compared only, never shown.
+fn origin_identity(rt: &Runtime, dir: &Path) -> Option<String> {
+    let url = git(rt, dir, &["config", "--get", "remote.origin.url"]).ok()?;
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    Some(github_repo(url).unwrap_or_else(|| {
+        let plain = url.trim_end_matches('/');
+        plain.strip_suffix(".git").unwrap_or(plain).to_string()
+    }))
+}
+
+/// Whether `path` is a checkout's own top level. A plain directory inside some
+/// other checkout is not: it would otherwise stand for that whole checkout.
+fn is_checkout(rt: &Runtime, path: &Path) -> bool {
+    git(rt, path, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .and_then(|top| PathBuf::from(top.trim()).canonicalize().ok())
+        .is_some_and(|top| path.canonicalize().ok() == Some(top))
+}
+
 /// Refuse `dir` unless it is the checkout at `repo_path` (the allowlisted
-/// repository `repo`) or a linked worktree of it.
+/// repository a person knows as `label`) or a linked worktree of it. Another
+/// clone of the same origin is not the repository: it is named as such.
 pub fn require_in_repo(
     rt: &Runtime,
     dir: &Path,
     repo_path: &Path,
-    repo: &str,
+    label: &str,
 ) -> Result<(), TaskError> {
-    let expected = common_dir(rt, repo_path).map_err(|_| {
+    let checkout = repo_path.display();
+    let not_git = || {
         TaskError::Usage(format!(
-            "the repository path of {repo} is not a git repository"
+            "the repository path of {label} ({checkout}) is not a git repository"
         ))
-    })?;
-    if common_dir(rt, dir).ok().as_ref() != Some(&expected) {
+    };
+    if !is_checkout(rt, repo_path) {
+        return Err(not_git());
+    }
+    let expected = common_dir(rt, repo_path).map_err(|_| not_git())?;
+    let found = common_dir(rt, dir).ok();
+    if found.as_ref() == Some(&expected) {
+        return Ok(());
+    }
+    let origin = origin_identity(rt, repo_path);
+    if found.is_some() && origin.is_some() && origin_identity(rt, dir) == origin {
         return Err(TaskError::Usage(format!(
-            "dir must be the checkout of {repo} or a linked worktree of it"
+            "dir is a separate clone of {label}; use the checkout at {checkout} or a linked worktree of it"
         )));
     }
-    Ok(())
+    Err(TaskError::Usage(format!(
+        "dir must be the checkout of {label} at {checkout} or a linked worktree of it"
+    )))
 }
 
 /// The default branch `origin/HEAD` names. Unresolved is a refusal, never a

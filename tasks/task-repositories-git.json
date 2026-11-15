@@ -1,0 +1,32 @@
+{
+  "goal": "In Task Managers, the Repository choice lists git repositories (OWNER/NAME from the checkout's origin, with its path) instead of the configured nicknames, and a selected directory is checked against the chosen repository when it is selected, not only when an agent starts.",
+  "deliverables": [
+    "scripts/task_managers.py",
+    "services/harness-audit/src/tasks.rs",
+    "services/harness-audit/src/tasks/",
+    "services/harness-audit/src/task_managers/agents/",
+    "services/harness-audit/resources/views/tasks/",
+    "tests/test_task_managers.py",
+    "docs/task-managers.md",
+    "progress.md"
+  ],
+  "constraints": [
+    "The config key stays the stored id, form value, event payload and --repo value; no migration of stored events.",
+    "A configured path that is not a git repository is not offered and is reported as a configuration problem.",
+    "A directory corresponds to a repository only when it is that checkout or a linked worktree of it; a separate clone with the same origin is refused with a message that says so.",
+    "A label never carries URL credentials.",
+    "No new dependencies.",
+    "Preserve the uncommitted turn-context edits in the working tree."
+  ],
+  "non_goals": [
+    {"description": "Do not change event storage or migrations.", "paths": ["services/harness-audit/migrations/"]},
+    {"description": "Do not discover repositories outside task-managers.json."},
+    {"description": "Do not touch the turn-context work in progress.", "paths": ["services/harness-audit/src/workflow.rs", "services/harness-audit/src/reports.rs", "services/harness-audit/resources/views/audit/"]}
+  ],
+  "acceptance": [
+    {"id": "driver", "criterion": "check reports repositories with git identity, label and problems for non-git paths", "command": ["python3", "-m", "pytest", "-q", "tests/test_task_managers.py"]},
+    {"id": "pages", "criterion": "Repository options show the git repository label and path with the config key as value; a non-git entry is not offered; a directory outside the repository is refused when the association is saved", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked", "tasks::"]},
+    {"id": "agents", "criterion": "Agent start refusals name the git repository and identify a separate clone", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked", "task_managers::"]},
+    {"id": "suite", "criterion": "The audit service suite still passes", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked"]}
+  ]
+}
