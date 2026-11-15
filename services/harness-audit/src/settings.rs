@@ -27,6 +27,12 @@ pub struct HookSettings {
     pub worktree_cleanup: bool,
     pub session_log_cleanup: bool,
     pub retrieval_reminder: bool,
+    #[serde(default = "default_true")]
+    pub phase_guard: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for HookSettings {
@@ -40,6 +46,7 @@ impl Default for HookSettings {
             worktree_cleanup: true,
             session_log_cleanup: true,
             retrieval_reminder: true,
+            phase_guard: true,
         }
     }
 }

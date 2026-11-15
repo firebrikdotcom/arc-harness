@@ -35,6 +35,18 @@ if [ "${HARNESS_HOOK_DISABLE:-0}" = "1" ]; then
   exit 0
 fi
 
+# The dashboard's "Phase guard" switch (hooks.phase_guard in the shared config).
+if command -v python3 >/dev/null 2>&1 && python3 -c '
+import json, os, sys
+path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "harness", "config.json")
+try:
+    sys.exit(0 if json.load(open(path)).get("hooks", {}).get("phase_guard") is False else 1)
+except Exception:
+    sys.exit(1)
+' 2>/dev/null; then
+  exit 0
+fi
+
 block() {
   printf '%s\n' "HARNESS BLOCK: $*" >&2
   exit 2

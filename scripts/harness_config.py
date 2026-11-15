@@ -76,6 +76,7 @@ DEFAULTS = {
         "worktree_cleanup": True,
         "session_log_cleanup": True,
         "retrieval_reminder": True,
+        "phase_guard": True,
     },
     "workflow": {
         "_doc": "Todo gate mode for every agent's hooks. audit records prompts, plans, tool calls and checks but denies nothing; enforce requires plans and decision checkpoints. A .harness-enforce file at a project root enforces that project in audit mode.",
@@ -140,7 +141,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     fields = {"typesafe": {"mode", "model", "checkpoints", "changed_at", "reason", "enforce_decisions", "decision_ttl_seconds", "min_confidence",
                            "context_request_limit", "read_only_commands", "read_only_tools"},
               "dispatch": {"enabled", "max_workers", "max_context_bytes", "timeout_seconds", "profiles"}, "telemetry": {"enabled", "jev", "workflow", "workflow_prompts", "workflow_context"},
-              "hooks": {"session_startup", "workflow_audit", "workflow_gate", "command_observer", "failure_tracking", "worktree_cleanup", "session_log_cleanup", "retrieval_reminder"},
+              "hooks": {"session_startup", "workflow_audit", "workflow_gate", "command_observer", "failure_tracking", "worktree_cleanup", "session_log_cleanup", "retrieval_reminder", "phase_guard"},
               "sites": {"enabled", "url", "token_file"}, "workflow": {"todo_gate"}, "amp": {"enabled", "effort", "poll_seconds"}}
     for section, keys in fields.items():
         part = value.get(section)

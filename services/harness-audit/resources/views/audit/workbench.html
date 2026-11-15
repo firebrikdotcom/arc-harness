@@ -37,6 +37,7 @@
 <label class="audit-switch"><input type="checkbox" role="switch" id="hook-worktree-cleanup"{% if hook_settings.worktree_cleanup %} checked{% endif %}><span><strong>Worktree cleanup</strong><small>Remove eligible merged, clean worktrees at session start and after merges.</small></span></label>
 <label class="audit-switch"><input type="checkbox" role="switch" id="hook-session-log-cleanup"{% if hook_settings.session_log_cleanup %} checked{% endif %}><span><strong>Session-log cleanup</strong><small>Trim embedded images from idle agent session logs.</small></span></label>
 <label class="audit-switch"><input type="checkbox" role="switch" id="hook-retrieval-reminder"{% if hook_settings.retrieval_reminder %} checked{% endif %}><span><strong>Code search reminder</strong><small>Show the semantic-search reminder before Claude Code Grep and Glob.</small></span></label>
+<label class="audit-switch"><input type="checkbox" role="switch" id="hook-phase-guard"{% if hook_settings.phase_guard %} checked{% endif %}><span><strong>Phase guard</strong><small>Block Claude Code tool calls outside an active harness phase in the harness repository.</small></span></label>
 </div><div class="settings-actions"><button class="button" type="submit">Save and apply hook settings</button><span id="hook-status" role="status" aria-live="polite">Settings apply to new agent sessions.</span></div></form>
 <noscript>Enable JavaScript to save hook settings.</noscript>
 </section>
@@ -44,7 +45,7 @@
 (() => {
  const form = document.getElementById('hook-settings');
  const status = document.getElementById('hook-status');
- const fields = ['session_startup','workflow_audit','workflow_gate','command_observer','failure_tracking','worktree_cleanup','session_log_cleanup','retrieval_reminder'];
+ const fields = ['session_startup','workflow_audit','workflow_gate','command_observer','failure_tracking','worktree_cleanup','session_log_cleanup','retrieval_reminder','phase_guard'];
  form.addEventListener('submit', async event => {
   event.preventDefault(); const button = form.querySelector('button'); button.disabled = true; status.textContent = 'Saving and applying…';
   try {
