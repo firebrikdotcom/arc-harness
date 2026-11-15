@@ -9,6 +9,9 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::domain::audit_event::aggregate::AuditEventAggregate;
+use crate::domain::task_agent::aggregate::TaskAgentAggregate;
+use crate::domain::task_association::aggregate::TaskAssociationAggregate;
+use crate::domain::task_preset::aggregate::TaskPresetBookAggregate;
 
 mod agents;
 mod boards;
@@ -19,6 +22,9 @@ mod reports;
 mod routes;
 mod settings;
 mod summary;
+// The facade is consumed by the agent-runtime and dashboard slices.
+#[allow(dead_code)]
+mod task_managers;
 mod tasks;
 mod ui;
 mod workflow;
@@ -32,6 +38,11 @@ async fn main() -> anyhow::Result<()> {
         prepare_env()?;
     }
     dotenv::dotenv().ok();
+    if command == "tasks" {
+        // No log subscriber: stdout carries only the command's JSON.
+        let args: Vec<String> = env::args().skip(2).collect();
+        std::process::exit(task_managers::cli::run(&args).await);
+    }
     init_logging();
     match command.as_str() {
         "setup" => {
@@ -41,14 +52,23 @@ async fn main() -> anyhow::Result<()> {
         }
         "migrate" => migrate(),
         "serve" => serve().await,
-        other => bail!("unknown command `{other}`; expected setup, migrate, or serve"),
+        other => bail!("unknown command `{other}`; expected setup, migrate, serve, or tasks"),
     }
 }
 
-fn builder(reports: reports::ReportStore) -> ArcAppBuilder {
+fn builder(
+    reports: reports::ReportStore,
+    task_managers: Arc<task_managers::TaskManagers>,
+    task_runtime: Arc<task_managers::agents::Runtime>,
+) -> ArcAppBuilder {
     ArcApp::builder()
         .register_aggregate::<AuditEventAggregate>()
+        .register_aggregate::<TaskAssociationAggregate>()
+        .register_aggregate::<TaskPresetBookAggregate>()
+        .register_aggregate::<TaskAgentAggregate>()
         .register_data(Arc::new(reports))
+        .register_data(task_managers)
+        .register_data(task_runtime)
         .register_data(boards::Boards::shared())
         .register_data(owner::OwnerCheck::shared())
         .register_data(agents::Agents::shared())
@@ -142,6 +162,28 @@ fn start_report_worker(reports: reports::ReportStore) {
     });
 }
 
+/// Record the end of service-owned headless agent turns. It never signals or
+/// resumes an agent, and leaves alone any agent you hold.
+fn start_task_supervisor(
+    task_managers: Arc<task_managers::TaskManagers>,
+    runtime: Arc<task_managers::agents::Runtime>,
+) {
+    actix_web::rt::spawn(async move {
+        let mut failing = false;
+        loop {
+            match task_managers::agents::supervise_once(&task_managers, &runtime).await {
+                Ok(_) => failing = false,
+                Err(error) if !failing => {
+                    failing = true;
+                    tracing::warn!(error=%error, "Task agent supervision failed; retrying");
+                }
+                Err(_) => {}
+            }
+            actix_web::rt::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+}
+
 async fn serve() -> anyhow::Result<()> {
     for key in ["APP_URL", "SECRET_KEY", "DATABASE_URL"] {
         if env::var_os(key).is_none() {
@@ -159,8 +201,15 @@ async fn serve() -> anyhow::Result<()> {
     let reports = reports::ReportStore::open(&env::var("DATABASE_URL")?)?;
     reports.refresh()?;
     start_report_worker(reports.clone());
+    // Task Managers index tables are created and caught up from events here.
+    let task_managers =
+        Arc::new(task_managers::TaskManagers::open(&env::var("DATABASE_URL")?).await?);
     // The local Arc patch skips replay when no projectors are registered;
     // incremental reports own all read paths and preserve historical events.
-    builder(reports).serve(host, port).await?;
+    let task_runtime = Arc::new(task_managers::agents::Runtime::from_env());
+    start_task_supervisor(task_managers.clone(), task_runtime.clone());
+    builder(reports, task_managers, task_runtime)
+        .serve(host, port)
+        .await?;
     Ok(())
 }

@@ -1,0 +1,45 @@
+{
+  "goal": "Extend Task Managers (Basecamp) so the owner can create lists and to-dos, update to-dos, read full descriptions, associate lists with a repo and directory, see and filter open items, and dispatch an attachable interactive agent on an item. Feature logic and state live in the Arc service (services/harness-audit) as event-sourced aggregates; the Python CLI stays a thin provider driver.",
+  "deliverables": [
+    "scripts/task_managers.py",
+    "scripts/task_managers_write.py",
+    "scripts/audit-service.sh",
+    "scripts/harness",
+    "services/harness-audit/src/main.rs",
+    "services/harness-audit/src/domain.rs",
+    "services/harness-audit/src/domain/",
+    "services/harness-audit/src/task_managers/",
+    "services/harness-audit/src/tasks.rs",
+    "services/harness-audit/src/tasks/",
+    "services/harness-audit/resources/views/tasks/",
+    "services/harness-audit/public/task-managers.css",
+    "services/harness-audit/public/task-managers.js",
+    "tests/fake_basecamp.py",
+    "tests/task-managers-create.sh",
+    "docs/task-managers.md",
+    "AGENTS.md"
+  ],
+  "constraints": [
+    "Python modules use the standard library only; no new Rust dependency.",
+    "Task-manager text is untrusted: fenced for agents, never in file names, branch names, commit messages, pull requests or event payloads.",
+    "Free text reaches the CLI through a file path, never an argument.",
+    "A write is one request, never repeated after a failure except once after a 401 and a successful refresh; forget the project cache after any write.",
+    "Ids are validated before anything runs; requests go only to configured provider hosts without following redirects.",
+    "Every /tasks route passes host check, owner gate, Origin check and CSRF in the documented order.",
+    "Only repositories named in repos of task-managers.json may receive an agent or a run.",
+    "No Arc projectors are registered; index tables are created on open and caught up from events.",
+    "A dispatched agent's first headless turn is read-only; edits only after attach.",
+    "Work on master in the main checkout; no commits unless the user asks."
+  ],
+  "non_goals": [
+    {"description": "The gated pipeline stays as it is.", "paths": ["scripts/task_managers_runs.py"]},
+    {"description": "Leave the unrelated uncommitted audit changes alone (styles.css, turn-context.html, reports.rs, ui.rs, workflow.rs, tasks/turn-context-json.json)."},
+    {"description": "No new providers besides Basecamp; the seed packet keeps its current bounds; no Rust HTTP client."}
+  ],
+  "acceptance": [
+    {"id": "create", "criterion": "list-create, todo-create and todo-update each send exactly one write, an update keeps untouched fields, a failed write is not repeated, the project cache is dropped; get --full returns a long description whole", "command": ["sh", "tests/task-managers-create.sh"]},
+    {"id": "existing", "criterion": "Existing task-manager behaviour still passes", "command": ["sh", "-c", "sh tests/task-managers.sh && sh tests/task-managers-write.sh && sh tests/task-managers-seed.sh && sh tests/task-managers-runs.sh && sh tests/task-managers-auth.sh"]},
+    {"id": "service", "criterion": "Service tests pass: associations (unknown repo refused, survives restart, removal restores config default), open-item filters (AND, no done items, default preset), agents (start records session and code, attach --print gives the exact resume command, done opens one draft PR and removes the worktree, second start refused), and every new /tasks route (gate order, id validation, argv)", "command": ["make", "-C", "services/harness-audit", "test"]},
+    {"id": "docs", "criterion": "docs/task-managers.md covers the new commands, exits, routes, state and security notes; AGENTS.md maps the new modules"}
+  ]
+}

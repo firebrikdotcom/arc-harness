@@ -82,6 +82,25 @@ a.tm-title:hover { text-decoration: underline; }
 .tm-pr { border: 2px solid var(--border); background: var(--raised); padding: 1rem 1.1rem; margin-bottom: 1.5rem; overflow-wrap: anywhere; }
 .tm-log { margin: 0; padding: .9rem 1rem; background: var(--ink); color: var(--panel); font: .7rem/1.6 var(--mono); max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .tm-log--plan { max-height: 32rem; }
+.tm-form input[type="text"], .tm-form input[type="date"] { width: 100%; border: 2px solid var(--border); background: var(--raised); color: var(--ink); padding: .45rem .55rem; font: inherit; }
+.tm-inline { display: inline-flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end; margin: 0; }
+.tm-inline .row { margin-bottom: 0; }
+.tm-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 1rem; align-items: end; }
+.tm-filters .tm-actions { grid-column: 1 / -1; }
+.tm-preset-save { margin-top: 1rem; border-top: 1px dashed var(--border-subtle); padding-top: 1rem; }
+.tm-presets { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+.tm-presets li { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.tm-presets .chip { text-decoration: none; }
+.tm-row-actions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.tm-row-actions form { margin: 0; }
+.tm-code { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .75rem; }
+.tm-code .mono, .tm-code code { font-weight: 700; overflow-wrap: anywhere; }
+.tm-code [data-tm-copied] { border-color: var(--success); }
+.tm-meta--stack { grid-template-columns: 1fr; gap: .6rem; }
+.tm-assoc { display: grid; gap: .35rem; }
+.tm-assoc__edit summary { cursor: pointer; font: 700 .62rem var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
+.tm-assoc__edit form { margin-top: .6rem; }
+.tm-assoc__edit .tm-inline + .tm-inline { margin-top: .5rem; }
 @media (max-width: 960px) { .tm-split { grid-template-columns: 1fr; } }
 @media (max-width: 760px) {
   .tm-tabs .tm-chip-runs { margin-left: 0; }

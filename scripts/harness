@@ -1724,6 +1724,14 @@ case "$COMMAND" in
     exec bash "$SCRIPT_DIR/sites.sh" "$@"
     ;;
   tasks)
+    # Attachable agents live in the audit service; every other subcommand is the Python driver.
+    case "${1:-}" in
+      attach|agent)
+        HARNESS_DB_ROOT="${HARNESS_DB_ROOT:-$ROOT/.harness-db}"
+        export HARNESS_DB_ROOT
+        exec sh "$SCRIPT_DIR/audit-service.sh" tasks "$@"
+        ;;
+    esac
     exec python3 "$SCRIPT_DIR/task_managers.py" --db-root "${HARNESS_DB_ROOT:-$ROOT/.harness-db}" "$@"
     ;;
   board)

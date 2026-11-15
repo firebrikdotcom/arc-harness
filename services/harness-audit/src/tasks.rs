@@ -37,6 +37,11 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use tera::Context;
 
+mod agent_pages;
+mod edit;
+mod open;
+mod state;
+
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 /// `run start` reads the item from the task manager before it answers.
@@ -85,6 +90,8 @@ const TEMPLATES: &[TemplateDef] = &[
     view!("item.html"),
     view!("runs.html"),
     view!("run.html"),
+    view!("open.html"),
+    view!("agents.html"),
 ];
 
 const VIEW_OFF: &str = "capabilities/harness-audit-tasks/off.html";
@@ -1393,6 +1400,9 @@ async fn source_page(
             .unwrap_or_default();
     }
     context.insert("projects", &projects);
+    if source["connected"] == true {
+        context.insert("open_section", &open::section(&page, &provider).await);
+    }
     page.show(
         VIEW_SOURCE,
         &label,
@@ -1441,11 +1451,25 @@ async fn project_page(
                 .collect()
         })
         .unwrap_or_default();
+    let list_ids = lists
+        .iter()
+        .filter_map(|list| list["id"].as_str().map(str::to_owned));
+    let associations =
+        edit::associations(&request, &page.check, &provider, list_ids.collect()).await;
+    let mut lists = lists;
+    for list in &mut lists {
+        let found = list["id"]
+            .as_str()
+            .and_then(|list| associations.as_ref()?.get(list));
+        list["association"] = found.cloned().unwrap_or(Value::Null);
+    }
     let label = text(source, "label");
     let mut context = Context::new();
     context.insert("source", source);
     context.insert("project", &json!({"id": id.as_str(), "name": name}));
     context.insert("lists", &lists);
+    context.insert("can_associate", &associations.is_some());
+    context.insert("repos", &page.check.repos);
     page.show(
         VIEW_PROJECT,
         &name,
@@ -1516,6 +1540,19 @@ async fn list_page(
     context.insert("project", &project);
     context.insert("list", &json!({"id": id.as_str(), "name": name}));
     context.insert("repo", &page.check.mapped_repo(&provider, id.as_str()));
+    let associations = edit::associations(
+        &request,
+        &page.check,
+        &provider,
+        vec![id.as_str().to_owned()],
+    )
+    .await;
+    context.insert(
+        "association",
+        &associations.as_ref().map(|found| found.get(id.as_str())),
+    );
+    context.insert("can_associate", &associations.is_some());
+    context.insert("repos", &page.check.repos);
     context.insert("status", if done { "done" } else { "open" });
     context.insert("items", &items);
     page.show(VIEW_LIST, &name, provider.as_str(), context, breadcrumbs)
@@ -1530,6 +1567,7 @@ async fn item_page(
     session: Session,
     registry: web::Data<UiRegistry>,
     path: web::Path<(String, String)>,
+    query: Option<web::Query<edit::ItemQuery>>,
 ) -> HttpResponse {
     let page = open_page!(request, session, registry);
     let (raw_provider, raw_id) = path.into_inner();
@@ -1538,7 +1576,16 @@ async fn item_page(
     else {
         return not_found();
     };
-    let document = match page.tasks.clone().item(provider.clone(), id.clone()).await {
+    let full = edit::ItemQuery::full(query.as_ref());
+    let read = if full {
+        page.tasks
+            .clone()
+            .item_full(provider.clone(), id.clone())
+            .await
+    } else {
+        page.tasks.clone().item(provider.clone(), id.clone()).await
+    };
+    let document = match read {
         Ok(document) => document,
         Err(failure) => return page.failed(provider.as_str(), failure).await,
     };
@@ -1590,6 +1637,9 @@ async fn item_page(
     context.insert("repos", &page.check.repos);
     context.insert("default_repo", &default_repo);
     context.insert("active_run", &active_run);
+    context.insert("full", &full);
+    let panel = agent_pages::panel(&request, &page.check, &provider, &id, up.clone()).await;
+    context.insert("agent_panel", &panel);
     page.show(VIEW_ITEM, &title, provider.as_str(), context, breadcrumbs)
         .await
 }
@@ -1997,8 +2047,11 @@ pub fn config(cfg: &mut web::ServiceConfig) {
                 .app_data(text_form())
                 .route(web::post().to(run_reject)),
         )
-        .service(run_cancel)
-        .service(sources_page)
+        .service(run_cancel);
+    agent_pages::config(cfg);
+    open::config(cfg);
+    edit::config(cfg);
+    cfg.service(sources_page)
         .service(source_page)
         .service(project_page)
         .service(list_page)
@@ -2023,6 +2076,8 @@ mod tests {
     const RUN: &str = "0123456789abcdef0123456789abcdef";
     const RUN_BUILDING: &str = "ffffffffffffffffffffffffffffffff";
     const RUN_REVIEW: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    /// A well-formed attach code no agent holds.
+    const CODE: &str = "tm-abc123";
 
     /// A stand-in for `scripts/task_managers.py` that logs every argv it gets
     /// and the content and mode of any text file it is handed.
@@ -2032,7 +2087,8 @@ here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "argv.log"), "a") as log:
     log.write(json.dumps(args) + "\n")
-assert args[0] == "--db-root" and os.environ["HARNESS_DB_ROOT"] == args[1]
+# The agent runtime calls the CLI without HARNESS_DB_ROOT; the bridge always sets it.
+assert args[0] == "--db-root" and os.environ.get("HARNESS_DB_ROOT", args[1]) == args[1]
 rest = args[2:]
 ENABLED = __ENABLED__
 RUN, RUN_BUILDING, RUN_REVIEW = "0123456789abcdef0123456789abcdef", "f" * 32, "a" * 32
@@ -2055,7 +2111,7 @@ if rest[0] == "check":
     if not ENABLED:
         out({"enabled": False, "owner_login": None, "repos": [], "mappings": {}, "providers": []})
     out(dict({"enabled": True, "owner_login": "me@example.com", "repos": ["arc", "harness-template", "../bad"],
-         "mappings": {"basecamp:20": "arc"},
+         "mappings": {"basecamp:20": "arc"}, "repo_paths": {"arc": os.path.join(here, "app")},
          "providers": [
              {"id": "basecamp", "label": "Basecamp", "connected": True, "account": "9999999", "token_expires_at": "2026-12-01T00:00:00Z"},
              {"id": "linear", "label": "Linear", "connected": False, "account": None, "token_expires_at": None},
@@ -2077,7 +2133,37 @@ if rest[0] == "todos":
 if rest[0] == "get":
     if opt("--item") not in ("30", "31"):
         out({"error": {"code": "not_found", "message": "no such item"}}, 4)
-    out({"item": dict(ITEM, id=opt("--item"), description_text="first line\n<img src=x onerror=alert(3)>"), "prev": None, "next": "31", "up": "20"})
+    description = "FULL-START " + "y" * 5000 + " FULL-END" if "--full" in rest else "first line\n<img src=x onerror=alert(3)>"
+    out({"item": dict(ITEM, id=opt("--item"), description_text=description), "prev": None, "next": "31", "up": "20"})
+if rest[0] == "seed":
+    out({"packet": "<<<TASK-MANAGER-UNTRUSTED sha256=x bytes=5>>>\nhello\n<<<END-TASK-MANAGER-UNTRUSTED>>>"})
+if rest[0] == "list-create":
+    keep("--name-file")
+    if "--description-file" in rest:
+        keep("--description-file")
+    out({"list": {"id": "25", "name": "made", "url": "https://3.basecamp.com/1/lists/25"}})
+if rest[0] == "todo-create":
+    keep("--title-file")
+    if "--description-file" in rest:
+        keep("--description-file")
+    out({"item": dict(ITEM, id="32")})
+if rest[0] == "todo-update":
+    for option in ("--title-file", "--description-file"):
+        if option in rest:
+            keep(option)
+    out({"item": ITEM})
+if rest[0] == "me":
+    out({"person": {"id": "7", "name": "Ana"}})
+if rest[0] == "open-walk":
+    out({"items": [
+        {"id": "40", "title": "<b>open one</b>", "project": PROJECT, "list": LIST, "status": "open",
+         "assignees": [{"id": "7", "name": "Ana <i>"}], "due_on": "2020-01-01", "url": "https://3.basecamp.com/1/todos/40"},
+        {"id": "41", "title": "second", "project": PROJECT, "list": {"id": "21", "name": "List B"}, "status": "open",
+         "assignees": [{"id": "8", "name": "Bo"}], "due_on": "2999-01-01", "url": "javascript:alert(4)"},
+        {"id": "42", "title": "third", "project": {"id": "11", "name": "Other"}, "list": {"id": "22", "name": "List C"},
+         "status": "open", "assignees": [], "due_on": None, "url": None},
+        {"id": "43", "title": "finished", "project": PROJECT, "list": LIST, "status": "done", "assignees": [], "due_on": None},
+    ], "truncated": opt("--list") == "22", "limit": int(opt("--limit"))})
 if rest[0] == "comment":
     keep("--text-file")
     out({"comment_id": "1", "url": "https://3.basecamp.com/c/1"})
@@ -2120,6 +2206,8 @@ sys.exit(2)
     struct Fixture {
         directory: PathBuf,
         tasks: Arc<Tasks>,
+        /// A file-backed event database for the Task Managers state.
+        database: String,
     }
 
     impl Fixture {
@@ -2141,8 +2229,70 @@ sys.exit(2)
             std::fs::write(&script, source).unwrap();
             let mut tasks = Tasks::new(script, &directory, "me");
             adjust(&mut tasks);
-            let tasks = Arc::new(tasks);
-            Self { directory, tasks }
+            Self::at(directory, Arc::new(tasks))
+        }
+
+        /// The fixture around a bridge: an event database and fake agent binaries.
+        fn at(directory: PathBuf, tasks: Arc<Tasks>) -> Self {
+            use diesel::connection::SimpleConnection;
+            use diesel::Connection;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(directory.join("bin")).unwrap();
+            let database = directory.join("events.sqlite").display().to_string();
+            diesel::SqliteConnection::establish(&database)
+                .unwrap()
+                .batch_execute(include_str!("../migrations/00000000000000_arc_base/up.sql"))
+                .unwrap();
+            let root = directory.display();
+            for (name, body) in [
+                (
+                    "claude",
+                    format!("for a; do printf '%s\\n' \"$a\"; done >> {root}/claude.args\necho --- >> {root}/claude.args\necho '{{\"type\":\"result\",\"is_error\":false}}'\n"),
+                ),
+                ("codex", "exit 1\n".to_owned()),
+                (
+                    "gh",
+                    format!("echo \"$*\" >> {root}/gh.args\ncase \"$*\" in \"pr list\"*) echo '[]' ;; *) echo https://github.com/example/arc/pull/9 ;; esac\n"),
+                ),
+            ] {
+                let path = directory.join("bin").join(name);
+                std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            Self {
+                directory,
+                tasks,
+                database,
+            }
+        }
+
+        /// The agent runtime, on the fake CLI and the fake binaries.
+        fn runtime(&self) -> crate::task_managers::agents::Runtime {
+            crate::task_managers::agents::Runtime {
+                tasks_cli: vec![
+                    "python3".into(),
+                    self.directory.join("fake_task_managers.py").into(),
+                    "--db-root".into(),
+                    self.directory.clone().into(),
+                ],
+                state_dir: self.directory.join("agent-state"),
+                claude: self.directory.join("bin/claude").into(),
+                codex: self.directory.join("bin/codex").into(),
+                gh: self.directory.join("bin/gh").into(),
+                git: "git".into(),
+                ssh: None,
+                takeover_wait: Duration::from_secs(5),
+                session_wait: Duration::from_secs(5),
+            }
+        }
+
+        /// A facade on the fixture's database, caught up.
+        async fn state(&self) -> crate::task_managers::TaskManagers {
+            let state = crate::task_managers::TaskManagers::open(&self.database)
+                .await
+                .unwrap();
+            state.refresh().unwrap();
+            state
         }
 
         fn log(&self, name: &str) -> Vec<Value> {
@@ -2199,7 +2349,8 @@ sys.exit(2)
     }
 
     macro_rules! service {
-        ($fixture:expr, $check:expr) => {
+        ($fixture:expr, $check:expr) => {{
+            let state = Arc::new($fixture.state().await);
             actix_test::init_service(
                 App::new()
                     .wrap(SessionMiddleware::new(
@@ -2209,10 +2360,12 @@ sys.exit(2)
                     .app_data(registry())
                     .app_data(web::Data::from($fixture.tasks.clone()))
                     .app_data(web::Data::new($check))
+                    .app_data(web::Data::from(state))
+                    .app_data(web::Data::new($fixture.runtime()))
                     .configure(config),
             )
             .await
-        };
+        }};
         ($fixture:expr) => {
             service!($fixture, crate::owner::tests::check("me", None))
         };
@@ -2321,6 +2474,10 @@ sys.exit(2)
             "/tasks/basecamp/items/30".to_owned(),
             "/tasks/runs".to_owned(),
             format!("/tasks/runs/{RUN}"),
+            "/tasks/basecamp/items/30?full=1".to_owned(),
+            "/tasks/basecamp/open".to_owned(),
+            "/tasks/basecamp/open?project=10&overdue=on".to_owned(),
+            "/tasks/agents".to_owned(),
         ]
     }
 
@@ -2334,6 +2491,19 @@ sys.exit(2)
             format!("/tasks/runs/{RUN}/reject/plan"),
             format!("/tasks/runs/{RUN}/reject/review"),
             format!("/tasks/runs/{RUN}/cancel"),
+            "/tasks/basecamp/projects/10/lists".to_owned(),
+            "/tasks/basecamp/lists/20/todos".to_owned(),
+            "/tasks/basecamp/items/30/edit".to_owned(),
+            "/tasks/basecamp/lists/20/associate".to_owned(),
+            "/tasks/basecamp/lists/20/unassociate".to_owned(),
+            "/tasks/basecamp/open/presets".to_owned(),
+            "/tasks/basecamp/open/presets/mine/delete".to_owned(),
+            "/tasks/basecamp/open/presets/mine/default".to_owned(),
+            "/tasks/basecamp/open/default/clear".to_owned(),
+            "/tasks/basecamp/items/30/agent".to_owned(),
+            format!("/tasks/agents/{CODE}/stop"),
+            format!("/tasks/agents/{CODE}/handback"),
+            format!("/tasks/agents/{CODE}/done"),
         ]
     }
 
@@ -2346,6 +2516,11 @@ sys.exit(2)
             ("plan_gate", "on"),
             ("text", "a comment"),
             ("reason", "a reason"),
+            ("name", "a list"),
+            ("title", "a to-do"),
+            ("due", "2026-12-01"),
+            ("preset", "mine"),
+            ("assignee", "me"),
         ]
     }
 
@@ -2891,7 +3066,7 @@ sys.exit(2)
     async fn a_missing_cli_reads_as_not_configured() {
         let directory = std::env::temp_dir().join(format!("audit-tasks-{}", uuid::Uuid::new_v4()));
         let tasks = Arc::new(Tasks::new(directory.join("missing.py"), &directory, "me"));
-        let fixture = Fixture { directory, tasks };
+        let fixture = Fixture::at(directory, tasks);
         let app = service!(fixture);
         let (status, html) = get!(app, loopback(), "/tasks");
         assert_eq!(status, StatusCode::OK);
@@ -3433,4 +3608,7 @@ sys.exit(2)
         let unknown = format!("/tasks/runs/{}", "c".repeat(32));
         assert_eq!(get!(app, loopback(), &unknown).0, StatusCode::NOT_FOUND);
     }
+
+    /// Create, edit, associations, open items and agents.
+    mod manage;
 }

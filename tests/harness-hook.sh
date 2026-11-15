@@ -38,6 +38,9 @@ export HARNESS_DB_ROOT
 # No machine-installed harness root may leak into the guard-version check.
 HARNESS_HOME=$H
 export HARNESS_HOME
+# Nor may the machine's shared config: its Phase guard switch would turn the guard off.
+XDG_CONFIG_HOME="$TMP_ROOT/config"
+export XDG_CONFIG_HOME
 # The CLI finds its root and target from the working directory: run inside the copy.
 cd "$H"
 

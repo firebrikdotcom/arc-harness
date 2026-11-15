@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Task Managers · Harness Audit</title>
+<style>
+/*__DASHBOARD_CSS__*/
+</style>
+<style>
+.proto-flag { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; border: 2px dashed var(--warning); background: #f6e7c8; color: var(--warning); padding: .55rem .9rem; margin-bottom: 1.25rem; font: 700 .66rem var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+.proto-flag button { border: 1px solid var(--warning); background: transparent; color: var(--warning); font: inherit; padding: .25rem .5rem; cursor: pointer; }
+.tm-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 1.25rem; margin-bottom: 1.25rem; }
+.tm-head h1 { margin: 0 0 .5rem; font-size: clamp(1.9rem, 4.5vw, 3.2rem); }
+.tm-head .lede { margin: 0; }
+.tm-tabs { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.5rem; border-bottom: 2px solid var(--border); padding-bottom: .75rem; }
+.chip[aria-disabled="true"] { opacity: .5; cursor: not-allowed; border-style: dashed; }
+.chip.tm-chip-off:not(.is-active) { border-style: dashed; color: var(--ink-muted); }
+.tm-card.tm-card--off { border-style: dashed; box-shadow: none; }
+.tm-card--off h3 { color: var(--ink-muted); }
+.tm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.tm-card { display: block; border: 2px solid var(--border); background: var(--panel); padding: 1.1rem 1.2rem; text-decoration: none; box-shadow: 4px 4px 0 var(--border); }
+.tm-card:hover { background: var(--raised); }
+.tm-card h3 { margin: 0 0 .75rem; font-size: 1.1rem; }
+.tm-stats { display: flex; flex-wrap: wrap; gap: .4rem; }
+.tm-conn { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem 1.5rem; margin: 0; }
+.tm-conn dt, .tm-meta dt { margin-bottom: .25rem; color: var(--ink-muted); font: 700 .6rem var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+.tm-conn dd, .tm-meta dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+.tm-toolbar { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-bottom: 1rem; }
+.tm-toolbar input[type=search] { min-width: 12rem; flex: 1 1 12rem; border: 2px solid var(--border); background: var(--raised); padding: .55rem .7rem; }
+.tm-table { width: 100%; border-collapse: collapse; }
+.tm-table th { text-align: left; padding: .55rem 1rem; border-bottom: 1px solid var(--border); color: var(--ink-muted); font: 700 .6rem var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+.tm-table td { padding: .7rem 1rem; border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+.tm-table tr:last-child td { border-bottom: 0; }
+.tm-table tbody tr[data-href] { cursor: pointer; }
+.tm-table tbody tr[data-href]:hover td { background: var(--raised); }
+.tm-table td.nowrap, .tm-table .badge { white-space: nowrap; }
+.tm-table td.check { width: 2.5rem; padding-right: 0; }
+.tm-table input[type=checkbox] { width: 1.05rem; height: 1.05rem; accent-color: var(--ink); }
+.tm-title { font-weight: 700; }
+.tm-sub { margin-top: .2rem; color: var(--ink-muted); font-size: .8rem; }
+.tm-count { font: 700 .66rem var(--mono); color: var(--ink-muted); text-transform: uppercase; letter-spacing: .04em; }
+.tm-empty { padding: 1rem 1.25rem; margin: 0; color: var(--ink-muted); font-size: .85rem; }
+.tm-head-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+.tm-head-tools select, .tm-form select { border: 2px solid var(--border); background: var(--raised); padding: .45rem .55rem; font: 700 .7rem var(--mono); }
+.tm-split { display: grid; grid-template-columns: minmax(0, 1fr) 22rem; gap: 1.5rem; align-items: start; }
+.tm-untrusted { border: 2px dashed var(--border-subtle); background: var(--raised); padding: 1rem 1.1rem; }
+.tm-untrusted .eyebrow { margin-bottom: .6rem; }
+.tm-untrusted p { margin: 0; white-space: pre-wrap; line-height: 1.55; }
+.tm-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 1rem; margin: 0 0 1.25rem; }
+.tm-pager { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem; margin-bottom: 1.25rem; }
+.tm-pager .button[aria-disabled="true"] { opacity: .4; pointer-events: none; }
+.tm-kbd { font: 700 .62rem var(--mono); border: 1px solid var(--border-subtle); padding: .1rem .3rem; }
+.tm-form label { display: block; margin: 0 0 .35rem; font: 700 .62rem var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--ink-muted); }
+.tm-form .row { margin-bottom: 1rem; }
+.tm-form select { width: 100%; }
+.tm-form .opt { display: flex; gap: .55rem; align-items: flex-start; margin-bottom: .6rem; font-size: .85rem; line-height: 1.35; }
+.tm-form .opt input { margin-top: .15rem; accent-color: var(--ink); }
+.tm-form .opt.is-off { color: var(--ink-muted); }
+.tm-note { font-size: .78rem; color: var(--ink-muted); line-height: 1.45; margin: .75rem 0 0; }
+.tm-steps { list-style: none; margin: 0; padding: 0; }
+.tm-steps li { display: grid; grid-template-columns: 1.6rem 1fr auto; gap: .6rem; align-items: start; padding: .55rem 0; border-bottom: 1px dashed var(--border-subtle); }
+.tm-steps li:last-child { border-bottom: 0; }
+.tm-dot { width: 1.1rem; height: 1.1rem; margin-top: .1rem; border: 2px solid var(--border-subtle); }
+.tm-steps li.done .tm-dot { background: var(--success); border-color: var(--success); }
+.tm-steps li.active .tm-dot { background: var(--primary); border-color: var(--border); animation: tm-pulse 1s infinite alternate; }
+.tm-steps li.waiting .tm-dot { background: var(--warning); border-color: var(--warning); }
+.tm-steps li.pending { color: var(--ink-muted); }
+.tm-steps .step-name { font-weight: 700; font-size: .88rem; }
+.tm-steps .step-detail { font-size: .78rem; color: var(--ink-muted); margin-top: .15rem; }
+.tm-steps .step-time { font: .62rem var(--mono); color: var(--ink-muted); }
+@keyframes tm-pulse { to { opacity: .45; } }
+.tm-callout { border: 2px solid var(--warning); background: #f6e7c8; padding: .9rem 1rem; margin-bottom: 1rem; }
+.tm-callout p { margin: 0 0 .7rem; font-size: .88rem; line-height: 1.45; }
+.tm-pr { border: 2px solid var(--border); background: var(--raised); padding: 1rem 1.1rem; }
+.tm-pr .mono { font-size: .68rem; text-transform: none; letter-spacing: 0; overflow-wrap: anywhere; }
+.tm-pr ul { margin: .6rem 0 0; padding-left: 1.1rem; font-size: .82rem; line-height: 1.6; }
+.tm-log { margin: 0; padding: .9rem 1rem; background: var(--ink); color: var(--panel); font: .7rem/1.6 var(--mono); max-height: 16rem; overflow: auto; white-space: pre-wrap; }
+.tm-bulkbar { position: sticky; bottom: 1rem; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; border: 2px solid var(--border); background: var(--ink); color: var(--panel); padding: .7rem 1rem; box-shadow: 4px 4px 0 var(--primary); font: 700 .72rem var(--mono); text-transform: uppercase; }
+.tm-modal-wrap { position: fixed; inset: 0; z-index: 40; background: rgb(23 23 20 / .45); display: grid; place-items: center; padding: 1rem; }
+.tm-modal { width: min(32rem, 100%); max-height: calc(100vh - 2rem); overflow: auto; border: 2px solid var(--border); background: var(--panel); box-shadow: var(--shadow-hard); }
+.tm-modal header { display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; border-bottom: 2px solid var(--border); }
+.tm-modal header h2 { margin: 0; }
+.tm-modal .body { padding: 1.25rem; }
+.tm-modal ol { margin: 0 0 1rem; padding-left: 1.2rem; font-size: .85rem; line-height: 1.5; }
+.tm-toast { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); z-index: 50; border: 2px solid var(--border); background: var(--ink); color: var(--panel); padding: .7rem 1rem; font: 700 .7rem var(--mono); text-transform: uppercase; }
+.rail__count { margin-left: auto; font: 800 .6rem var(--mono); background: var(--primary); color: var(--ink); padding: .1rem .35rem; }
+@media (max-width: 960px) { .tm-split { grid-template-columns: 1fr; } }
+@media (max-width: 760px) {
+  .workbench { grid-template: 3.5rem auto 1fr / 1fr; }
+  .rail { grid-row: auto; padding: .75rem 1rem; }
+  .rail nav { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .tm-table thead { display: none; }
+  .tm-table, .tm-table tbody, .tm-table tr, .tm-table td { display: block; width: 100%; }
+  .tm-table td { border-bottom: 0; padding: .3rem 1rem; }
+  .tm-table tr { border-bottom: 1px solid var(--border-subtle); padding: .5rem 0; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
+<div class="workbench">
+  <aside class="rail">
+    <a class="brand brand--rail" href="#/"><span class="brand__mark">A</span><span class="rail__label">Harness Audit</span></a>
+    <nav aria-label="Application">
+      <a href="#/" data-dead title="Orchestration"><span class="rail__glyph" aria-hidden="true">O</span><span class="rail__label">Orchestration</span></a>
+      <a href="#/" data-dead title="Workbench"><span class="rail__glyph" aria-hidden="true">W</span><span class="rail__label">Workbench</span></a>
+      <a href="#/" data-dead title="Workflow"><span class="rail__glyph" aria-hidden="true">W</span><span class="rail__label">Workflow</span></a>
+      <a href="#/" data-dead title="Events"><span class="rail__glyph" aria-hidden="true">E</span><span class="rail__label">Events</span></a>
+      <a href="#/" data-dead title="Architecture"><span class="rail__glyph" aria-hidden="true">A</span><span class="rail__label">Architecture</span></a>
+      <a href="#/" data-dead title="Agents"><span class="rail__glyph" aria-hidden="true">A</span><span class="rail__label">Agents</span></a>
+      <a href="#/" title="Task Managers" aria-current="page" style="display:flex;align-items:center"><span class="rail__glyph" aria-hidden="true">T</span><span class="rail__label">Task Managers</span><span class="rail__count" id="rail-count" hidden></span></a>
+    </nav>
+  </aside>
+  <header class="topbar">
+    <span class="mono">ENV / local</span>
+    <span class="mono">Harness Audit · prototype</span>
+    <span class="status-dot">ONLINE</span>
+  </header>
+  <main id="workspace" class="workspace">
+    <nav class="breadcrumbs" aria-label="Breadcrumb"><ol id="crumbs"></ol></nav>
+    <div class="proto-flag"><span>Prototype · real Basecamp snapshot · agent runs and PRs are simulated, nothing is sent anywhere</span><button type="button" data-action="reset">Reset simulation</button></div>
+    <div id="view"></div>
+  </main>
+</div>
+<div id="modal"></div>
+<div class="tm-toast" id="toast" hidden></div>
+
+<script>
+const DATA = /*__DATA__*/null;
+const REPOS = ["arc", "terminal-web", "socket-conveyor", "socket-conveyor-site", "firebrikcom", "android-terminal", "harness-template"];
+const AGENTS = { claude: "Claude Code", codex: "Codex" };
+// Every source maps onto the same three levels: container → group → item.
+const SOURCES = [
+  { key: "basecamp", name: "Basecamp", connected: true, levels: ["Project", "To-do list", "To-do"], auth: "OAuth 2 via Launchpad", kind: "Hosted" },
+  { key: "linear", name: "Linear", levels: ["Team", "Project", "Issue"], auth: "OAuth 2 or personal API key", kind: "Hosted" },
+  { key: "github", name: "GitHub Issues", levels: ["Repository", "Milestone / label", "Issue"], auth: "gh CLI token already on this machine", kind: "Hosted" },
+  { key: "jira", name: "Jira", levels: ["Project", "Board / epic", "Issue"], auth: "OAuth 2 (3LO) or API token", kind: "Hosted" },
+  { key: "asana", name: "Asana", levels: ["Workspace / project", "Section", "Task"], auth: "OAuth 2 or personal access token", kind: "Hosted" },
+  { key: "plane", name: "Plane", levels: ["Project", "Module / cycle", "Issue"], auth: "API key", kind: "Self-hosted" },
+];
+const sourceOf = (key) => SOURCES.find((s) => s.key === key);
+const TODAY = new Date(new Date().toDateString());
+const STORE_KEY = "tm-prototype-v2";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (iso) => iso ? new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—";
+const clock = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const slug = (s) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+
+// ---- data index -------------------------------------------------------
+const projects = DATA.projects;
+const lists = [], todos = [];
+for (const p of projects) for (const l of p.lists) {
+  lists.push({ ...l, project: p });
+  for (const t of l.todos) todos.push({ ...t, list: l, project: p });
+}
+const byId = (arr, id) => arr.find((x) => String(x.id) === String(id));
+
+function dueInfo(due) {
+  if (!due) return { kind: "none", label: "No date", cls: "badge--ghost" };
+  const days = Math.round((new Date(due + "T00:00:00") - TODAY) / 86400000);
+  if (days < 0) return { kind: "overdue", label: `${-days}d overdue`, cls: "badge--error" };
+  if (days <= 7) return { kind: "soon", label: days === 0 ? "Due today" : `Due in ${days}d`, cls: "badge--warning" };
+  return { kind: "later", label: due, cls: "" };
+}
+
+// ---- simulated state (per-viewer, browser storage) -------------------
+let store = { runs: [], repoMap: {}, seq: 0 };
+try { const raw = localStorage.getItem(STORE_KEY); if (raw) store = { ...store, ...JSON.parse(raw) }; } catch {}
+const save = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(store)); } catch {} };
+
+const PHASES = [
+  { key: "queued", name: "Queued", detail: "Harness run created from the to-do; packet fenced as untrusted", secs: 2 },
+  { key: "plan", name: "Plan", detail: "Agent reads the repo and writes the task contract", secs: 4 },
+  { key: "plan_gate", name: "Your approval: plan", detail: "Contract waits for you before any file changes", gate: "plan" },
+  { key: "build", name: "Build", detail: "Edits on branch, inside the contract's scope", secs: 5 },
+  { key: "verify", name: "Verify", detail: "scripts/verify.sh and every acceptance command", secs: 3 },
+  { key: "review", name: "Independent review", detail: "Fresh-context reviewer; author cannot approve itself", secs: 4 },
+  { key: "pr", name: "Draft PR opened", detail: "Branch pushed, draft PR with contract, evidence and findings", secs: 2 },
+  { key: "review_gate", name: "Your approval: review", detail: "You approve the findings; the harness never merges", gate: "review" },
+  { key: "ready", name: "Ready for you to merge", detail: "Done on the harness side" },
+];
+
+function newRun(todo, opts) {
+  const id = "run-" + (++store.seq);
+  const branch = `task/basecamp-${todo.id}-${slug(todo.title)}`;
+  const run = { id, todo: todo.id, repo: opts.repo, agent: opts.agent, planGate: opts.planGate, writeBack: false,
+    branch, phase: 0, phaseStarted: Date.now(), status: "running", log: [], created: Date.now(), pr: null };
+  logLine(run, `run ${id} created by you from basecamp:${todo.id}`);
+  logLine(run, `repo=${opts.repo} agent=${AGENTS[opts.agent]} branch=${branch}`);
+  store.runs.unshift(run);
+  return run;
+}
+function logLine(run, msg) { run.log.push(`${clock(Date.now())}  ${msg}`); }
+const runFor = (todoId) => store.runs.find((r) => String(r.todo) === String(todoId) && r.status !== "cancelled");
+const phaseOf = (run) => PHASES[run.phase];
+
+function statusInfo(run) {
+  if (run.status === "cancelled") return { label: "Cancelled", cls: "badge--ghost" };
+  const ph = phaseOf(run);
+  if (ph.key === "ready") return { label: "Ready to merge", cls: "badge--success" };
+  if (ph.gate) return { label: "Needs you", cls: "badge--warning" };
+  return { label: ph.name + "…", cls: "" };
+}
+
+function advance(run) {
+  const ph = phaseOf(run);
+  logLine(run, `${ph.key} done`);
+  run.phase += 1;
+  if (phaseOf(run).key === "plan_gate" && !run.planGate) { logLine(run, "plan approval skipped (you chose no plan gate)"); run.phase += 1; }
+  run.phaseStarted = Date.now();
+  const next = phaseOf(run);
+  if (next.key === "pr") {
+    const todo = byId(todos, run.todo);
+    run.pr = { number: 100 + Number(run.id.split("-")[1]), title: todo.title.slice(0, 72), files: 3 + (todo.id % 5), checks: "verify passed · review approved by reviewer" };
+  }
+  logLine(run, next.gate ? `waiting for your ${next.gate} approval` : `${next.key} started`);
+}
+
+function tick() {
+  let changed = false;
+  for (const run of store.runs) {
+    if (run.status !== "running") continue;
+    const ph = phaseOf(run);
+    if (ph.gate || ph.key === "ready") continue;
+    if (Date.now() - run.phaseStarted >= ph.secs * 1000) { advance(run); changed = true; }
+  }
+  if (changed) { save(); if (!$("modal").innerHTML && !document.querySelector("[data-form]")) render(); else refreshBadges(); }
+}
+setInterval(tick, 500);
+
+// ---- routing ------------------------------------------------------------
+function route() {
+  const parts = (location.hash.replace(/^#\/?/, "") || "").split("/").filter(Boolean);
+  if (parts[0] === "p" && parts[1]) return { name: "project", project: byId(projects, parts[1]) };
+  if (parts[0] === "l" && parts[1]) return { name: "list", list: byId(lists, parts[1]) };
+  if (parts[0] === "t" && parts[1]) return { name: "todo", todo: byId(todos, parts[1]) };
+  if (parts[0] === "s" && parts[1]) return { name: "source", source: sourceOf(parts[1]) };
+  if (parts[0] === "runs" && parts[1]) return { name: "run", run: store.runs.find((r) => r.id === parts[1]) };
+  if (parts[0] === "runs") return { name: "runs" };
+  return { name: "home" };
+}
+const go = (hash) => { location.hash = hash; };
+const state = { filter: "all", query: "", selected: new Set() };
+
+function crumbs(items) {
+  $("crumbs").innerHTML = items.map(([label, href], i) =>
+    `<li>${href && i < items.length - 1 ? `<a href="${href}">${esc(label)}</a>` : `<span aria-current="page">${esc(label)}</span>`}</li>`).join("");
+}
+
+function tabs(active) {
+  const live = store.runs.filter((r) => r.status === "running");
+  const needs = live.filter((r) => phaseOf(r).gate).length;
+  return `<nav class="tm-tabs" aria-label="Sources">
+    <a class="chip${active === "home" ? " is-active" : ""}" href="#/">All sources</a>
+    ${SOURCES.map((s) => `<a class="chip${active === s.key ? " is-active" : ""}${s.connected ? "" : " tm-chip-off"}" href="#/s/${s.key}">${esc(s.name)}${s.connected ? ` <b>${todos.length}</b>` : ""}</a>`).join("")}
+    <a class="chip${active === "runs" ? " is-active" : ""}" href="#/runs" style="margin-left:auto">Agent runs <b>${live.length}</b>${needs ? ` · ${needs} need you` : ""}</a>
+  </nav>`;
+}
+
+function stats(items) {
+  const overdue = items.filter((t) => dueInfo(t.due_on).kind === "overdue").length;
+  const delegated = items.filter((t) => runFor(t.id)).length;
+  return `<div class="tm-stats"><span class="badge">${items.length} open</span>${overdue ? `<span class="badge badge--error">${overdue} overdue</span>` : ""}${delegated ? `<span class="badge badge--success">${delegated} delegated</span>` : ""}</div>`;
+}
+
+function runBadge(todo) {
+  const run = runFor(todo.id);
+  if (!run) return "";
+  const s = statusInfo(run);
+  return `<a class="badge ${s.cls}" href="#/runs/${run.id}" data-stop>${esc(AGENTS[run.agent])}: ${esc(s.label)}</a>`;
+}
+
+// ---- views --------------------------------------------------------------
+function needsCallout() {
+  const needs = store.runs.filter((r) => r.status === "running" && phaseOf(r).gate);
+  return needs.length ? `<div class="tm-callout"><p><b>${needs.length} agent run${needs.length > 1 ? "s" : ""} waiting for you.</b> ${needs.map((r) => `<a href="#/runs/${r.id}">${esc(byId(todos, r.todo).title.slice(0, 50))}</a> (${esc(phaseOf(r).name)})`).join(" · ")}</p></div>` : "";
+}
+
+function viewHome() {
+  crumbs([["Task Managers", null]]);
+  const overdue = todos.filter((t) => dueInfo(t.due_on).kind === "overdue").length;
+  return `
+  <div class="tm-head"><div><p class="eyebrow">Integrations</p><h1>Task Managers</h1>
+    <p class="lede">Every task tool you connect appears here as a source. Browse any of them the same way, open an item, and delegate it to an agent that prepares a draft PR.</p></div></div>
+  ${tabs("home")}
+  ${needsCallout()}
+  <p class="eyebrow">Sources · ${SOURCES.filter((s) => s.connected).length} of ${SOURCES.length} connected</p>
+  <div class="tm-grid">${SOURCES.map((s) => `<a class="tm-card${s.connected ? "" : " tm-card--off"}" href="#/s/${s.key}">
+      <p class="eyebrow">${esc(s.kind)}</p><h3>${esc(s.name)}</h3>
+      <p class="tm-sub" style="margin:0 0 .8rem">${s.levels.map(esc).join(" → ")}</p>
+      ${s.connected ? `<div class="tm-stats"><span class="badge badge--success">Connected</span><span class="badge">${projects.length} project${projects.length > 1 ? "s" : ""} · ${todos.length} open</span>${overdue ? `<span class="badge badge--error">${overdue} overdue</span>` : ""}</div>`
+        : `<div class="tm-stats"><span class="badge badge--ghost">Not connected</span></div>`}
+    </a>`).join("")}</div>
+  <section class="panel"><div class="panel__head"><h2>How sources fit together</h2></div><div class="panel__body">
+    <p class="tm-note" style="margin:0">Each source maps its own hierarchy onto three levels (container → group → item), so navigation, filters, repo mapping and delegation work the same everywhere. Agent runs from all sources share one queue under <a href="#/runs">Agent runs</a>.</p></div></section>`;
+}
+
+function viewSource(src) {
+  if (!src) return notFound();
+  if (src.key === "basecamp") return viewBasecamp();
+  crumbs([["Task Managers", "#/"], [src.name, null]]);
+  return `
+  <div class="tm-head"><div><p class="eyebrow">Source · ${esc(src.kind)}</p><h1>${esc(src.name)}</h1>
+    <div class="tm-stats"><span class="badge badge--ghost">Not connected</span></div></div>
+    <button type="button" class="button button--primary" data-action="connect" data-source="${src.key}">Connect ${esc(src.name)}</button></div>
+  ${tabs(src.key)}
+  <section class="panel"><div class="panel__head"><h2>How ${esc(src.name)} would appear</h2></div><div class="panel__body">
+    <dl class="tm-conn">
+      ${["Container", "Group", "Item"].map((lvl, i) => `<div><dt>${lvl}</dt><dd>${esc(src.levels[i])}</dd></div>`).join("")}
+      <div><dt>Sign-in</dt><dd>${esc(src.auth)}</dd></div>
+    </dl>
+    <p class="tm-note">Once connected, you browse ${esc(src.levels[0].toLowerCase())}s, ${esc(src.levels[1].toLowerCase())}s and ${esc(src.levels[2].toLowerCase())}s here exactly like Basecamp, map each ${esc(src.levels[1].toLowerCase())} to a repository, and delegate ${esc(src.levels[2].toLowerCase())}s to agents.</p>
+  </div></section>
+  <section class="panel"><p class="tm-empty">Nothing to browse yet. Connecting adds this source's provider to the harness; credentials stay in your vault, like Basecamp's.</p></section>`;
+}
+
+function viewBasecamp() {
+  crumbs([["Task Managers", "#/"], ["Basecamp", null]]);
+  return `
+  <div class="tm-head"><div><p class="eyebrow">Source · Hosted</p><h1>Basecamp</h1>
+    <p class="lede">Projects → to-do lists → to-dos.</p></div>
+    <button type="button" class="button button--primary" data-action="refresh">Refresh from Basecamp</button></div>
+  ${tabs("basecamp")}
+  ${needsCallout()}
+  <p class="eyebrow">Projects</p>
+  <div class="tm-grid">${projects.map((p) => {
+    const items = todos.filter((t) => t.project === p);
+    return `<a class="tm-card" href="#/p/${p.id}"><p class="eyebrow">${p.lists.length} lists</p><h3>${esc(p.name)}</h3>${stats(items)}</a>`;
+  }).join("")}</div>
+  <section class="panel"><div class="panel__head"><h2>Connection</h2><span class="badge badge--success">Connected</span></div>
+    <div class="panel__body"><dl class="tm-conn">
+      <div><dt>Account</dt><dd>${esc(DATA.account.name)}</dd></div>
+      <div><dt>Last sync</dt><dd>${esc(fmt(DATA.synced_at))}</dd></div>
+      <div><dt>Token</dt><dd>Expires ${esc(fmt(DATA.token_expires_at))} · auto-refresh</dd></div>
+      <div><dt>Access</dt><dd>Read-only (write-back off)</dd></div>
+    </dl></div></section>`;
+}
+
+function todoRows(items, { selectable }) {
+  return items.map((t) => {
+    const d = dueInfo(t.due_on);
+    const run = runFor(t.id);
+    return `<tr data-href="#/t/${t.id}">
+      ${selectable ? `<td class="check"><input type="checkbox" data-select="${t.id}" aria-label="Select to-do"${state.selected.has(t.id) ? " checked" : ""}${run ? " disabled" : ""}></td>` : ""}
+      <td><div class="tm-title">${esc(t.title)}</div>${t.description ? `<div class="tm-sub">${esc(t.description.slice(0, 110))}${t.description.length > 110 ? "…" : ""}</div>` : ""}</td>
+      <td class="nowrap"><span class="badge ${d.cls}">${esc(d.label)}</span></td>
+      <td class="nowrap">${t.assignees.length ? esc(t.assignees.join(", ")) : '<span class="tm-sub">Unassigned</span>'}</td>
+      <td class="nowrap">${runBadge(t) || '<span class="tm-sub">Not delegated</span>'}</td>
+    </tr>`;
+  }).join("");
+}
+const TABLE_HEAD = (sel) => `<thead><tr>${sel ? "<th></th>" : ""}<th>To-do</th><th>Due</th><th>Assignees</th><th>Agent</th></tr></thead>`;
+
+const FILTERS = [
+  ["all", "All", () => true],
+  ["overdue", "Overdue", (t) => dueInfo(t.due_on).kind === "overdue"],
+  ["unassigned", "Unassigned", (t) => !t.assignees.length],
+  ["delegated", "Delegated", (t) => !!runFor(t.id)],
+];
+const matches = (t) => FILTERS.find((f) => f[0] === state.filter)[2](t) &&
+  (!state.query || (t.title + " " + t.description).toLowerCase().includes(state.query.toLowerCase()));
+
+function repoSelect(listId, attrs = "") {
+  const cur = store.repoMap[listId] || "";
+  return `<select data-repomap="${listId}" ${attrs}><option value="">Repo: not mapped</option>${REPOS.map((r) => `<option${r === cur ? " selected" : ""}>${r}</option>`).join("")}</select>`;
+}
+
+function viewProject(p) {
+  if (!p) return notFound();
+  crumbs([["Task Managers", "#/"], ["Basecamp", "#/s/basecamp"], [p.name, null]]);
+  const all = todos.filter((t) => t.project === p);
+  const panels = [], empty = [];
+  for (const l of p.lists) {
+    const items = all.filter((t) => t.list.id === l.id && matches(t));
+    if (!items.length) { if (state.filter === "all" && !state.query) empty.push(`<a href="#/l/${l.id}">${esc(l.name)}</a>`); continue; }
+    panels.push(`<section class="panel"><div class="panel__head"><h2><a href="#/l/${l.id}">${esc(l.name)}</a></h2>
+      <div class="tm-head-tools">${repoSelect(l.id)}<span class="tm-count">${items.length} open</span></div></div>
+      <table class="tm-table">${TABLE_HEAD(true)}<tbody>${todoRows(items, { selectable: true })}</tbody></table></section>`);
+  }
+  return `
+  <div class="tm-head"><div><p class="eyebrow">Basecamp project</p><h1>${esc(p.name)}</h1>${stats(all)}</div>
+    <a class="button" href="${esc(p.url)}" target="_blank" rel="noopener">Open in Basecamp</a></div>
+  ${tabs("basecamp")}
+  <div class="tm-toolbar"><div class="chip-row">${FILTERS.map(([k, label, f]) => `<button type="button" class="chip${state.filter === k ? " is-active" : ""}" data-filter="${k}">${label} <b>${all.filter(f).length}</b></button>`).join("")}</div>
+    <input type="search" id="search" placeholder="Search to-dos" value="${esc(state.query)}" aria-label="Search to-dos"></div>
+  <p class="tm-note" style="margin:0 0 1rem">Map each list to a repository once; delegated to-dos from that list run there.</p>
+  ${panels.join("") || '<section class="panel"><p class="tm-empty">Nothing matches this filter.</p></section>'}
+  ${empty.length ? `<p class="tm-count">Lists with no open to-dos: ${empty.join(" · ")}</p>` : ""}
+  ${bulkBar()}`;
+}
+
+function viewList(l) {
+  if (!l) return notFound();
+  crumbs([["Task Managers", "#/"], ["Basecamp", "#/s/basecamp"], [l.project.name, `#/p/${l.project.id}`], [l.name, null]]);
+  const items = todos.filter((t) => t.list.id === l.id);
+  const idx = lists.indexOf(l), prev = lists[idx - 1], next = lists[idx + 1];
+  return `
+  <div class="tm-head"><div><p class="eyebrow">To-do list · ${esc(l.project.name)}</p><h1>${esc(l.name)}</h1>${stats(items)}</div>
+    <div class="tm-head-tools">${repoSelect(l.id)}<a class="button" href="${esc(l.url)}" target="_blank" rel="noopener">Open in Basecamp</a></div></div>
+  ${tabs("basecamp")}
+  <div class="tm-pager">
+    <a class="button" href="${prev ? `#/l/${prev.id}` : `#/p/${l.project.id}`}">${prev ? `← ${esc(prev.name)}` : `↑ Back to ${esc(l.project.name)}`}</a>
+    <a class="button" href="${next ? `#/l/${next.id}` : `#/p/${l.project.id}`}">${next ? `${esc(next.name)} →` : `↑ Back to ${esc(l.project.name)}`}</a>
+  </div>
+  ${l.description ? `<div class="tm-untrusted" style="margin-bottom:1.25rem"><p class="eyebrow">List description · Basecamp text</p><p>${esc(l.description)}</p></div>` : ""}
+  <section class="panel"><div class="panel__head"><h2>Open to-dos</h2><span class="tm-count">${items.length}</span></div>
+  ${items.length ? `<table class="tm-table">${TABLE_HEAD(true)}<tbody>${todoRows(items, { selectable: true })}</tbody></table>` : '<p class="tm-empty">No open to-dos in this list.</p>'}</section>
+  ${bulkBar()}`;
+}
+
+function bulkBar() {
+  const n = state.selected.size;
+  if (!n) return "";
+  return `<div class="tm-bulkbar"><span>${n} to-do${n > 1 ? "s" : ""} selected</span>
+    <span class="tm-head-tools"><button type="button" class="button" data-action="clear-sel">Clear</button><button type="button" class="button button--primary" data-action="bulk-delegate">Delegate ${n} to agents</button></span></div>`;
+}
+
+function viewTodo(t) {
+  if (!t) return notFound();
+  crumbs([["Task Managers", "#/"], ["Basecamp", "#/s/basecamp"], [t.project.name, `#/p/${t.project.id}`], [t.list.name, `#/l/${t.list.id}`], [t.title.slice(0, 40) + (t.title.length > 40 ? "…" : ""), null]]);
+  const siblings = todos.filter((x) => x.project === t.project);
+  const i = siblings.indexOf(t), prev = siblings[i - 1], next = siblings[i + 1];
+  const d = dueInfo(t.due_on);
+  const run = runFor(t.id);
+  return `
+  <div class="tm-pager">
+    <a class="button" href="${prev ? `#/t/${prev.id}` : `#/l/${t.list.id}`}" data-nav="prev">${prev ? "← Previous" : `↑ Back to ${esc(t.list.name)}`}</a>
+    <span class="tm-count">${i + 1} of ${siblings.length} in ${esc(t.project.name)} · <span class="tm-kbd">←</span> <span class="tm-kbd">→</span> to move, <span class="tm-kbd">Esc</span> back to list</span>
+    <a class="button" href="${next ? `#/t/${next.id}` : `#/l/${t.list.id}`}" data-nav="next">${next ? "Next →" : `↑ Back to ${esc(t.list.name)}`}</a>
+  </div>
+  <div class="tm-split">
+    <div>
+      <p class="eyebrow">${esc(t.project.name)} / ${esc(t.list.name)}</p>
+      <h1 style="font-size:clamp(1.6rem,3.5vw,2.5rem);line-height:1.1;margin-bottom:1.25rem">${esc(t.title)}</h1>
+      <dl class="tm-meta">
+        <div><dt>Due</dt><dd><span class="badge ${d.cls}">${esc(d.label)}</span></dd></div>
+        <div><dt>Assignees</dt><dd>${esc(t.assignees.join(", ") || "Unassigned")}</dd></div>
+        <div><dt>Created</dt><dd>${esc(fmt(t.created_at))}${t.creator ? ` · ${esc(t.creator)}` : ""}</dd></div>
+        <div><dt>Updated</dt><dd>${esc(fmt(t.updated_at))}</dd></div>
+      </dl>
+      <div class="tm-untrusted" style="margin-bottom:1.25rem"><p class="eyebrow">Description · Basecamp text, fenced as untrusted before an agent sees it</p><p>${esc(t.description || "(no description)")}</p></div>
+      <section class="panel"><div class="panel__head"><h2>Comments</h2><span class="tm-count">${t.comments.length}</span></div>
+        ${t.comments.length ? t.comments.map((c) => `<div class="panel__body" style="border-bottom:1px solid var(--border-subtle)"><p class="eyebrow">${esc(c.author)} · ${esc(fmt(c.created_at))}</p><p style="margin:0;white-space:pre-wrap">${esc(c.text)}</p></div>`).join("") : '<p class="tm-empty">No comments yet.</p>'}
+      </section>
+      <a class="button" href="${esc(t.url)}" target="_blank" rel="noopener">Open in Basecamp</a>
+    </div>
+    <aside>${run ? runSummary(run) : delegateForm(t)}</aside>
+  </div>`;
+}
+
+function delegateForm(t) {
+  const mapped = store.repoMap[t.list.id] || "";
+  return `<section class="panel"><div class="panel__head"><h2>Delegate to an agent</h2></div>
+    <div class="panel__body tm-form" data-form="${t.id}">
+      <div class="row"><label for="f-repo">Repository</label>
+        <select id="f-repo"><option value="">Choose a repository</option>${REPOS.map((r) => `<option${r === mapped ? " selected" : ""}>${r}</option>`).join("")}</select>
+        ${mapped ? `<p class="tm-note" style="margin-top:.4rem">From the mapping for “${esc(t.list.name)}”.</p>` : ""}</div>
+      <div class="row"><label for="f-agent">Agent</label>
+        <select id="f-agent">${Object.entries(AGENTS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+      <label>What the agent does</label>
+      <ol style="margin:0 0 1rem;padding-left:1.1rem;font-size:.82rem;line-height:1.55">
+        <li>Plan: writes the task contract from this to-do</li><li>Build on <span class="mono" style="font-size:.66rem;text-transform:none">task/basecamp-${t.id}-…</span></li>
+        <li>Verify and independent review</li><li>Push the branch and open a <b>draft PR</b></li></ol>
+      <div class="opt"><input type="checkbox" id="f-plan" checked><label for="f-plan" style="all:unset;cursor:pointer">Pause for my approval of the plan before any file changes</label></div>
+      <div class="opt is-off"><input type="checkbox" disabled><span>Post the PR link back to the Basecamp to-do (needs write-back, later milestone)</span></div>
+      <button type="button" class="button button--primary button--wide" data-action="delegate" data-id="${t.id}">Delegate and prepare PR</button>
+      <p class="tm-note">You always approve the review; the harness never merges. Agents get the to-do as fenced, size-capped data with no Basecamp access of their own.</p>
+    </div></section>`;
+}
+
+function stepsHtml(run) {
+  return `<ol class="tm-steps">${PHASES.map((ph, i) => {
+    if (ph.key === "plan_gate" && !run.planGate) return "";
+    let cls = "pending";
+    if (run.status === "cancelled") cls = i < run.phase ? "done" : "pending";
+    else if (i < run.phase || (ph.key === "ready" && run.phase === i)) cls = "done";
+    else if (i === run.phase) cls = ph.gate ? "waiting" : "active";
+    return `<li class="${cls}"><span class="tm-dot"></span><div><div class="step-name">${esc(ph.name)}</div><div class="step-detail">${esc(ph.detail)}</div></div><span class="step-time">${cls === "active" ? "running" : cls === "waiting" ? "needs you" : ""}</span></li>`;
+  }).join("")}</ol>`;
+}
+
+function gateCallout(run) {
+  const ph = phaseOf(run);
+  if (run.status !== "running" || !ph.gate) return "";
+  if (ph.gate === "plan") return `<div class="tm-callout"><p><b>Plan ready for your approval.</b> Contract: deliverables, non-goals and acceptance commands drawn from the to-do. No files have changed yet.</p>
+    <div class="tm-head-tools"><button type="button" class="button button--primary" data-action="approve" data-run="${run.id}">Approve plan</button><button type="button" class="button" data-action="cancel" data-run="${run.id}">Cancel run</button></div></div>`;
+  return `<div class="tm-callout"><p><b>Draft PR ready; review findings need your approval.</b> Same as replying <span class="mono" style="text-transform:none">approved</span> in chat.</p>
+    <div class="tm-head-tools"><button type="button" class="button button--primary" data-action="approve" data-run="${run.id}">Approve review</button><button type="button" class="button" data-action="cancel" data-run="${run.id}">Reject and cancel</button></div></div>`;
+}
+
+function prCard(run) {
+  if (!run.pr) return "";
+  const repo = run.repo;
+  return `<div class="tm-pr"><p class="eyebrow">Draft pull request · simulated</p>
+    <div class="tm-title">#${run.pr.number} ${esc(run.pr.title)}</div>
+    <p class="mono" style="margin:.4rem 0 0">${esc(repo)} · ${esc(run.branch)} → master</p>
+    <ul><li>${run.pr.files} files changed</li><li>${esc(run.pr.checks)}</li><li>Body: contract, verify evidence, review findings, link to the Basecamp to-do</li></ul></div>`;
+}
+
+function runSummary(run) {
+  const s = statusInfo(run);
+  return `<section class="panel"><div class="panel__head"><h2>Delegated</h2><span class="badge ${s.cls}">${esc(s.label)}</span></div>
+    <div class="panel__body">
+      <p class="tm-count" style="margin-bottom:.75rem">${esc(AGENTS[run.agent])} · ${esc(run.repo)}</p>
+      ${gateCallout(run)}${stepsHtml(run)}
+      ${run.pr ? `<div style="margin-top:1rem">${prCard(run)}</div>` : ""}
+      <a class="button button--wide" style="margin-top:1rem" href="#/runs/${run.id}">Open run</a>
+    </div></section>`;
+}
+
+function viewRuns() {
+  crumbs([["Task Managers", "#/"], ["Agent runs", null]]);
+  const rows = store.runs.map((r) => {
+    const t = byId(todos, r.todo), s = statusInfo(r);
+    return `<tr data-href="#/runs/${r.id}"><td><div class="tm-title">${esc(t.title)}</div><div class="tm-sub">${esc(t.project.name)} / ${esc(t.list.name)}</div></td>
+      <td class="nowrap">Basecamp</td>
+      <td class="nowrap">${esc(r.repo)}</td><td class="nowrap">${esc(AGENTS[r.agent])}</td>
+      <td class="nowrap"><span class="badge ${s.cls}">${esc(s.label)}</span></td>
+      <td class="nowrap">${r.pr ? `#${r.pr.number} draft` : '<span class="tm-sub">—</span>'}</td>
+      <td class="nowrap tm-sub">${esc(clock(r.created))}</td></tr>`;
+  }).join("");
+  return `
+  <div class="tm-head"><div><p class="eyebrow">Delegated work</p><h1>Agent runs</h1>
+    <p class="lede">Every to-do you delegated, where its harness run is, and the draft PR it produced.</p></div></div>
+  ${tabs("runs")}
+  <section class="panel">${rows ? `<table class="tm-table"><thead><tr><th>Item</th><th>Source</th><th>Repo</th><th>Agent</th><th>Status</th><th>PR</th><th>Started</th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<p class="tm-empty">No runs yet. Open a project, pick a to-do, and choose “Delegate and prepare PR”.</p>'}</section>`;
+}
+
+function viewRun(run) {
+  if (!run) return notFound();
+  const t = byId(todos, run.todo), s = statusInfo(run);
+  crumbs([["Task Managers", "#/"], ["Agent runs", "#/runs"], [run.id, null]]);
+  return `
+  <div class="tm-head"><div><p class="eyebrow">Agent run · ${esc(run.id)}</p><h1 style="font-size:clamp(1.6rem,3.5vw,2.5rem);line-height:1.1">${esc(t.title)}</h1>
+    <div class="tm-stats"><span class="badge ${s.cls}">${esc(s.label)}</span><span class="badge">${esc(AGENTS[run.agent])}</span><span class="badge">${esc(run.repo)}</span></div></div>
+    <div class="tm-head-tools"><a class="button" href="#/t/${t.id}">Open to-do</a>${run.status === "running" && phaseOf(run).key !== "ready" ? `<button type="button" class="button" data-action="cancel" data-run="${run.id}">Cancel run</button>` : ""}</div></div>
+  ${tabs("runs")}
+  <div class="tm-split">
+    <div>
+      ${gateCallout(run)}
+      <section class="panel"><div class="panel__head"><h2>Harness phases</h2><span class="tm-count">branch ${esc(run.branch)}</span></div><div class="panel__body">${stepsHtml(run)}</div></section>
+      <section class="panel"><div class="panel__head"><h2>Run log</h2></div><pre class="tm-log">${esc(run.log.join("\n"))}</pre></section>
+    </div>
+    <aside>
+      ${run.pr ? prCard(run) : '<section class="panel"><p class="tm-empty">The draft PR appears here after review passes.</p></section>'}
+      <section class="panel" style="margin-top:1.5rem"><div class="panel__head"><h2>Source to-do</h2></div><div class="panel__body">
+        <p class="tm-count" style="margin-bottom:.5rem">basecamp:${t.id} · ${esc(t.list.name)}</p>
+        <p class="tm-note" style="margin:0">The agent received the title and up to 4,000 characters of description, fenced as untrusted data. No comments, attachments or Basecamp credentials.</p></div></section>
+    </aside>
+  </div>`;
+}
+
+function notFound() { crumbs([["Task Managers", "#/"], ["Not found", null]]); return `<section class="panel"><p class="tm-empty">That item isn't in this snapshot. <a href="#/">Back to Task Managers</a></p></section>`; }
+
+// ---- modal (bulk) -------------------------------------------------------
+function openBulk() {
+  const items = [...state.selected].map((id) => byId(todos, id));
+  const unmapped = [...new Set(items.filter((t) => !store.repoMap[t.list.id]).map((t) => t.list.name))];
+  $("modal").innerHTML = `<div class="tm-modal-wrap" data-action="close-modal"><div class="tm-modal" role="dialog" aria-modal="true" aria-label="Delegate to-dos">
+    <header><h2>Delegate ${items.length} to-do${items.length > 1 ? "s" : ""}</h2><button type="button" class="button" data-action="close-modal">Close</button></header>
+    <div class="body tm-form">
+      <ol>${items.map((t) => `<li>${esc(t.title.slice(0, 70))} <span class="tm-sub">→ ${esc(store.repoMap[t.list.id] || "repo below")}</span></li>`).join("")}</ol>
+      ${unmapped.length ? `<div class="row"><label for="b-repo">Repository for unmapped lists (${esc(unmapped.join(", "))})</label><select id="b-repo"><option value="">Choose a repository</option>${REPOS.map((r) => `<option>${r}</option>`).join("")}</select></div>` : ""}
+      <div class="row"><label for="b-agent">Agent</label><select id="b-agent">${Object.entries(AGENTS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+      <div class="opt"><input type="checkbox" id="b-plan" checked><label for="b-plan" style="all:unset;cursor:pointer">Pause each run for my plan approval</label></div>
+      <button type="button" class="button button--primary button--wide" data-action="bulk-confirm">Start ${items.length} run${items.length > 1 ? "s" : ""}</button>
+      <p class="tm-note">One harness run and one draft PR per to-do.</p>
+    </div></div></div>`;
+}
+
+// ---- render & events ----------------------------------------------------
+function render() {
+  const r = route();
+  const views = { home: viewHome, source: () => viewSource(r.source),project: () => viewProject(r.project), list: () => viewList(r.list), todo: () => viewTodo(r.todo), runs: viewRuns, run: () => viewRun(r.run) };
+  const active = document.activeElement && document.activeElement.id === "search";
+  const caret = active ? document.activeElement.selectionStart : null;
+  $("view").innerHTML = views[r.name]();
+  if (active && $("search")) { $("search").focus(); $("search").setSelectionRange(caret, caret); }
+  refreshBadges();
+}
+function refreshBadges() {
+  const live = store.runs.filter((x) => x.status === "running" && phaseOf(x).gate).length;
+  $("rail-count").hidden = !live; $("rail-count").textContent = live;
+}
+
+function toast(msg) { const el = $("toast"); el.textContent = msg; el.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (el.hidden = true), 2400); }
+
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-dead]");
+  if (a) { e.preventDefault(); toast("Other dashboard sections are not part of this prototype"); return; }
+  if (e.target.closest("[data-stop],a,select,input,label")) {
+    const sel = e.target.closest("[data-select]");
+    if (sel) { sel.checked ? state.selected.add(Number(sel.dataset.select)) : state.selected.delete(Number(sel.dataset.select)); render(); }
+    return;
+  }
+  const el = e.target.closest("[data-filter],[data-action],tr[data-href]");
+  if (!el) return;
+  if (el.dataset.filter) { state.filter = el.dataset.filter; render(); return; }
+  if (el.matches("tr[data-href]")) { go(el.dataset.href); return; }
+  const act = el.dataset.action;
+  if (act === "close-modal" && (e.target === el || el.tagName === "BUTTON")) { $("modal").innerHTML = ""; return; }
+  if (act === "refresh") toast(`Snapshot from ${fmt(DATA.synced_at)}; live refresh comes with the real build`);
+  if (act === "reset") { store = { runs: [], repoMap: {}, seq: 0 }; state.selected.clear(); save(); render(); toast("Simulation reset"); }
+  if (act === "connect") toast(`Prototype: connecting ${sourceOf(el.dataset.source).name} comes with its provider build`);
+  if (act === "clear-sel") { state.selected.clear(); render(); }
+  if (act === "bulk-delegate") openBulk();
+  if (act === "bulk-confirm") {
+    const fallback = $("b-repo") ? $("b-repo").value : "";
+    const items = [...state.selected].map((id) => byId(todos, id));
+    if (items.some((t) => !store.repoMap[t.list.id]) && !fallback) { toast("Choose a repository first"); return; }
+    for (const t of items) newRun(t, { repo: store.repoMap[t.list.id] || fallback, agent: $("b-agent").value, planGate: $("b-plan").checked });
+    state.selected.clear(); save(); $("modal").innerHTML = ""; go("#/runs"); toast(`${items.length} run${items.length > 1 ? "s" : ""} started`);
+  }
+  if (act === "delegate") {
+    const repo = $("f-repo").value;
+    if (!repo) { toast("Choose a repository first"); $("f-repo").focus(); return; }
+    const run = newRun(byId(todos, el.dataset.id), { repo, agent: $("f-agent").value, planGate: $("f-plan").checked });
+    save(); render(); toast(`Delegated to ${AGENTS[run.agent]}`);
+  }
+  if (act === "approve" || act === "cancel") {
+    const run = store.runs.find((r) => r.id === el.dataset.run);
+    if (act === "cancel") { run.status = "cancelled"; logLine(run, "cancelled by you; branch kept, nothing merged"); }
+    else { logLine(run, `you approved the ${phaseOf(run).gate}`); advance(run); }
+    save(); render();
+  }
+});
+
+document.addEventListener("change", (e) => {
+  const m = e.target.closest("[data-repomap]");
+  if (m) { if (m.value) store.repoMap[m.dataset.repomap] = m.value; else delete store.repoMap[m.dataset.repomap]; save(); toast(m.value ? `List mapped to ${m.value}` : "Mapping removed"); render(); }
+});
+document.addEventListener("input", (e) => { if (e.target.id === "search") { state.query = e.target.value; render(); } });
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input,select,textarea")) return;
+  const r = route();
+  if (r.name !== "todo" || !r.todo) return;
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") { const b = document.querySelector(`[data-nav="${e.key === "ArrowLeft" ? "prev" : "next"}"]`); if (b && !b.hasAttribute("aria-disabled")) b.click(); }
+  if (e.key === "Escape") go(`#/l/${r.todo.list.id}`);
+});
+window.addEventListener("hashchange", () => { window.scrollTo(0, 0); render(); });
+render();
+</script>
+</body>
+</html>

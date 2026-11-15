@@ -3,9 +3,10 @@
 
   task_managers.py [--db-root DIR] <command> [--provider basecamp] [--json]
 
-Reader commands (check, projects, lists, todos, get) live here and send GET
-only. seed, login, refresh, comment, complete and run are parsed here and
-handed to task_managers_<x>.main(args, ctx), loaded on demand.
+Reader commands (check, projects, lists, todos, get, open-walk, me) live here
+and send GET only. seed, login, refresh, the writes (comment, complete,
+list-create, todo-create, todo-update) and run are parsed here and handed to
+task_managers_<x>.main(args, ctx), loaded on demand.
 
 Exit: 0 ok, 2 usage, 3 off or not connected, 4 not found, 5 upstream or auth
 failure. Stdout is one JSON document; errors are {"error":{"code","message"}}.
@@ -41,13 +42,16 @@ MAX_PAGES = 200
 MAX_CONFIG_BYTES = 32_000
 TITLE_LIMIT = 200
 DESCRIPTION_LIMIT = 4000
+FULL_DESCRIPTION_BYTES = 64 * 1024  # get --full
 FENCE_OPEN = "<<<TASK-MANAGER-UNTRUSTED"
 FENCE_CLOSE = "<<<END-TASK-MANAGER-UNTRUSTED"
 PROVIDER_DEFAULTS = {"basecamp": {"api_base": "https://3.basecampapi.com", "auth_base": "https://launchpad.37signals.com"}}
 # Sources shown on the dashboard; only the ones in PROVIDERS can be connected.
 SOURCES = (("basecamp", "Basecamp"), ("linear", "Linear"), ("github", "GitHub"), ("jira", "Jira"), ("asana", "Asana"), ("plane", "Plane"))
 MODULES = {"seed": "task_managers_seed", "login": "task_managers_auth", "refresh": "task_managers_auth",
-           "comment": "task_managers_write", "complete": "task_managers_write", "run": "task_managers_runs"}
+           "comment": "task_managers_write", "complete": "task_managers_write", "list-create": "task_managers_write",
+           "todo-create": "task_managers_write", "todo-update": "task_managers_write", "run": "task_managers_runs"}
+OPEN_WALK_DEFAULT, OPEN_WALK_MAX = 500, 5000
 
 
 class TaskManagerError(Exception):
@@ -501,12 +505,16 @@ class BasecampReader:
         todos = self._get(url)
         return [todo for todo in todos if isinstance(todo, dict)] if isinstance(todos, list) else []
 
-    def _item(self, todo: dict[str, Any], todolist: dict[str, Any], project: dict[str, Any], full: bool) -> dict[str, Any]:
+    def _item(self, todo: dict[str, Any], todolist: dict[str, Any], project: dict[str, Any], full: bool,
+              whole: bool = False) -> dict[str, Any]:
+        """The normalized item; `full` keeps the description, cut at 4000 characters or,
+        with `whole`, at FULL_DESCRIPTION_BYTES of UTF-8."""
         item = {
             "provider": "basecamp", "id": _digits(todo.get("id")),
             "project": _ref(project), "list": _ref(todolist),
             "title": plain_text(todo.get("title") or todo.get("content"), TITLE_LIMIT),
-            "description_text": plain_text(todo.get("description"), DESCRIPTION_LIMIT, lines=True),
+            "description_text": (_cut_bytes(plain_text(todo.get("description"), FULL_DESCRIPTION_BYTES, lines=True), FULL_DESCRIPTION_BYTES)
+                                 if whole else plain_text(todo.get("description"), DESCRIPTION_LIMIT, lines=True)),
             "status": "done" if todo.get("completed") is True else "open",
             "assignees": [plain_text(a.get("name"), 100) for a in todo.get("assignees") or [] if isinstance(a, dict)][:50],
             "due_on": iso_time(todo.get("due_on")), "url": _link(todo.get("app_url")),
@@ -544,7 +552,53 @@ class BasecampReader:
                     return {"list": _ref(todolist), "project": _ref(project), "items": items}
         raise NotFound(f"no to-do list {list_id}")
 
-    def locate(self, item_id: str) -> dict[str, Any]:
+    def locate_list(self, list_id: str) -> dict[str, Any]:
+        """{project, list} as references, plus `_bucket` (the project id); raises NotFound."""
+        for project in self._projects():
+            for todolist in self._lists(project):
+                if _digits(todolist.get("id")) == list_id:
+                    return {"project": _ref(project), "list": _ref(todolist), "_bucket": _digits(project.get("id"))}
+        raise NotFound(f"no to-do list {list_id}")
+
+    def todoset_id(self, project_id: str) -> str:
+        """The id of the project's enabled to-do set (its dock entry named `todoset`)."""
+        dock = self._project(project_id).get("dock")
+        for tool in dock if isinstance(dock, list) else []:
+            if isinstance(tool, dict) and tool.get("name") == "todoset" and tool.get("enabled", True):
+                return _digits(tool.get("id"))
+        raise NotFound(f"project {project_id} has no to-do tool switched on", "no_todoset")
+
+    def me(self) -> dict[str, Any]:
+        """{person: {id, name}}: whom the token belongs to (cached like every read)."""
+        profile = self._get(self.base + "/my/profile.json")
+        if not isinstance(profile, dict):
+            raise Upstream("the provider's profile is not an object", "unexpected_response")
+        return {"person": {"id": _digits(profile.get("id")), "name": plain_text(profile.get("name"), 100)}}
+
+    def open_walk(self, project_id: str | None = None, list_id: str | None = None, limit: int = OPEN_WALK_DEFAULT) -> dict[str, Any]:
+        """{items, truncated, limit}: every not-done to-do, project by project and list by list,
+        through the cache, at most `limit`. Items carry no description; assignees are {id, name}.
+        A --list that no walked project holds is NotFound."""
+        items, seen = [], False
+        for project in [self._project(project_id)] if project_id else self._projects():
+            for todolist in self._lists(project):
+                if list_id and _digits(todolist.get("id")) != list_id:
+                    continue
+                seen = True
+                for todo in self._todos(todolist, "open"):
+                    if todo.get("completed") is True:
+                        continue
+                    if len(items) == limit:
+                        return {"items": items, "truncated": True, "limit": limit}
+                    item = self._item(todo, todolist, project, False)
+                    item["assignees"] = [{"id": _digits(a.get("id")), "name": plain_text(a.get("name"), 100)}
+                                         for a in todo.get("assignees") or [] if isinstance(a, dict)][:50]
+                    items.append(item)
+        if list_id and not seen:
+            raise NotFound(f"no to-do list {list_id}")
+        return {"items": items, "truncated": False, "limit": limit}
+
+    def locate(self, item_id: str, whole: bool = False) -> dict[str, Any]:
         """{item, prev, next, up}: prev/next are the neighbours of the same status in the project's walk."""
         for status in ("open", "done"):
             for project in self._projects():
@@ -553,11 +607,16 @@ class BasecampReader:
                 if item_id in ids:
                     at = ids.index(item_id)
                     todo, todolist = walk[at]
-                    item = self._item(todo, todolist, project, True)
+                    item = self._item(todo, todolist, project, True, whole)
                     item["_bucket"] = item["project"]["id"]
                     return {"item": item, "prev": ids[at - 1] if at else None,
                             "next": ids[at + 1] if at + 1 < len(ids) else None, "up": item["list"]["id"]}
         raise NotFound(f"no item {item_id}")
+
+
+def _cut_bytes(text: str, limit: int) -> str:
+    data = text.encode("utf-8")
+    return text if len(data) <= limit else data[:limit].decode("utf-8", "ignore")
 
 
 def _ref(record: dict[str, Any]) -> dict[str, str]:
@@ -580,6 +639,12 @@ def public(value: Any) -> Any:
     return [public(v) for v in value] if isinstance(value, list) else value
 
 
+def ssh_destination(value: Any) -> str | None:
+    """A plain `[user@]host` (letters, digits and `@._-`), or None: it is printed inside a shell command."""
+    ok = isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9@._-]{1,200}", value) and not value.startswith("-")
+    return value if ok else None
+
+
 def check(ctx: Ctx) -> dict[str, Any]:
     config = ctx.config
     providers = []
@@ -595,6 +660,8 @@ def check(ctx: Ctx) -> dict[str, Any]:
         providers.append(entry)
     return {"enabled": config is not None, "owner_login": (config or {}).get("owner_login"),
             "repos": sorted((config or {}).get("repos") or {}), "mappings": dict((config or {}).get("mappings") or {}),
+            "repo_paths": dict(sorted(((config or {}).get("repos") or {}).items())),
+            "ssh": ssh_destination((config or {}).get("ssh")),
             "allowed_hosts": [h.lower() for h in (config or {}).get("allowed_hosts") or []],
             "require_login_header": bool((config or {}).get("require_login_header", False)),
             "providers": providers}
@@ -615,8 +682,12 @@ def read_command(args: argparse.Namespace, ctx: Ctx) -> None:
         ctx.emit(reader.lists(args.project))
     elif args.cmd == "todos":
         ctx.emit(reader.todos(args.list, args.status))
+    elif args.cmd == "open-walk":
+        ctx.emit(reader.open_walk(args.project, args.list, min(args.limit, OPEN_WALK_MAX)))
+    elif args.cmd == "me":
+        ctx.emit(reader.me())
     else:
-        found = reader.locate(args.item)
+        found = reader.locate(args.item, getattr(args, "full", False))
         if args.json:
             ctx.emit(public(found))
         else:
@@ -660,6 +731,15 @@ def repo_name(value: str) -> str:
     return value
 
 
+def day(value: str) -> str:
+    try:
+        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            return datetime.date.fromisoformat(value).isoformat()
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("must be a date as YYYY-MM-DD")
+
+
 def positive(value: str) -> int:
     if not re.fullmatch(r"[0-9]{1,9}", value) or int(value) < 1:
         raise argparse.ArgumentTypeError("must be a positive whole number")
@@ -687,6 +767,12 @@ def build_parser() -> Parser:
     p.add_argument("--status", choices=("open", "done"), default="open")
     p = sub.add_parser("get", parents=[common, cached], help="one to-do with its neighbours")
     p.add_argument("--item", type=item_id, required=True)
+    p.add_argument("--full", action="store_true", help="the description up to 64 KiB instead of 4000 characters")
+    p = sub.add_parser("open-walk", parents=[common, cached], help="not-done items across projects (no filtering)")
+    p.add_argument("--project", type=item_id)
+    p.add_argument("--list", type=item_id)
+    p.add_argument("--limit", type=positive, default=OPEN_WALK_DEFAULT, help=f"at most this many items (cap {OPEN_WALK_MAX})")
+    sub.add_parser("me", parents=[common, cached], help="the person the token belongs to")
 
     p = sub.add_parser("seed", parents=[common, cached], help="bounded untrusted packet and contract draft for an item")
     p.add_argument("--item", type=item_id, required=True)
@@ -699,6 +785,23 @@ def build_parser() -> Parser:
     p.add_argument("--text-file", type=Path, required=True)
     p = sub.add_parser("complete", parents=[common], help="mark an item done")
     p.add_argument("--item", type=item_id, required=True)
+    p = sub.add_parser("list-create", parents=[common], help="create a to-do list in a project")
+    p.add_argument("--project", type=item_id, required=True)
+    p.add_argument("--name-file", type=Path, required=True)
+    p.add_argument("--description-file", type=Path)
+    p = sub.add_parser("todo-create", parents=[common], help="create a to-do in a list")
+    p.add_argument("--list", type=item_id, required=True)
+    p.add_argument("--title-file", type=Path, required=True)
+    p.add_argument("--description-file", type=Path)
+    p.add_argument("--due", type=day)
+    p = sub.add_parser("todo-update", parents=[common], help="change a to-do; fields not given stay as they are")
+    p.add_argument("--item", type=item_id, required=True)
+    p.add_argument("--title-file", type=Path)
+    p.add_argument("--description-file", type=Path)
+    due = p.add_mutually_exclusive_group()
+    due.add_argument("--due", type=day)
+    due.add_argument("--clear-due", action="store_true")
+    p.add_argument("--reopen", action="store_true")
 
     run = sub.add_parser("run", help="delegated runs started from an item")
     runs = run.add_subparsers(dest="run_cmd", required=True, metavar="action")

@@ -30,6 +30,16 @@
     });
   }
 
+  // Copy buttons: an attach code or command onto the clipboard.
+  page.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-tm-copy]");
+    if (!button || !navigator.clipboard) return;
+    navigator.clipboard.writeText(button.dataset.tmCopy).then(() => {
+      button.setAttribute("data-tm-copied", "");
+      setTimeout(() => button.removeAttribute("data-tm-copied"), 1500);
+    });
+  });
+
   // A run that is working reloads to show its progress. A run waiting for you never does.
   const seconds = Number(page.dataset.tmRefresh);
   if (seconds > 0) {

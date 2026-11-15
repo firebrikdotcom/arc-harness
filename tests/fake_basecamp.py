@@ -17,9 +17,17 @@ LOG_FILE gets one `METHOD PATH` line per request (query included, except on
 one JSON line per request: {"method", "path", "user_agent", "if_none_match",
 "authorization"} - the last two are booleans, never the values.
 
+Writes it accepts: comments, completion (POST and DELETE), to-do list and to-do
+creation, and the to-do PUT, which like Basecamp's clears every field the body
+leaves out. Projects, lists and to-dos live on State as copies of the constants
+below, so a test running the fake in-process may add records or change them.
+State.bodies keeps (method, path, JSON body) of every write; with
+State.fail_writes set, every write answers 500 while reads still work.
+
 Every name, id and token here is synthetic. Tests may import this module for
 the constants; the server only starts when it is run as a script.
 """
+import copy
 import hashlib
 import json
 import sys
@@ -65,6 +73,8 @@ TODOS = [
      "description": "", "assignees": [], "comments_count": 0},
 ]
 PAGE_SIZES = {"projects": 1, "lists": 1, "todos": 2, "comments": 1}
+PEOPLE = {7000: "Ada Example", 7001: "Bo Sample", 7100: "Cy Fixture"}
+ME = 7000  # the person /my/profile.json answers with
 
 
 class State:
@@ -75,7 +85,13 @@ class State:
         self.issued = set()          # access tokens handed out by the token endpoint
         self.refresh_token = REFRESH_TOKEN
         self.counter = 1
+        self.projects = copy.deepcopy(PROJECTS)
+        self.lists = copy.deepcopy(LISTS)
+        self.todos = [{"starts_on": None, "subscribers": [], **copy.deepcopy(t)} for t in TODOS]
         self.completed = {t["id"]: t["completed"] for t in TODOS}
+        self.next_record = 8000
+        self.bodies = []
+        self.fail_writes = False
         self.comments = {4001: [{"id": 5001, "content": "<div>First synthetic comment.</div>"},
                                 {"id": 5002, "content": "<div>Second synthetic comment.</div>"}],
                          4004: [{"id": 5003, "content": "<div>Bought it.</div>"}]}
@@ -125,32 +141,41 @@ def project_json(base, project):
             "url": f"{base}/{ACCOUNT_ID}/projects/{project['id']}.json", "dock": dock}
 
 
+def project_name(state, project_id):
+    return next(p["name"] for p in state.projects if p["id"] == project_id)
+
+
+def person(name):
+    return next(({"id": k, "name": v} for k, v in PEOPLE.items() if v == name), {"id": 7900, "name": name})
+
+
 def list_json(base, state, list_id):
-    spec = LISTS[list_id]
-    todos = [t for t in TODOS if t["list"] == list_id]
+    spec = state.lists[list_id]
+    todos = [t for t in state.todos if t["list"] == list_id]
     done = sum(1 for t in todos if state.completed[t["id"]])
     api = f"{base}/{ACCOUNT_ID}/buckets/{spec['project']}"
     return {"id": list_id, "status": "active", "type": "Todolist", "name": spec["name"], "title": spec["name"],
-            "description": "", "completed": False, "completed_ratio": f"{done}/{len(todos)}",
+            "description": spec.get("description", ""), "completed": False, "completed_ratio": f"{done}/{len(todos)}",
             "app_url": f"https://basecamp.invalid/{ACCOUNT_ID}/buckets/{spec['project']}/todolists/{list_id}",
             "url": f"{api}/todolists/{list_id}.json", "todos_url": f"{api}/todolists/{list_id}/todos.json",
-            "bucket": {"id": spec["project"], "name": next(p["name"] for p in PROJECTS if p["id"] == spec["project"]), "type": "Project"}}
+            "bucket": {"id": spec["project"], "name": project_name(state, spec["project"]), "type": "Project"}}
 
 
 def todo_json(base, state, todo):
-    spec = LISTS[todo["list"]]
+    spec = state.lists[todo["list"]]
     api = f"{base}/{ACCOUNT_ID}/buckets/{spec['project']}"
     return {"id": todo["id"], "status": "active", "type": "Todo", "title": todo["title"], "content": todo["title"],
             "description": todo["description"], "completed": state.completed[todo["id"]], "due_on": todo["due_on"],
-            "created_at": "2031-01-01T10:00:00.000Z", "updated_at": "2031-01-02T11:30:00.000Z",
-            "assignees": [{"id": 7000 + i, "name": name} for i, name in enumerate(todo["assignees"])],
+            "starts_on": todo["starts_on"], "created_at": "2031-01-01T10:00:00.000Z", "updated_at": "2031-01-02T11:30:00.000Z",
+            "assignees": [person(name) for name in todo["assignees"]],
+            "completion_subscribers": [person(name) for name in todo["subscribers"]],
             "creator": {"id": 7100, "name": "Cy Fixture"},
             "comments_count": len(state.comments.get(todo["id"], [])) if todo["id"] in state.comments else todo["comments_count"],
             "comments_url": f"{api}/recordings/{todo['id']}/comments.json",
             "app_url": f"https://basecamp.invalid/{ACCOUNT_ID}/buckets/{spec['project']}/todos/{todo['id']}",
             "url": f"{api}/todos/{todo['id']}.json",
             "parent": {"id": todo["list"], "title": spec["name"], "type": "Todolist"},
-            "bucket": {"id": spec["project"], "name": next(p["name"] for p in PROJECTS if p["id"] == spec["project"]), "type": "Project"}}
+            "bucket": {"id": spec["project"], "name": project_name(state, spec["project"]), "type": "Project"}}
 
 
 def comment_json(todo_id, project_id, comment):
@@ -210,7 +235,9 @@ def make_handler(state):
             try:
                 if "json" in kind and body:
                     loaded = json.loads(body)
-                    values.update({k: str(v) for k, v in loaded.items()} if isinstance(loaded, dict) else {})
+                    # Lists and null stay as sent (assignee ids, a cleared date); the rest as text.
+                    values.update({k: v if isinstance(v, list) or v is None else str(v) for k, v in loaded.items()}
+                                  if isinstance(loaded, dict) else {})
                 elif body:
                     values.update({k: v[0] for k, v in urllib.parse.parse_qs(body.decode()).items()})
             except (ValueError, UnicodeError):
@@ -244,17 +271,28 @@ def make_handler(state):
             rest = parts[1:]
             if method == "GET":
                 return self.read(rest, url, query)
-            if method == "POST":
-                return self.write(rest, self.params(url, body))
+            if method in ("POST", "PUT", "DELETE"):
+                if state.fail_writes:
+                    return self.send(500, {"error": "Synthetic write failure"})
+                params = self.params(url, body)
+                try:
+                    sent = json.loads(body) if body else None
+                except ValueError:
+                    sent = None
+                with state.lock:
+                    state.bodies.append((method, url.path, sent))
+                return self.write(method, rest, params)
             return self.send(405, {"error": "Method not allowed"})
 
         def read(self, rest, url, query):
             base = self.base()
             if rest == ["projects.json"]:
-                return self.send_collection("projects", [project_json(base, p) for p in PROJECTS], url, query)
+                return self.send_collection("projects", [project_json(base, p) for p in state.projects], url, query)
+            if rest == ["my", "profile.json"]:
+                return self.send_cached({"id": ME, "name": PEOPLE[ME], "email_address": "ada@example.invalid"})
             if len(rest) < 4 or rest[0] != "buckets" or not rest[1].isdigit():
                 return self.send(404, {"error": "Not found"})
-            project = next((p for p in PROJECTS if p["id"] == int(rest[1])), None)
+            project = next((p for p in state.projects if p["id"] == int(rest[1])), None)
             if not project:
                 return self.send(404, {"error": "Not found"})
             kind, leaf, tail = rest[2], rest[3], rest[4:]
@@ -268,7 +306,7 @@ def make_handler(state):
                 return self.send_collection("lists", [list_json(base, state, i) for i in project["lists"]], url, query)
             if kind == "todolists" and leaf.isdigit() and int(leaf) in project["lists"] and tail == ["todos.json"]:
                 want = query.get("completed", ["false"])[0] == "true"
-                todos = [todo_json(base, state, t) for t in TODOS if t["list"] == int(leaf) and state.completed[t["id"]] == want]
+                todos = [todo_json(base, state, t) for t in state.todos if t["list"] == int(leaf) and state.completed[t["id"]] == want]
                 return self.send_collection("todos", todos, url, query)
             if kind == "todolists" and leaf.endswith(".json") and leaf[:-5].isdigit() and int(leaf[:-5]) in project["lists"] and not tail:
                 return self.send_cached(list_json(base, state, int(leaf[:-5])))
@@ -283,14 +321,53 @@ def make_handler(state):
         def todo(self, project, raw):
             if not raw.isdigit():
                 return None
-            return next((t for t in TODOS if t["id"] == int(raw) and LISTS[t["list"]]["project"] == project["id"]), None)
+            return next((t for t in state.todos if t["id"] == int(raw) and state.lists[t["list"]]["project"] == project["id"]), None)
 
-        def write(self, rest, params):
-            if len(rest) != 5 or rest[0] != "buckets" or not rest[1].isdigit():
+        def new_id(self):
+            with state.lock:
+                state.next_record += 1
+                return state.next_record
+
+        def write(self, method, rest, params):
+            if len(rest) < 4 or rest[0] != "buckets" or not rest[1].isdigit():
                 return self.send(404, {"error": "Not found"})
-            project = next((p for p in PROJECTS if p["id"] == int(rest[1])), None)
-            todo = self.todo(project, rest[3]) if project else None
+            project = next((p for p in state.projects if p["id"] == int(rest[1])), None)
+            if not project:
+                return self.send(404, {"error": "Not found"})
+            kind, leaf, tail = rest[2], rest[3], rest[4:]
+            if method == "POST" and kind == "todosets" and leaf == str(project["todoset"]) and tail == ["todolists.json"]:
+                if not (params.get("name") or "").strip():
+                    return self.send(422, {"error": "name is required"})
+                list_id = self.new_id()
+                state.lists[list_id] = {"name": params["name"], "project": project["id"], "description": params.get("description") or ""}
+                project["lists"].append(list_id)
+                return self.send(201, list_json(self.base(), state, list_id))
+            if method == "POST" and kind == "todolists" and leaf.isdigit() and int(leaf) in project["lists"] and tail == ["todos.json"]:
+                if not (params.get("content") or "").strip():
+                    return self.send(422, {"error": "content is required"})
+                todo = {"id": self.new_id(), "list": int(leaf), "title": params["content"], "completed": False,
+                        "due_on": params.get("due_on"), "starts_on": params.get("starts_on"),
+                        "description": params.get("description") or "", "assignees": [], "subscribers": [], "comments_count": 0}
+                state.todos.append(todo)
+                state.completed[todo["id"]] = False
+                return self.send(201, todo_json(self.base(), state, todo))
+            todo = self.todo(project, leaf[:-5] if leaf.endswith(".json") else leaf)
             if not todo:
+                return self.send(404, {"error": "Not found"})
+            if method == "PUT" and leaf.endswith(".json") and not tail:
+                if not (params.get("content") or "").strip():
+                    return self.send(422, {"error": "content is required"})
+                names = lambda key: [PEOPLE.get(int(i), f"Person {i}") for i in params.get(key) or []]  # noqa: E731
+                # Basecamp clears whatever the body leaves out.
+                todo.update({"title": params["content"], "description": params.get("description") or "",
+                             "due_on": params.get("due_on"), "starts_on": params.get("starts_on"),
+                             "assignees": names("assignee_ids"), "subscribers": names("completion_subscriber_ids")})
+                return self.send(200, todo_json(self.base(), state, todo))
+            if method == "DELETE" and kind == "todos" and tail == ["completion.json"]:
+                with state.lock:
+                    state.completed[todo["id"]] = False
+                return self.send(204)
+            if method != "POST" or len(tail) != 1:
                 return self.send(404, {"error": "Not found"})
             if rest[2] == "recordings" and rest[4] == "comments.json":
                 if not (params.get("content") or "").strip():

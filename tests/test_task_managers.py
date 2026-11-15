@@ -134,7 +134,7 @@ class Base(unittest.TestCase):
 
 class Off(Base):
     def test_absent_config_is_off(self):
-        self.assertEqual(self.json("check"), {"enabled": False, "owner_login": None, "repos": [], "mappings": {}, "allowed_hosts": [], "require_login_header": False, "providers": [
+        self.assertEqual(self.json("check"), {"enabled": False, "owner_login": None, "repos": [], "mappings": {}, "repo_paths": {}, "ssh": None, "allowed_hosts": [], "require_login_header": False, "providers": [
             {"id": name, "label": label, "connected": False, "account": None, "token_expires_at": None} for name, label in tm.SOURCES]})
         for args in (["projects"], ["lists", "--project", "1001"], ["todos", "--list", "3001"], ["get", "--item", "4001", "--json"],
                      ["seed", "--item", "4001"], ["refresh"], ["complete", "--item", "4001"], ["run", "list"]):
@@ -409,7 +409,8 @@ class InProcess(Base):
             args = parser.parse_args(argv)
             self.assertEqual(args.provider, "basecamp")
             self.assertIs(args.json, "--json" in argv)
-        self.assertEqual(set(tm.MODULES), {"seed", "login", "refresh", "comment", "complete", "run"})
+        self.assertEqual(set(tm.MODULES), {"seed", "login", "refresh", "comment", "complete", "list-create", "todo-create",
+                                           "todo-update", "run"})
 
     def test_missing_module_is_not_installed(self):
         self.write_config()

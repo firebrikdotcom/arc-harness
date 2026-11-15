@@ -91,6 +91,16 @@ setup|migrate|serve)
   check|test)
     exec "$CARGO_BIN" "$1"
     ;;
+  tasks)
+    # Agent commands (attach, agent ...) run in the service binary without the
+    # server; from the service root so .env and DATABASE_URL resolve.
+    shift
+    if ! built=$("$CARGO_BIN" build --release --quiet --bin harness-audit 2>&1); then
+      printf '%s\n' "$built" >&2
+      exit 1
+    fi
+    exec "${CARGO_TARGET_DIR:-$SERVICE_ROOT/target}/release/harness-audit" tasks "$@"
+    ;;
   install)
     case "$(uname -s)" in
       Linux)
@@ -134,7 +144,7 @@ setup|migrate|serve)
     esac
     ;;
   *)
-    printf '%s\n' "Usage: scripts/audit-service.sh [setup|migrate|serve|install|status|check|test|render systemd|launchd]" >&2
+    printf '%s\n' "Usage: scripts/audit-service.sh [setup|migrate|serve|install|status|check|test|tasks ...|render systemd|launchd]" >&2
     exit 2
     ;;
 esac
