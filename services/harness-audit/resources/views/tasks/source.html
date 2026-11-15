@@ -1,0 +1,9 @@
+{% extends "capabilities/harness-audit-tasks/base.html" %}{% block tm_head %}<div class="tm-head"><div><p class="eyebrow">Source</p><h1>{{ source.label }}</h1><div class="tm-stats">{% if source.connected %}<span class="badge badge--success">Connected</span>{% else %}<span class="badge badge--ghost">Not connected</span>{% endif %}</div></div></div>{% endblock tm_head %}{% block tm_body %}
+{% if source.connected %}
+<p class="eyebrow">Projects · {{ projects | length }}</p>
+{% if projects %}<div class="tm-grid">{% for project in projects %}<a class="tm-card" href="/tasks/{{ source.id }}/projects/{{ project.id }}"><p class="eyebrow">{{ project.lists_count }} {% if project.lists_count == 1 %}list{% else %}lists{% endif %}</p><h3>{{ project.name }}</h3></a>{% endfor %}</div>{% else %}<section class="panel"><p class="tm-empty">This account has no projects with to-dos.</p></section>{% endif %}
+<section class="panel"><div class="panel__head"><h2>Connection</h2><span class="badge badge--success">Connected</span></div><div class="panel__body"><dl class="tm-conn"><div><dt>Account</dt><dd>{% if source.account %}{{ source.account }}{% else %}—{% endif %}</dd></div><div><dt>Token</dt><dd>{% if source.token_expires_at %}Expires <time data-client-time="{{ source.token_expires_at }}">{{ source.token_expires_at }}</time>{% else %}—{% endif %}</dd></div><div><dt>Credentials</dt><dd>Stay with the CLI; the dashboard never reads them</dd></div></dl></div></section>
+{% else %}
+<section class="panel"><div class="panel__head"><h2>{{ source.label }} is not connected</h2></div><div class="panel__body"><p>There is nothing to browse for this source yet.</p><p class="tm-note">A source is connected from a terminal, never from this page, so its credentials stay out of the browser. Which sources can be connected, and how, is described in <span class="mono tm-path">docs/task-managers.md</span>.</p></div></section>
+{% endif %}
+{% endblock tm_body %}

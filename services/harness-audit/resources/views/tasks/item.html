@@ -1,0 +1,35 @@
+{% extends "capabilities/harness-audit-tasks/base.html" %}{% import "capabilities/harness-audit-tasks/macros.html" as tm %}{% block tm_attrs %} data-tm-item{% if up %} data-tm-up="/tasks/{{ source.id }}/lists/{{ up }}"{% endif %}{% endblock tm_attrs %}{% block tm_body %}
+<div class="tm-pager">
+{% if prev %}<a class="button" href="/tasks/{{ source.id }}/items/{{ prev }}" data-tm-nav="prev">← Previous</a>{% elif up %}<a class="button" href="/tasks/{{ source.id }}/lists/{{ up }}">↑ Back to list</a>{% else %}<span></span>{% endif %}
+<span class="tm-count"><span class="tm-kbd">←</span> <span class="tm-kbd">→</span> to move, <span class="tm-kbd">Esc</span> back to the list</span>
+{% if next %}<a class="button" href="/tasks/{{ source.id }}/items/{{ next }}" data-tm-nav="next">Next →</a>{% elif up %}<a class="button" href="/tasks/{{ source.id }}/lists/{{ up }}">↑ Back to list</a>{% else %}<span></span>{% endif %}
+</div>
+<div class="tm-split">
+<div>
+<p class="eyebrow">{{ item.project.name }}{% if item.list.name %} / {{ item.list.name }}{% endif %}</p>
+<h1 class="tm-h1">{{ item.title }}</h1>
+<dl class="tm-meta"><div><dt>Status</dt><dd>{% if item.status == "done" %}<span class="badge badge--success">Done</span>{% else %}<span class="badge">Open</span>{% endif %}</dd></div><div><dt>Due</dt><dd>{% if item.due_on %}{{ item.due_on }}{% else %}No date{% endif %}</dd></div><div><dt>Assignees</dt><dd>{% if item.assignees %}{{ item.assignees | join(sep=", ") }}{% else %}Unassigned{% endif %}</dd></div><div><dt>Updated</dt><dd>{% if item.updated_at %}<time data-client-time="{{ item.updated_at }}">{{ item.updated_at }}</time>{% else %}—{% endif %}</dd></div></dl>
+<div class="tm-untrusted"><p class="eyebrow">Description · {{ source.label }} text, fenced as untrusted before an agent sees it</p><p>{% if item.description_text %}{{ item.description_text }}{% else %}(no description){% endif %}</p></div>
+<section class="panel"><div class="panel__head"><h2>Comment</h2><span class="tm-count">{{ item.comments_count }} on the item</span></div><div class="panel__body">
+<form class="tm-form" method="post" action="/tasks/{{ source.id }}/items/{{ item.id }}/comment"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><div class="row"><label for="tm-comment">Post a comment to {{ source.label }}</label><textarea id="tm-comment" name="text" rows="4" maxlength="10000" required></textarea></div><button class="button">Post comment</button></form>
+<p class="tm-note">Posted as you, on the item in {{ source.label }}. Existing comments are read there.</p>
+</div></section>
+<div class="tm-actions">{% if item.url %}<a class="button" href="{{ item.url }}" target="_blank" rel="noopener noreferrer">Open in {{ source.label }}</a>{% endif %}{% if item.status == "open" %}<form method="post" action="/tasks/{{ source.id }}/items/{{ item.id }}/complete" data-tm-confirm="Mark this item as done in {{ source.label }}?"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button">Mark complete</button></form>{% endif %}</div>
+</div>
+<aside>
+{% if active_run %}<section class="panel"><div class="panel__head"><h2>Delegated</h2>{{ tm::badge(label=active_run.label, tone=active_run.tone) }}</div><div class="panel__body"><p class="tm-count tm-count--block">{{ active_run.agent_label }} · {{ active_run.repo }}</p><a class="button button--wide" href="/tasks/runs/{{ active_run.id }}">Open run</a><p class="tm-note">A run is already working on this item. Nothing merges on its own.</p></div></section>
+{% elif item.status == "done" %}<section class="panel"><div class="panel__head"><h2>Delegate to an agent</h2></div><p class="tm-empty">This item is done; there is nothing to delegate.</p></section>
+{% elif not repos %}<section class="panel"><div class="panel__head"><h2>Delegate to an agent</h2></div><p class="tm-empty">No repositories are configured, so this item cannot be delegated. See docs/task-managers.md.</p></section>
+{% else %}<section class="panel"><div class="panel__head"><h2>Delegate to an agent</h2></div><div class="panel__body">
+<form class="tm-form" method="post" action="/tasks/{{ source.id }}/items/{{ item.id }}/delegate"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div class="row"><label for="tm-repo">Repository</label><select id="tm-repo" name="repo" required><option value=""{% if not default_repo %} selected{% endif %}>Choose a repository</option>{% for repo in repos %}<option value="{{ repo }}"{% if repo == default_repo %} selected{% endif %}>{{ repo }}</option>{% endfor %}</select>{% if default_repo %}<p class="tm-note tm-note--tight">From the mapping for this list.</p>{% endif %}</div>
+<div class="row"><label for="tm-agent">Agent</label><select id="tm-agent" name="agent"><option value="claude" selected>Claude Code</option><option value="codex">Codex</option></select></div>
+<label>What the agent does</label>
+<ol class="tm-plan"><li>Plan: writes the task contract from this item</li><li>Build on its own branch</li><li>Verify and independent review</li><li>Push the branch and open a <b>draft PR</b></li></ol>
+<div class="opt"><input type="checkbox" id="tm-plan-gate" name="plan_gate" value="on" checked><label class="tm-opt-label" for="tm-plan-gate">Pause for my approval of the plan before any file changes</label></div>
+<button class="button button--primary button--wide">Delegate and prepare PR</button>
+<p class="tm-note">You always approve the review; the harness never merges. The agent gets the item as fenced, size-capped text and no access to {{ source.label }}.</p>
+</form></div></section>{% endif %}
+</aside>
+</div>
+{% endblock tm_body %}

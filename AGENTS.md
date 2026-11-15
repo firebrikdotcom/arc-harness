@@ -18,6 +18,7 @@ This repository is a harness: the environment that makes an AI agent's work boun
 | `docs/architecture.md`, `docs/conventions.md` | How the pieces fit; coding conventions. |
 | `services/harness-signals/`, `scripts/signals-service.sh` | Optional error heat: pulls each tracked project's errors (per-machine `signals.json`) onto its architecture board; docs/observability-heatmap.md. |
 | `docs/issue-agents.md` | Read-only error investigations from architecture board cards, with takeover, live diff viewer, and dashboard diagnoses. |
+| `scripts/task_managers.py`, `docs/task-managers.md` | Optional task managers (Basecamp first): `harness tasks`, per-machine `task-managers.json`, fenced untrusted item text, delegated runs that end in a draft pull request. |
 | `docs/jev-checkpoints.md` | Optional Jev (TypeSafe) advice, and the `harness jev` switch that decides whether it is followed. |
 | `tests/` | One script per behaviour; `scripts/verify.sh` runs them all. |
 

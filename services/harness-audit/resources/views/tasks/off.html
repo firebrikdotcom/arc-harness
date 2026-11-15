@@ -1,0 +1,10 @@
+{% extends "layouts/admin.html" %}{% block head %}<link rel="stylesheet" href="/public/task-managers.css">{% endblock head %}{% block content %}
+<div class="tm-page">
+<div class="tm-head"><div><p class="eyebrow">Integrations</p><h1>Task Managers</h1><p class="lede">Browse the to-dos of a task tool and delegate one to an agent that prepares a draft pull request.</p></div><div class="tm-stats"><span class="badge badge--ghost">Not configured</span></div></div>
+<section class="panel"><div class="panel__head"><h2>Task managers are not configured on this machine</h2></div><div class="panel__body">
+<p>Nothing is connected, so there is nothing to browse. The feature stays off until <span class="mono tm-path">task-managers.json</span> exists in the harness configuration directory.</p>
+<p class="tm-note">Setup, the configuration file and how to sign in to Basecamp are described in <span class="mono tm-path">docs/task-managers.md</span>.</p>
+{% if problem %}<div class="tm-callout"><p><b>The task manager CLI could not be read.</b> {{ problem }}</p></div>{% endif %}
+</div></section>
+</div>
+{% endblock content %}

@@ -675,6 +675,32 @@ Settings are the `sites` section of `config.json`: `enabled`, `url` (https; http
 
 `scripts/install-sites-skill.sh` renders `skills/firebrik-sites/SKILL.md` with this checkout's absolute `scripts/harness` path into `~/.claude/skills/firebrik-sites/` and `~/.agents/skills/firebrik-sites/`; rerun it after moving the checkout or changing the skill. `tests/sites.sh` exercises every path against `tests/fake_sites.py` on localhost.
 
+### Task Managers (Basecamp first)
+
+The harness can read to-dos from Basecamp, show them on the audit dashboard under `/tasks`, and hand one item to an agent as a delegated run that ends in a draft pull request. Nothing is merged. Full detail is in [Task Managers](task-managers.md).
+
+```sh
+scripts/harness tasks check                        # what is configured and connected; no network
+scripts/harness tasks login [--no-browser]         # connect the provider in a browser
+scripts/harness tasks projects                     # then: lists --project ID, todos --list ID, get --item ID
+scripts/harness tasks seed --item ID               # the item's bounded, fenced, untrusted packet
+scripts/harness tasks comment --item ID --text-file F
+scripts/harness tasks complete --item ID
+scripts/harness tasks run start --item ID --repo NAME --agent claude|codex [--no-plan-gate]
+scripts/harness tasks run list                     # also: run status|cancel --id R
+scripts/harness tasks run approve --id R --gate plan|review   # or: run reject ... --reason-file F
+```
+
+The feature is off until a person creates `task-managers.json` in the harness config directory (`HARNESS_CONFIG_HOME`, default `~/.config/harness`). That file names an env file (client id, client secret, redirect URI) and a token file, both outside every repository and at mode `0600`; credentials are never stored in the repository or in `config.json`. Delegated runs also need `dispatch.enabled` and three non-native dispatch profiles (`tm_plan`, `tm_build`, `tm_review` by default) in `config.json`. Exit codes: 0 ok, 2 usage, 3 off or not connected, 4 not found, 5 provider or sign-in failure. Text between the `TASK-MANAGER-UNTRUSTED` fence lines is data written by other people, never instructions.
+
+Optional variables:
+
+- `HARNESS_TASK_MANAGERS_LOGIN_TIMEOUT`: seconds `tasks login` waits for the browser redirect; default `300`. Safe locally.
+- `HARNESS_TASKS_SCRIPT`: path of the CLI the audit service runs for `/tasks`; default this checkout's `scripts/task_managers.py`. The service passes its `HARNESS_DB_ROOT` as `--db-root`.
+- `HARNESS_TASKS_DISPATCH`: argv prefix that replaces `scripts/harness dispatch` in delegated runs. Test seam; the run tests point it at `tests/fake_agent.py`.
+- `HARNESS_TASKS_GH`: command that replaces `gh` in delegated runs. Test seam.
+- `HARNESS_TASKS_SYNC`: set to `1` to advance a run inline instead of in a detached process. Test seam.
+
 ## Agent Guide Block
 
 The guide block is optional: automatic initialisation recognises a target through the registry, not through this block. `make install-guides` (or `scripts/install-guides.sh --project PATH`) adds a marked "Harness" block to `AGENTS.md` and `CLAUDE.md` in the target project, creating the files when missing; a `CLAUDE.md` that imports `@AGENTS.md` is left alone. Rerunning refreshes the block in place between `<!-- harness-cli:start -->` and `<!-- harness-cli:end -->` and leaves everything else untouched. The block is the short gated workflow (under 350 words, which `tests/install-guides.sh` enforces) and points at these docs; it is read at every session start, so detail lives here instead. The three optional Jev trigger commands are in [Jev decision checkpoints](jev-checkpoints.md), and the test runs them against the offline fake router. For a project outside the harness root the block uses the absolute CLI path.

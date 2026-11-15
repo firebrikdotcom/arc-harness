@@ -59,8 +59,57 @@ def ensure_session(sid: str, context: dict) -> None:
         record("task_started", sid, context, name="Session work", description="Task summary has not been supplied.", status="running")
 
 
+FENCE_OPEN = "<<<TASK-MANAGER-UNTRUSTED"
+FENCE_CLOSE = "<<<END-TASK-MANAGER-UNTRUSTED>>>"
+
+
+def withhold_task_text(text: str, clean=None) -> str:
+    """Replace every fenced task-manager region with its digest and size, so item text
+    never reaches an audit event. The digest and size come from the text actually found,
+    not from the fence header; a fence with no closing line withholds the rest of the text.
+    A closing line with no opening before it (a fragment of a packet: a tail, an offset
+    read, a cut tool result) withholds everything from the start of the text, or from the
+    end of the previous region, through that closing line.
+    Call it on whole text, before any chunking or truncation. `clean` is applied to the
+    text outside fences only, so redaction cannot mangle the digest."""
+    clean = clean or (lambda part: part)
+    if not isinstance(text, str) or (FENCE_OPEN not in text and FENCE_CLOSE not in text):
+        return clean(text) if isinstance(text, str) else text
+
+    def placeholder(body: str, closed: bool) -> str:
+        body = body[1:] if body.startswith("\n") else body
+        body = body[:-1] if closed and body.endswith("\n") else body
+        raw = body.encode(errors="replace")
+        return "[task-manager text withheld sha256=" + hashlib.sha256(raw).hexdigest() + " bytes=" + str(len(raw)) + "]"
+
+    out, position = [], 0
+    while True:
+        start = text.find(FENCE_OPEN, position)
+        orphan = text.find(FENCE_CLOSE, position, None if start < 0 else start + len(FENCE_CLOSE))
+        if orphan >= 0:
+            # The opening line is missing: everything before this closing line is item text.
+            out.append(placeholder(text[position:orphan], True))
+            position = orphan + len(FENCE_CLOSE)
+            continue
+        if start < 0:
+            out.append(clean(text[position:]))
+            break
+        out.append(clean(text[position:start]))
+        inner = start + len(FENCE_OPEN)
+        # The header ends at the first >>> on its own line; a damaged header withholds from the marker on.
+        header = re.match(r"[^\n<>]{0,200}>>>", text[inner:])
+        if header:
+            inner += header.end()
+        end = text.find(FENCE_CLOSE, inner)
+        out.append(placeholder(text[inner:] if end < 0 else text[inner:end], end >= 0))
+        if end < 0:
+            break
+        position = end + len(FENCE_CLOSE)
+    return "".join(out)
+
+
 def short_label(value: str) -> str:
-    return " ".join(value.split()[:5])
+    return " ".join(withhold_task_text(value).split()[:5])
 
 
 def runtime_metadata(sid: str, context: dict, payload: dict | None = None, agent: str | None = None) -> None:
@@ -206,7 +255,7 @@ def tool_label(tool: str, tool_input) -> str | None:
         label = text("pattern")
     elif tool in ("Agent", "Task"):
         label = text("description")
-    label = " ".join(redact(label).split())
+    label = " ".join(withhold_task_text(label, redact).split())
     return label[:157] + "..." if len(label) > 160 else label or None
 
 
@@ -260,7 +309,7 @@ def tool_command(tool: str, tool_input) -> str | None:
         command = shlex.join(str(part) for part in command)
     if not isinstance(command, str) or not command.strip():
         return None
-    command = redact(command.strip())
+    command = withhold_task_text(command.strip(), redact)
     if len(command.encode()) > COMMAND_LIMIT:
         command = command.encode()[:COMMAND_LIMIT - 3].decode(errors="ignore") + "..."
     return command
@@ -281,7 +330,7 @@ def herdr_metadata(sid: str, context: dict, payload: dict) -> None:
         return
     if not isinstance(label, str) or not label.strip():
         return
-    label = " ".join(label.split())[:200]
+    label = " ".join(withhold_task_text(label).split())[:200]
     # A separate event keeps other metadata accepted by servers that predate this field.
     if context.get("herdr_tab") != label:
         record("session_updated", sid, {}, herdr_tab=label)
@@ -424,7 +473,7 @@ def capture_context(sid: str, context: dict, payload: dict) -> None:
         for role, kind, text, usage in parts:
             if index >= CONTEXT_TURN_ENTRIES:
                 break
-            text = redact(DATA_URI.sub("[image data omitted]", text))
+            text = withhold_task_text(text, lambda part: redact(DATA_URI.sub("[image data omitted]", part)))
             if not text.strip():
                 continue
             full = len(text.encode())
@@ -483,7 +532,7 @@ def hook(agent: str | None = None) -> int:
                 # The id is kept even when prompt storage is off: context records of the turn carry it.
                 prompt_id = context["prompt_id"] = str(uuid.uuid4())
                 if enabled("workflow.prompt_recorded"):
-                    chunks = chunk_text(prompt)
+                    chunks = chunk_text(withhold_task_text(prompt))
                     for index, text in enumerate(chunks):
                         record("prompt_recorded", sid, context, prompt_id=prompt_id,
                                part_index=index, part_count=len(chunks), text=text)
@@ -616,6 +665,12 @@ def main() -> int:
         if args.command in ("phase", "check", "gate"):
             return 0
         parser.error("--session-id is required when no native session environment is available")
+    # Curated text given on the command line is held to the same rule as captured text.
+    for key, value in list(vars(args).items()):
+        if key != "session_id" and isinstance(value, str):
+            setattr(args, key, withhold_task_text(value))
+        elif isinstance(value, list):
+            setattr(args, key, [withhold_task_text(item) for item in value])
     for key in ("name", "description", "parent_task_id"):
         value = getattr(args, key, None)
         if value is not None and (not value.strip() or len(value.encode()) > 2000):

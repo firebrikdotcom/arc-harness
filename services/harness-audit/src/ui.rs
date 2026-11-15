@@ -209,6 +209,10 @@ const NAVIGATION: &[NavItem] = &[
         label: "Agents",
         href: "/agents",
     },
+    NavItem {
+        label: "Task Managers",
+        href: "/tasks",
+    },
 ];
 
 #[derive(Debug, Default, Deserialize)]
@@ -225,7 +229,7 @@ pub struct EventsQuery {
     limit: Option<usize>,
 }
 
-async fn render(
+pub(crate) async fn render(
     registry: &UiRegistry,
     request: &HttpRequest,
     session: &Session,

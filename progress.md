@@ -1,5 +1,63 @@
 # Audit RAM repair handoff
 
+## Task Managers (Basecamp first) — 2026-11-14
+
+Status: milestones 1–6 built and live on this machine; **nothing committed.** Contract `tasks/task-managers.json`, run `20261114T223402Z-3475340`. Guide: `docs/task-managers.md`.
+
+Built (owner decisions: all six milestones, OwnerCheck gate, dashboard starts runs, Basecamp text kept out of the audit DB):
+- [x] reader + cache + CLI — `scripts/task_managers.py`, `harness tasks ...`; `sh tests/task-managers.sh`.
+- [x] login + refresh — `scripts/task_managers_auth.py`; refresh happens on a 401 or `harness tasks refresh` (no proactive refresh); `sh tests/task-managers-auth.sh`.
+- [x] dashboard — `services/harness-audit/src/tasks.rs`, `resources/views/tasks/`, `/tasks` in the nav; non-owner 404, POSTs need CSRF; `cargo test tasks::`.
+- [x] seed — `scripts/task_managers_seed.py`, fenced untrusted packet; `sh tests/task-managers-seed.sh`.
+- [x] audit exclusion — `withhold_task_text` in `scripts/workflow_audit.py`; `sh tests/workflow-audit-tasktext.sh`. Limit: text re-quoted outside a fence is still captured.
+- [x] delegated runs — `scripts/task_managers_runs.py`: three one-worker dispatch runs (plan, build, review), then commit, push `tm/...`, `gh pr create --draft`; never merges; `sh tests/task-managers-runs.sh`.
+- [x] write-back — `scripts/task_managers_write.py` (`comment`, `complete`), one POST each, no retry; `sh tests/task-managers-write.sh`.
+
+Live on this machine: `~/.config/harness/task-managers.json` (0600; owner login, Basecamp provider, seven repos, no list mappings yet), dispatch profiles `tm_plan`, `tm_build`, `tm_review` added to `config.json`, audit service restarted. Read path checked against real Basecamp (1 project, 8 lists, 11 open). **Not exercised live:** a real delegated run (real models, real `gh`), comment, complete.
+
+Follow-ups:
+- `amp.enabled` is on here: the dispatcher offers each run worker an Amp orb first, which would send the seed packet to the orb and push a `harness/...` branch. Decide before the first real run.
+- `dispatch.timeout_seconds` is 900; a build worker may need more.
+- Runs leave their worktree, branch, draft PR and run directory behind; an advance that dies leaves the run in its working state until `run advance` or cancel.
+- No watchdog, no list-to-repo mappings UI, no comment list on the item page, other providers are placeholders.
+- Human-only: denylist rule for the credential files; `tasks` in the hook pass-list.
+
+History (design notes kept for reference):
+
+Goal (owner): a "Task Managers" section in the audit dashboard where any task tool is a source (Basecamp first; Linear, GitHub Issues, Jira, Asana, Plane shown as not connected). Browse source → container → group → item, open items, delegate specific ones to agents that run the harness phases and prepare a **draft PR**. Owner approves plan and review; the harness never merges.
+
+Proven (live, GET only after token exchange):
+- Basecamp OAuth works. App registered by the owner at launchpad.37signals.com; redirect `http://localhost:18765/oauth/callback` (18081 is taken by Firebrik Website Status on both machines). One account, 1 project, 8 lists, 11 open to-dos, 0 comments. Access token 14 days, refresh token returned.
+- Endpoints used: `launchpad.37signals.com/authorization/new|token` (`type=web_server`), `/authorization.json`, `3.basecampapi.com/<acct>/projects.json`, project `dock` → `todoset` → `todolists_url` → `todos_url` → `comments_url`; `Link rel=next` pagination; `User-Agent` required. No read-only scope exists: read-only is our client's guarantee.
+
+Credentials (owner decision): in the vault, **not** git- or Syncthing-ignored, at owner's request.
+- `VAULT/.harness/basecamp.env` (`BASECAMP_CLIENT_ID`, `BASECAMP_CLIENT_SECRET`, `BASECAMP_REDIRECT_URI`), 0600.
+- `VAULT/.harness/basecamp.oauth` (token JSON), 0600. Never print either; check by length only.
+- The owner browses on another tailnet machine that reaches this one over SSH. Logins and pages must open **on the browsing machine**: `ssh BROWSER_HOST` with `XDG_RUNTIME_DIR=/run/user/$UID WAYLAND_DISPLAY=wayland-1 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID/bus xdg-open URL`. OAuth callback reaches this machine via `ssh -N -R 127.0.0.1:18765:127.0.0.1:18765 BROWSER_HOST`. Do not open browsers on this machine.
+
+Prototype (confirmation pending): `tasks/task-managers/prototype/`
+- `task_managers.template.html` (hash-routed single page; real dashboard CSS inlined at build), `build.py DATA_JSON OUT_HTML [--selftest]`, `basecamp_dump.py TOKEN_FILE OUT_JSON` (normalized snapshot), `basecamp_smoke.py ENV_FILE` (login + listing), `selftest.js` (headless delegate → approve plan → draft PR → approve review, bulk delegate, pager).
+- Data JSON and built HTML hold real to-do text: keep them out of the repo. Last copy opened on the browsing machine at `~/Downloads/task-managers-prototype.html` (0600).
+- Routes: `#/` all sources, `#/s/<source>`, `#/p/<project>`, `#/l/<list>`, `#/t/<todo>`, `#/runs`, `#/runs/<id>`. Prev/next walk the project; at the ends they go up a level; ← → Esc on to-dos.
+- Delegation UI: per-list repo mapping, agent (Claude Code / Codex), plan-approval gate (default on), write-back greyed out. Run phases: Queued → Plan → your plan approval → Build → Verify → Independent review → Draft PR → your review approval → Ready to merge. Runs and PRs are simulated in localStorage.
+- Owner feedback applied: other sources must be navigable (done), previous button must go up (done).
+
+Design (architect review; files read, not executed):
+- Dashboard = `services/harness-audit` (actix + Tera, `src/ui.rs`); it owns no domain data and shells to scripts with fixed argv, validated ids, timeout, bounded output (`src/boards.rs`, `src/agents.rs`, registered in `src/main.rs`). Copy that pattern: new `src/tasks.rs` → `scripts/task_managers.py` (stdlib only).
+- Provider seam: normalized item `{provider, id, project, list, title, description_text, status, assignees, due_on, url, updated_at}`; ops `check`, `projects`, `lists`, `todos`, `get`. Pull on demand with TTL + ETag cache under `HARNESS_DB_ROOT/task-managers/<provider>/`; no daemon.
+- Config: per-machine `~/.config/harness/task-managers.json` (absent = off) pointing at the vault credential files. Precedent: `services/harness-signals` (`signals.json`, `oauth.rs`) and `scripts/harness_config.py` `sites.token_file`.
+- Agents: `harness tasks list|show|seed --json`; `seed` prints a draft contract plus a fenced untrusted packet (HTML stripped, title 200, description 4,000 chars, 24 KiB total, no comments/attachments). `schemas/task.schema.json` is `additionalProperties: false` and needs `deliverables` + `acceptance`.
+- Milestones: (1) provider seam, Basecamp reader, cache, CLI against a fake server; (2) login + refresh; (3) dashboard section; (4) `seed` + bounds with an injection fixture; (5) delegation runs → draft PRs via `harness dispatch`; (6) write-back (comment/complete), separately approved.
+
+Open owner decisions:
+- Dashboard binds `0.0.0.0:18080` with no sign-in: gate Task Managers pages with `OwnerCheck` or bind loopback?
+- Guard/denylist changes (human-only files): add `tasks` to the hook pass-list; denylist rule for credential files.
+- Repo list for mapping (prototype offers arc, terminal-web, socket-conveyor, socket-conveyor-site, firebrikcom, android-terminal, harness-template). Which sources to show.
+- Start runs from the dashboard (prototype assumes yes, with gates) vs copy-command only in v1.
+- Basecamp text reaching the audit DB when `workflow_prompts`/`workflow_context` is on.
+
+Caution: unrelated uncommitted changes from another session are in the tree (`services/harness-audit/public/styles.css`, `.../partials/turn-context.html`, `src/ui.rs`, `src/workflow.rs`, `tasks/turn-context-json.json`); leave them alone.
+
 ## Turn context capture — 2026-11-13
 
 Contract: `tasks/turn-context-capture.json` (run `20261113T181625Z-12323`). Integration branch: `feature/turn-context-capture` (from master `e0fd3d7`).

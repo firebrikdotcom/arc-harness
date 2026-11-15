@@ -277,19 +277,22 @@ async fn workflow_events(
 }
 
 pub fn config(cfg: &mut web::ServiceConfig) {
-    cfg.configure(crate::ui::config).service(health).service(
-        web::scope("/api")
-            .service(collection_settings)
-            .service(update_settings)
-            .service(update_hook_settings)
-            .service(workflow_events)
-            .service(orchestration_summary)
-            .service(record_event)
-            .service(list_events)
-            .service(summary)
-            .service(checkpoint_summary)
-            .service(route_summary),
-    );
+    cfg.configure(crate::ui::config)
+        .configure(crate::tasks::config)
+        .service(health)
+        .service(
+            web::scope("/api")
+                .service(collection_settings)
+                .service(update_settings)
+                .service(update_hook_settings)
+                .service(workflow_events)
+                .service(orchestration_summary)
+                .service(record_event)
+                .service(list_events)
+                .service(summary)
+                .service(checkpoint_summary)
+                .service(route_summary),
+        );
 }
 
 #[cfg(test)]

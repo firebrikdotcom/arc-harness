@@ -19,6 +19,7 @@ mod reports;
 mod routes;
 mod settings;
 mod summary;
+mod tasks;
 mod ui;
 mod workflow;
 
@@ -51,8 +52,10 @@ fn builder(reports: reports::ReportStore) -> ArcAppBuilder {
         .register_data(boards::Boards::shared())
         .register_data(owner::OwnerCheck::shared())
         .register_data(agents::Agents::shared())
+        .register_data(tasks::Tasks::shared())
         .register_ui_host(ui::host())
         .register_ui(ui::contribution())
+        .register_ui(tasks::contribution())
         .register_routes(routes::config)
 }
 

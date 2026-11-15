@@ -1,0 +1,7 @@
+{% extends "layouts/admin.html" %}{% import "capabilities/harness-audit-tasks/macros.html" as tmbase %}{% block head %}<link rel="stylesheet" href="/public/task-managers.css"><script src="/public/task-managers.js" defer></script>{% endblock head %}{% block content %}
+<div class="tm-page"{% block tm_attrs %}{% endblock tm_attrs %}>
+{% block tm_head %}{% endblock tm_head %}
+{{ tmbase::tabs(sources=tm_sources, active=tm_active) }}
+{% block tm_body %}{% endblock tm_body %}
+</div>
+{% endblock content %}
