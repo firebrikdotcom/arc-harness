@@ -1,58 +1,60 @@
-# Handoff: Task Managers in the Arc service (create/edit, associations, open items, attachable agents)
+# Handoff: Task Managers (Basecamp) in the Arc audit service
 
-Written 2026-11-14 (local) for an agent that has not seen the conversation. Earlier versions are in git history.
+Updated 2026-11-14 (local). Read this first; earlier versions are in git history.
 
-## Where things stand
+## State
 
-All five slices are done, verified, independently reviewed and committed on `master`. The audit service runs the new binary.
+Shipped on `master` in `d2555c3`: create/edit lists and to-dos, full descriptions, list associations (repo + directory), open items with filter presets, attachable agents (`harness tasks agent ...`, `harness tasks attach`), dashboard pages for all of it. Verified (`scripts/verify.sh` exit 0, `make -C services/harness-audit test` 181 tests), independently reviewed, review findings fixed. Nothing is in progress.
 
-| Slice | State |
+Where to read:
+
+| Need | File |
 | --- | --- |
-| S1 Python provider driver | Done |
-| S2 Arc state (aggregates, store, filters) | Done |
-| S3 Agent runtime + `harness tasks attach|agent` | Done |
-| S4 Dashboard (routes, templates, route tests) | Done |
-| S5 Docs (`docs/task-managers.md`, `AGENTS.md` map) | Done |
-| Verify, independent review, fixes | Done |
+| Behaviour, commands, exits, routes, security, known gaps | `docs/task-managers.md` |
+| Contract (deliverables, constraints, non-goals, acceptance) | `tasks/task-managers/task.json` |
+| Original plan and Basecamp prototype | `tasks/task-managers/handoff.md`, `tasks/task-managers/prototype/` |
+| Python driver (HTTP, token, cache) | `scripts/task_managers.py`, `scripts/task_managers_write.py` |
+| State (event-sourced aggregates, sidecar `<db>.tasks.sqlite` index, no projectors) | `services/harness-audit/src/domain/task_*/`, `src/task_managers/{mod,store,open,cli}.rs` |
+| Agent runtime | `src/task_managers/agents/` (tests in `agents/tests.rs`) |
+| Dashboard | `src/tasks.rs`, `src/tasks/`, `resources/views/tasks/` (route tests in `src/tasks/tests/manage.rs`) |
 
-Evidence: `scripts/verify.sh --project .` exit 0 and `harness build done` with `create`, `existing`, `service` passing (run `20261115T045339Z-1784166`); `make -C services/harness-audit test` 181 Rust tests. The plan is `tasks/task-managers/handoff.md`, the contract `tasks/task-managers/task.json`, the reference `docs/task-managers.md`.
+## Running service on this machine
 
-## Independent review
+- The owner opens the dashboard at `http://100.83.189.74:18080/` (tailnet IP, plain http). Not through a `tailscale serve` domain; do not add a serve route on 18080, it takes over that port on the tailnet IP.
+- systemd user unit `harness-audit`, built with `cargo build --release` and run via `scripts/audit-service.sh serve`. `KillMode=process`, so agents survive a service stop.
+- The repo template `ops/harness-audit.service` binds `127.0.0.1` (commit `70c5ef9`). This machine overrides it with `~/.config/systemd/user/harness-audit.service.d/listen.conf` (`APP_URL=0.0.0.0`), which survives `scripts/audit-service.sh install`. After any reinstall or restart, check `ss -ltn | grep 18080` shows `0.0.0.0` and the IP URL answers 200.
+- The service builds from the working tree: a restart also ships whatever is uncommitted at the time.
+- `/tasks` access: `~/.config/harness/task-managers.json` has `owner_login` and lists `100.83.189.74` and the tailnet names in `allowed_hosts`. Only `/tasks` and worktree/session-focus views are owner-gated.
 
-A fresh-context reviewer returned one blocker and five should-fix findings; all six are fixed with tests:
+## How to work here
 
-- `agent done` refuses when the default branch cannot be resolved (`origin/HEAD` unset) and never pushes the default branch.
-- `--dir` (CLI, form or stored association) must belong to the allowlisted repository (same git common directory); checked at every start.
-- `gh pr create` gets `--repo OWNER/NAME` derived from `origin`; a non-GitHub origin is refused.
-- `done` can be retried: an existing open pull request of the branch is recorded instead of created again.
-- The edit form sends the title and due date only when changed; "Clear the due date" works with a prefilled date.
-- Claude's headless first turn runs with `--strict-mcp-config --tools Read,Grep,Glob --permission-mode plan`.
+- Harness: `harness plan start`, `contract set tasks/task-managers/task.json` (or a new contract), `plan done`, `build start`, then verify and `build done`. This project has `.harness-db/review-off`: `build done` completes the run, so run an independent review yourself (a fresh-context subagent) and show the findings to the owner.
+- Run verify as `HARNESS_RUNTIME_ACTIVE=1 scripts/verify.sh --project .`, and commit with `HARNESS_RUNTIME_ACTIVE=1 git commit ...` (the pre-commit hook runs verify, about 10 minutes). Without it, the active dev override makes `scripts/harness` re-exec through the managed launcher, which drops test fixtures' `HARNESS_DB_ROOT`; fixture tests then write to the real database and fail.
+- Fast loops: `sh tests/task-managers-create.sh`, `sh tests/task-managers.sh`, and in `services/harness-audit`: `cargo test --locked task_managers`, `cargo test --locked tasks::`. The `build done` gate runs `make test` with `HARNESS_DB_ROOT` set; reproduce with `HARNESS_DB_ROOT=$PWD/../../.harness-db make test </dev/null`.
+- Native subagents editing in place work well; give each disjoint files. The dispatcher's worker worktrees fail here (their snapshot commit triggers the pre-commit verify).
+- Commit directly on `master`. No `Co-Authored-By` trailer, no "Generated with" footer.
 
-Also changed: `check` emits the `ssh` key; a failed agent start leaves nothing behind; the agent runtime ignores an inherited `HARNESS_DB_ROOT`; `KillMode=process` in `ops/harness-audit.service`; `tests/harness-hook.sh` no longer reads the machine's shared config.
+## Open work, by value
 
-The project has `.harness-db/review-off`, so the review was advisory: no gated review phase ran.
+From the review (not acted on; also in `docs/task-managers.md` "Known gaps"):
 
-## Left open
+1. Fresh agent worktrees branch from the checkout's local `HEAD` with no fetch, so unpushed local commits ride into the pull request. Fix: fetch and base on `origin/HEAD`, as runs do.
+2. `done` on an `attached` agent removes the worktree while the owner's interactive session may still be in it.
+3. An association's directory is checked at agent start, not when saved (`src/tasks/edit.rs` could call `worktree::require_in_repo`).
+4. Dashboard agent views take the SSH destination from `HARNESS_TASKS_SSH` only; call `rt.resolve_ssh()` where `main.rs` builds the runtime.
+5. The supervisor loop does blocking database and file reads on the async executor every 2 seconds; move it to the blocking pool.
+6. `attach --print` takes the agent over and records `attached` although it only prints.
+7. Agent code uniqueness across items is enforced only by the index after the event commits (1 in 16.7 million collision stalls the index refresh).
+8. Claude's read-only first turn (`--strict-mcp-config --tools Read,Grep,Glob --permission-mode plan`) was checked against `claude --help`, not a live run. `--restricted` was not added.
 
-Review notes not acted on (see `docs/task-managers.md`, "Known gaps"):
+Harness issues found on the way (outside this feature):
 
-- A fresh agent worktree is based on the checkout's local `HEAD` with no fetch, so unpushed local commits ride along into the pull request.
-- `attach --print` takes the agent over and records `attached` even though it only prints.
-- `done` on an `attached` agent removes its worktree while the owner's interactive session may still be in it.
-- Agent code uniqueness across items is enforced only by the index after the event is committed (a 1 in 16.7 million collision would stall the index refresh).
-- The supervisor loop does blocking database and file reads on the async executor every 2 seconds.
-- An association's directory is checked at agent start, not when it is saved. Dashboard agent views take the SSH destination from `HARNESS_TASKS_SSH` only.
-- The Claude first-turn flags were checked against `claude --help`, not against a live run. `--restricted` was not added (it ignores the owner's settings files; untested).
-
-Harness and environment:
-
-- With the dev override pointing at this checkout, `scripts/harness` re-executes through the managed launcher and drops a test fixture's `HARNESS_DB_ROOT`, so fixture tests write to the real database and fail. Run verify (and commit, for the pre-commit hook) with `HARNESS_RUNTIME_ACTIVE=1` until that is fixed. Run `20261115T032028Z-942930` (paused, target under `/tmp`) is a leftover of that leak; only the owner can abort it.
-- `harness-signals` test `jobs::process::tests::a_child_reaped_during_the_check_is_not_alive` failed once in four full runs (a race; unrelated to this work).
-- `~/.config/harness/config.json`: `dispatch.timeout_seconds` 7200 and profiles `native_claude_build`, `native_claude_review` were kept.
-- The dispatcher's worker worktrees do not work in this repo (its snapshot commit triggers `.githooks/pre-commit`); native subagents edited in place instead.
-- `cargo clippy -- -D warnings` fails on lints in `orchestration.rs`, `reports.rs`, `summary.rs`, `ui.rs`, `workflow.rs` that predate this work.
+- Fix the launcher re-exec dropping `HARNESS_DB_ROOT` in tests (see "How to work here"). Run `20261115T032028Z-942930` (paused, target under `/tmp`) is a leftover of it; only the owner may abort it.
+- `harness-signals` test `jobs::process::tests::a_child_reaped_during_the_check_is_not_alive` is flaky (failed once in five full runs).
+- `cargo clippy -- -D warnings` fails on old lints in `orchestration.rs`, `reports.rs`, `summary.rs`, `ui.rs`, `workflow.rs`.
 
 ## Do not touch
 
-- Unrelated uncommitted work by someone else: `services/harness-audit/public/styles.css`, `resources/views/audit/partials/turn-context.html`, `src/reports.rs`, `src/ui.rs`, `src/workflow.rs`, `tasks/turn-context-json.json`.
-- `scripts/task_managers_runs.py` (the gated pipeline; a contract non-goal path).
+- Someone else's uncommitted work: `services/harness-audit/public/styles.css`, `resources/views/audit/partials/turn-context.html`, `src/reports.rs`, `src/ui.rs`, `src/workflow.rs`, `tasks/turn-context-json.json`.
+- `scripts/task_managers_runs.py` (the gated run pipeline; a contract non-goal).
+- `~/.config/harness/config.json` dispatch changes (`timeout_seconds` 7200, `native_claude_*` profiles) were kept on purpose.
