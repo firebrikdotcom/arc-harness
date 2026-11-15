@@ -50,7 +50,7 @@ Design (architect review; files read, not executed):
 - Milestones: (1) provider seam, Basecamp reader, cache, CLI against a fake server; (2) login + refresh; (3) dashboard section; (4) `seed` + bounds with an injection fixture; (5) delegation runs → draft PRs via `harness dispatch`; (6) write-back (comment/complete), separately approved.
 
 Open owner decisions:
-- Dashboard binds `0.0.0.0:18080` with no sign-in: gate Task Managers pages with `OwnerCheck` or bind loopback?
+- Historical note: the dashboard previously bound all interfaces without sign-in; service templates now bind loopback by default. Remote exposure requires deployment-specific access controls.
 - Guard/denylist changes (human-only files): add `tasks` to the hook pass-list; denylist rule for credential files.
 - Repo list for mapping (prototype offers arc, terminal-web, socket-conveyor, socket-conveyor-site, firebrikcom, android-terminal, harness-template). Which sources to show.
 - Start runs from the dashboard (prototype assumes yes, with gates) vs copy-command only in v1.
@@ -225,10 +225,10 @@ Audit service routes: `GET /projects/{id}/sessions/{key}` (page) and `GET /proje
 - [done] Confirmed upstream `master` still points to `c0e86b4005da9e9e07543ec7ff128003c52bac8d`.
 - [done] Preserved the existing hook-preference UI candidate and restored the current hardened `scripts/role_dispatch.py` behavior while retaining its user comment.
 - [done] Fixed `process::alive` for a child reaped between the signal-0 probe and `ps`; added regression coverage for zombie and reaped states.
-- [done] Verified the candidate with `/Users/me/.local/bin/harness-runtime exec scripts/verify.sh --project /Users/me/Code/harness-template-fix-harness-verification`: `ran=3, skipped=3, failures=0`.
+- [done] Verified the candidate with the pinned harness runtime in an isolated verification worktree: `ran=3, skipped=3, failures=0`.
 - [done] Copied the verified `scripts/role_dispatch.py` and `services/harness-signals/src/jobs/process.rs` into this checkout; both match the verified candidate byte-for-byte. Published harness runtime restored; Claude worker tab and task-owned dashboards closed.
 - [note] An initial direct, unwrapped verify run wrote run `20261112T202120Z-71134` into the primary `.harness-db` and failed on fixture isolation. The database record was left untouched; the required pinned wrapper run passed.
-- [retained] Worktree `/Users/me/Code/harness-template-fix-harness-verification` and branch `fix/harness-verification` remain because their changes are uncommitted and unmerged.
+- [retained] An isolated verification worktree and branch remain because their changes are uncommitted and unmerged.
 # Workflow session recency — 2026-11-13
 
 - Goal: move sessions with the newest interaction to the top of Workflow and refresh the directory live, preserving filters and pagination.

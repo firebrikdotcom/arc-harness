@@ -304,49 +304,49 @@ pub mod tests {
 
     #[test]
     fn loopback_without_the_serve_header_is_the_machine_owner() {
-        let policy = check("savior", None);
-        assert!(policy.allows_blocking(&from("127.0.0.1", None), &owner("savior", None)));
-        assert!(policy.allows_blocking(&from("::1", None), &owner("savior", Some("a@b.c"))));
+        let policy = check("fixture-user", None);
+        assert!(policy.allows_blocking(&from("127.0.0.1", None), &owner("fixture-user", None)));
+        assert!(policy.allows_blocking(&from("::1", None), &owner("fixture-user", Some("owner@example.test"))));
         assert!(!policy.allows_blocking(&from("127.0.0.1", None), &owner("other", None)));
         assert!(!check("", None).allows_blocking(&from("127.0.0.1", None), &owner("", None)));
     }
 
     #[test]
     fn loopback_with_the_serve_header_must_match_the_owner_login() {
-        let policy = check("savior", None);
-        let session = owner("savior", Some("Savio@Example.com"));
-        assert!(policy.allows_blocking(&from("127.0.0.1", Some("savio@example.com")), &session));
+        let policy = check("fixture-user", None);
+        let session = owner("fixture-user", Some("owner@example.test"));
+        assert!(policy.allows_blocking(&from("127.0.0.1", Some("owner@example.test")), &session));
         assert!(!policy.allows_blocking(&from("127.0.0.1", Some("eve@example.com")), &session));
         // A header with an owner that recorded no login never matches, even for the same OS user.
         assert!(!policy.allows_blocking(
-            &from("127.0.0.1", Some("savio@example.com")),
-            &owner("savior", None)
+            &from("127.0.0.1", Some("owner@example.test")),
+            &owner("fixture-user", None)
         ));
     }
 
     #[test]
     fn tailnet_peers_are_matched_with_whois() {
-        let session = owner("savior", Some("savio@example.com"));
-        let yes = check("savior", Some("savio@example.com"));
-        let no = check("savior", Some("eve@example.com"));
-        let down = check("savior", None);
+        let session = owner("fixture-user", Some("owner@example.test"));
+        let yes = check("fixture-user", Some("owner@example.test"));
+        let no = check("fixture-user", Some("other@example.test"));
+        let down = check("fixture-user", None);
         for ip in ["100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1"] {
             assert!(yes.allows_blocking(&from(ip, None), &session), "{ip}");
             assert!(!no.allows_blocking(&from(ip, None), &session), "{ip}");
             assert!(!down.allows_blocking(&from(ip, None), &session), "{ip}");
             // The serve header is ignored off loopback.
             assert!(
-                !no.allows_blocking(&from(ip, Some("savio@example.com")), &session),
+                !no.allows_blocking(&from(ip, Some("owner@example.test")), &session),
                 "{ip}"
             );
         }
-        assert!(!yes.allows_blocking(&from("100.64.0.1", None), &owner("savior", None)));
+        assert!(!yes.allows_blocking(&from("100.64.0.1", None), &owner("fixture-user", None)));
     }
 
     #[test]
     fn other_addresses_are_denied() {
-        let policy = check("savior", Some("savio@example.com"));
-        let session = owner("savior", Some("savio@example.com"));
+        let policy = check("fixture-user", Some("owner@example.test"));
+        let session = owner("fixture-user", Some("owner@example.test"));
         for ip in [
             "192.168.1.5",
             "10.0.0.2",
@@ -357,7 +357,7 @@ pub mod tests {
             "2001:db8::1",
         ] {
             assert!(
-                !policy.allows_blocking(&from(ip, Some("savio@example.com")), &session),
+                !policy.allows_blocking(&from(ip, Some("owner@example.test")), &session),
                 "{ip}"
             );
         }
@@ -370,8 +370,8 @@ pub mod tests {
 
     #[test]
     fn whois_output_is_read_for_the_login_only() {
-        let ok = br#"{"Node":{"Name":"x"},"UserProfile":{"LoginName":"savio@example.com"}}"#;
-        assert_eq!(login_from_whois(ok).as_deref(), Some("savio@example.com"));
+        let ok = br#"{"Node":{"Name":"x"},"UserProfile":{"LoginName":"owner@example.test"}}"#;
+        assert_eq!(login_from_whois(ok).as_deref(), Some("owner@example.test"));
         for bad in [
             &b"{}"[..],
             b"not json",

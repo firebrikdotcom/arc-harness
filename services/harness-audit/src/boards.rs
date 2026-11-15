@@ -445,12 +445,12 @@ mod tests {
         let row = sidebar_row(&json!({
             "id": "wt-1", "kind": "worktree", "parent": "main-1", "branch": "eng-1-x",
             "session_key": "Zk3_-Zk3_-Zk3_-Zk3_-Zk3_-Zk3_-ab",
-            "owner": {"user": "savior", "login": null},
+            "owner": {"user": "fixture-user", "login": null},
             "task": {"title": "T", "phase": "weird", "run_id": "r", "live": true, "last_active": "2026-11-05T10:00:00Z"},
         })).unwrap();
         assert_eq!(row["kind"], "worktree");
         assert_eq!(row["parent"], "main-1");
-        assert_eq!(row["owner"]["user"], "savior");
+        assert_eq!(row["owner"]["user"], "fixture-user");
         assert_eq!(row["task"]["phase"], "");
         assert_eq!(row["task"]["live"], true);
         let plain =

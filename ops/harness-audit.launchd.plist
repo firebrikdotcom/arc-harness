@@ -19,7 +19,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>APP_URL</key>
-    <string>0.0.0.0</string>
+    <string>127.0.0.1</string>
     <key>HARNESS_AUDIT_ENABLED</key>
     <string>1</string>
     <key>HARNESS_AUDIT_URL</key>
