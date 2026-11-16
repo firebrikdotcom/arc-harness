@@ -1358,7 +1358,11 @@ async fn workflow_page(
                         );
                     }
                     if indexed_query.list.is_none() {
-                        session["orphan_context"] = json!(store.session_orphan_context(&id)?);
+                        let mut orphans = store.session_orphan_context(&id)?;
+                        orphans
+                            .iter_mut()
+                            .for_each(crate::workflow::context_display);
+                        session["orphan_context"] = json!(orphans);
                     }
                     session["todo_rows"] = json!(store.session_todos(
                         &id,
@@ -1561,9 +1565,8 @@ fn stored_timeline(
 
 /// Give each prompt row on this page its stored turn context, read by prompt ID.
 fn attach_turn_context(store: &ReportStore, id: &str, rows: &mut [Value]) -> anyhow::Result<()> {
-    let is_prompt = |row: &Value| {
-        row["category"] == "prompt" && row["payload"]["prompt_id"].as_str().is_some()
-    };
+    let is_prompt =
+        |row: &Value| row["category"] == "prompt" && row["payload"]["prompt_id"].as_str().is_some();
     let mut ids: Vec<String> = rows
         .iter()
         .filter(|row| is_prompt(row))
@@ -1581,6 +1584,7 @@ fn attach_turn_context(store: &ReportStore, id: &str, rows: &mut [Value]) -> any
             .and_then(|prompt| turns.get(prompt))
         {
             row["turn_context"] = turn.clone();
+            crate::workflow::context_display(&mut row["turn_context"]);
         }
     }
     Ok(())
@@ -4256,9 +4260,7 @@ mod tests {
             json!({"event_type":"workflow.prompt_recorded","payload":{"session_id":"s","task_id":"t","prompt_id":"p1","part_index":0,"part_count":1,"text":"Fix it","occurred_at":"2026-10-02T00:00:02Z"}}),
         ];
         let mut session = crate::workflow::sessions(&rows).remove(0);
-        let chunk = |entry: &str, index: u64, text: &str, kind: &str, truncated: bool| {
-            json!({"payload":{"session_id":"s","prompt_id":"p1","entry_id":entry,"entry_index":index,"role":"assistant","kind":kind,"part_index":0,"part_count":1,"text":text,"entry_bytes":text.len(),"truncated":truncated,"input_tokens":10,"output_tokens":4,"occurred_at":"2026-10-02T00:00:03Z"}})
-        };
+        let chunk = |entry: &str, index: u64, text: &str, kind: &str, truncated: bool| json!({"payload":{"session_id":"s","prompt_id":"p1","entry_id":entry,"entry_index":index,"role":"assistant","kind":kind,"part_index":0,"part_count":1,"text":text,"entry_bytes":text.len(),"truncated":truncated,"input_tokens":10,"output_tokens":4,"occurred_at":"2026-10-02T00:00:03Z"}});
         let turn = crate::workflow::context_turn(
             &[
                 chunk("a", 0, "read the <file>", "tool_use", false),
@@ -4276,7 +4278,8 @@ mod tests {
         }
         session["indexed_total"] = json!(indexed.len());
         session["indexed_rows"] = json!(indexed);
-        let mut orphan = crate::workflow::context_turn(&[chunk("o", 0, "lone <i>reply</i>", "text", false)], 10);
+        let mut orphan =
+            crate::workflow::context_turn(&[chunk("o", 0, "lone <i>reply</i>", "text", false)], 10);
         orphan["prompt_id"] = json!("p-unstored");
         session["orphan_context"] = json!([orphan]);
         let html = render_session(&session, &query);
@@ -4289,6 +4292,57 @@ mod tests {
         assert!(html.contains("p-unstored"));
         session["orphan_context"] = json!([]);
         assert!(!render_session(&session, &query).contains("without a stored prompt"));
+    }
+
+    #[test]
+    fn turn_context_json_renders_escaped_folds_and_leaves_prose_a_paragraph() {
+        let chunk = |entry: &str, index: u64, text: &str| json!({"payload":{"entry_id":entry,"entry_index":index,"role":"assistant","kind":"tool_use","part_index":0,"part_count":1,"text":text,"entry_bytes":text.len(),"truncated":false}});
+        let mut turn = crate::workflow::context_turn(
+            &[
+                chunk(
+                    "a",
+                    0,
+                    r#"Bash {"command":"echo <b>","<b>k":[{"x":"<i>"}]}"#,
+                ),
+                chunk("c", 1, "plain <u>prose</u>"),
+                chunk("d", 2, "out <em>\n{\"k\":\"<s>"),
+            ],
+            10,
+        );
+        let render = |turn: &Value| {
+            let mut context = Context::new();
+            context.insert("ctx", turn);
+            fragments()
+                .render("audit/partials/turn-context.html", &context)
+                .expect("Turn context renders")
+        };
+        // Without the page's fold tokens the indented text is still shown whole.
+        assert!(render(&turn).contains(
+            "<pre class=\"prompt-text turn-entry__json\">out &lt;em&gt;\n{\n  &quot;k&quot;: &quot;&lt;s&gt;</pre>"
+        ));
+        crate::workflow::context_display(&mut turn);
+        let html = render(&turn);
+        assert!(html.contains(concat!(
+            "<div class=\"prompt-text turn-entry__json\">",
+            "<details open><summary>Bash {<span class=\"turn-entry__hint\"> … 2 keys }</span></summary>",
+            "<details open><summary>  &quot;&lt;b&gt;k&quot;: [<span class=\"turn-entry__hint\"> … 1 item ],</span></summary>",
+            "<details><summary>    {<span class=\"turn-entry__hint\"> … 1 key }</span></summary>",
+            "<div>      &quot;x&quot;: &quot;&lt;i&gt;&quot;</div><div>    }</div></details>",
+            "<div>  ],</div></details>",
+            "<div>  &quot;command&quot;: &quot;echo &lt;b&gt;&quot;</div><div>}</div></details></div>",
+        )));
+        assert!(html.contains(concat!(
+            "<div class=\"prompt-text turn-entry__json\"><div>out &lt;em&gt;</div>",
+            "<details open><summary>{<span class=\"turn-entry__hint\"> … 1 key</span></summary>",
+            "<div>  &quot;k&quot;: &quot;&lt;s&gt;</div></details></div>",
+        )));
+        assert!(html.contains("<p class=\"prompt-text\">plain &lt;u&gt;prose&lt;&#x2F;u&gt;</p>"));
+        assert_eq!(html.matches("<details").count(), 5);
+        assert_eq!(html.matches("</details>").count(), 5);
+        assert!(!html.contains("<pre"));
+        for tag in ["<b>", "<i>", "<u>", "<em>", "<s>"] {
+            assert!(!html.contains(tag), "{tag}");
+        }
     }
 
     #[test]

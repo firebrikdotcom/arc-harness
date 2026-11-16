@@ -55,8 +55,11 @@ Harness issues found on the way (outside this feature):
 - `harness-signals` test `jobs::process::tests::a_child_reaped_during_the_check_is_not_alive` is flaky (failed once in five full runs).
 - `cargo clippy -- -D warnings` fails on old lints in `orchestration.rs`, `reports.rs`, `summary.rs`, `ui.rs`, `workflow.rs`.
 
+## Turn context JSON (separate work, shipped)
+
+Contract `tasks/turn-context-json.json`. On the workflow page, JSON in a turn context entry is indented in place (whole text, after a tool name, after a text preamble, on a line among other output, or cut off by the entry cap) and every non-empty object and array is a server-rendered `<details>`, two levels open by default; no JavaScript. `workflow::context_json` builds the `json` string, `workflow::context_display` adds the page-only `json_tokens`, and `partials/turn-context.html` renders them. Verified (`scripts/verify.sh` exit 0, audit suite 184 tests) and checked on the served pages' markup; not looked at in a browser, and not independently reviewed. Known limits: complete values are re-serialised (keys sorted, numbers may change form); a second value on one line and scalar-only arrays among other text stay as written.
+
 ## Do not touch
 
-- Someone else's uncommitted work: `services/harness-audit/public/styles.css`, `resources/views/audit/partials/turn-context.html`, `src/reports.rs`, `src/ui.rs`, `src/workflow.rs`, `tasks/turn-context-json.json`.
 - `scripts/task_managers_runs.py` (the gated run pipeline; a contract non-goal).
 - `~/.config/harness/config.json` dispatch changes (`timeout_seconds` 7200, `native_claude_*` profiles) were kept on purpose.

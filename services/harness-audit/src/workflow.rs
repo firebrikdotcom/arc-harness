@@ -211,7 +211,8 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
         {
             return Err("invalid context chunk");
         }
-        if !["user", "assistant", "system", "tool"].contains(&payload["role"].as_str().unwrap_or(""))
+        if !["user", "assistant", "system", "tool"]
+            .contains(&payload["role"].as_str().unwrap_or(""))
             || ![
                 "text",
                 "thinking",
@@ -225,9 +226,9 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
             return Err("invalid context role or kind");
         }
         if object.contains_key("sha256")
-            && payload["sha256"].as_str().is_none_or(|s| {
-                s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit())
-            })
+            && payload["sha256"]
+                .as_str()
+                .is_none_or(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
         {
             return Err("invalid context digest");
         }
@@ -237,7 +238,9 @@ pub fn validate(event_type: &str, payload: &Value) -> Result<(), &'static str> {
             "cache_read_tokens",
             "cache_creation_tokens",
         ] {
-            if object.contains_key(key) && !payload[key].is_null() && payload[key].as_u64().is_none()
+            if object.contains_key(key)
+                && !payload[key].is_null()
+                && payload[key].as_u64().is_none()
             {
                 return Err("token counts must be nonnegative integers");
             }
@@ -354,11 +357,13 @@ pub(crate) fn context_turn(chunks: &[Value], limit: usize) -> Value {
             }
         }
         let expected = head["part_count"].as_u64().unwrap_or(0);
+        let text = parts.values().cloned().collect::<String>();
+        let json = context_json(&text);
         list.push(json!({
             "entry_id": entry, "entry_index": head["entry_index"],
             "role": head["role"], "kind": head["kind"],
             "entry_bytes": head["entry_bytes"], "truncated": head["truncated"] == true,
-            "text": parts.values().cloned().collect::<String>(),
+            "text": text, "json": json,
             "incomplete": parts.len() as u64 != expected,
         }));
     }
@@ -369,6 +374,227 @@ pub(crate) fn context_turn(chunks: &[Value], limit: usize) -> Value {
         "cache_read_tokens": counted[2].then_some(totals[2]),
         "cache_creation_tokens": counted[3].then_some(totals[3]),
     })
+}
+
+/// An entry text with each JSON object or array in it indented in place and the
+/// text around it kept as written, or nothing when it holds none. A value starts
+/// a line, or follows the one word a tool call puts ahead of its input. JSON cut
+/// off by the end of the text is indented as far as it goes; prose, bare
+/// scalars, empty values and malformed JSON stay as they are.
+pub(crate) fn context_json(text: &str) -> Option<String> {
+    let lines = context_json_lines(text)?;
+    let lines: Vec<&str> = lines.iter().map(|(_, line)| line.as_str()).collect();
+    Some(lines.join("\n"))
+}
+
+/// The lines of `context_json` as display tokens, so the page can fold every
+/// object and array: `open` starts one (its `text` is the line that opens it,
+/// `hint` what a folded one hides), `close` ends it and `line` is any other
+/// line. Joined by newlines the token texts are the `context_json` string; a
+/// `close` for JSON the text never closed has no text. The value and its direct
+/// children start open, deeper levels folded.
+pub(crate) fn context_json_tokens(text: &str) -> Option<Vec<Value>> {
+    fn hint(open: &mut Value, count: u64, close: &str) {
+        let noun = match (
+            open["text"].as_str().is_some_and(|t| t.ends_with('{')),
+            count,
+        ) {
+            (true, 1) => "key",
+            (true, _) => "keys",
+            (false, 1) => "item",
+            (false, _) => "items",
+        };
+        open["count"] = json!(count);
+        open["hint"] = json!(format!(" … {count} {noun} {close}").trim_end());
+    }
+    let mut tokens: Vec<Value> = Vec::new();
+    let mut folds: Vec<(usize, u64)> = Vec::new();
+    for (fold, line) in context_json_lines(text)? {
+        let closes = matches!(fold, Fold::Close) && !folds.is_empty();
+        if !closes {
+            if let Some(parent) = folds.last_mut() {
+                parent.1 += 1;
+            }
+        }
+        match fold {
+            Fold::Open => {
+                let depth = folds.len();
+                folds.push((tokens.len(), 0));
+                tokens.push(json!({"kind":"open","text":line,"depth":depth,"open":depth < 2}));
+            }
+            Fold::Close if closes => {
+                if let Some((at, count)) = folds.pop() {
+                    hint(&mut tokens[at], count, line.trim());
+                }
+                tokens.push(json!({"kind":"close","text":line}));
+            }
+            _ => tokens.push(json!({"kind":"line","text":line})),
+        }
+    }
+    while let Some((at, count)) = folds.pop() {
+        hint(&mut tokens[at], count, "");
+        tokens.push(json!({"kind":"close","text":null}));
+    }
+    Some(tokens)
+}
+
+/// Give a turn's JSON entries their fold tokens, for the page only.
+pub(crate) fn context_display(turn: &mut Value) {
+    for entry in turn["entries"].as_array_mut().into_iter().flatten() {
+        if !entry["json"].is_null() {
+            entry["json_tokens"] = json!(context_json_tokens(entry["text"].as_str().unwrap_or("")));
+        }
+    }
+}
+
+/// What a display line does to the fold it sits in.
+enum Fold {
+    Line,
+    Open,
+    Close,
+}
+
+/// The display lines behind `context_json`, or nothing when no JSON was indented.
+fn context_json_lines(text: &str) -> Option<Vec<(Fold, String)>> {
+    let unbroken = |line: &str| line.strip_suffix('\n').unwrap_or(line).to_owned();
+    let mut lines = Vec::new();
+    let mut found = false;
+    let mut at = 0;
+    while at < text.len() {
+        let line_end = text[at..].find('\n').map_or(text.len(), |n| at + n + 1);
+        let line = &text[at..line_end];
+        let mut start = at + line.len() - line.trim_start_matches([' ', '\t']).len();
+        if at == 0 && start == 0 && !line.starts_with(['{', '[']) {
+            if let Some((label, _)) = line.split_once(' ').filter(|(label, _)| !label.is_empty()) {
+                start = label.len() + 1;
+            }
+        }
+        let rest = &text[start..];
+        if rest.starts_with(['{', '[']) {
+            let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Value>();
+            match stream.next() {
+                Some(Ok(value)) => {
+                    let end = start + stream.byte_offset();
+                    let alone = text[..start].trim().is_empty() && text[end..].trim().is_empty();
+                    if indents(&value, alone) {
+                        let line_end = text[end..].find('\n').map_or(text.len(), |n| end + n + 1);
+                        let mut value_lines = json_lines(&value.to_string());
+                        if let Some((_, first)) = value_lines.first_mut() {
+                            first.insert_str(0, &text[at..start]);
+                        }
+                        if let Some((_, last)) = value_lines.last_mut() {
+                            last.push_str(&unbroken(&text[end..line_end]));
+                        }
+                        lines.append(&mut value_lines);
+                        found = true;
+                        at = line_end;
+                        continue;
+                    }
+                }
+                Some(Err(error)) if error.is_eof() && cut_json_start(rest) => {
+                    let mut value_lines = json_lines(rest);
+                    if let Some((_, first)) = value_lines.first_mut() {
+                        first.insert_str(0, &text[at..start]);
+                    }
+                    lines.append(&mut value_lines);
+                    return Some(lines);
+                }
+                _ => {}
+            }
+        }
+        lines.push((Fold::Line, unbroken(line)));
+        at = line_end;
+    }
+    if text.ends_with('\n') {
+        lines.push((Fold::Line, String::new()));
+    }
+    found.then_some(lines)
+}
+
+/// Whether a value is indented: a non-empty object or array. A list of plain
+/// scalars reads as prose (`[1] done`) unless it is the whole text.
+fn indents(value: &Value, alone: bool) -> bool {
+    let nested = |item: &Value| item.is_object() || item.is_array();
+    match value {
+        Value::Object(map) => !map.is_empty(),
+        Value::Array(items) => !items.is_empty() && (alone || items.iter().any(nested)),
+        _ => false,
+    }
+}
+
+/// Whether text that ran out mid-value opens the way JSON does: `{"`, `[{`, `[[` or `["`.
+fn cut_json_start(source: &str) -> bool {
+    let mut chars = source.chars();
+    let open = chars.next();
+    let next = chars.find(|c| !c.is_whitespace());
+    matches!(
+        (open, next),
+        (Some('{'), Some('"')) | (Some('['), Some('{' | '[' | '"'))
+    )
+}
+
+/// JSON source as indented lines, whole or stopping part way, adding nothing
+/// the source does not hold.
+fn json_lines(source: &str) -> Vec<(Fold, String)> {
+    let mut lines = Vec::new();
+    let mut fold = Fold::Line;
+    let mut out = String::new();
+    let mut depth = 0usize;
+    let (mut quoted, mut escaped) = (false, false);
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        if quoted {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                quoted = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                out.push(c);
+                while chars.next_if(|next| next.is_whitespace()).is_some() {}
+                match chars.next_if(|next| matches!(next, '}' | ']')) {
+                    Some(close) => out.push(close),
+                    None => {
+                        depth += 1;
+                        let line = std::mem::replace(&mut out, "  ".repeat(depth));
+                        lines.push((Fold::Open, line));
+                        fold = Fold::Line;
+                    }
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                let line = std::mem::replace(&mut out, "  ".repeat(depth));
+                lines.push((std::mem::replace(&mut fold, Fold::Close), line));
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                let line = std::mem::replace(&mut out, "  ".repeat(depth));
+                lines.push((std::mem::replace(&mut fold, Fold::Line), line));
+            }
+            ':' => out.push_str(": "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    if !quoted {
+        out.truncate(out.trim_end().len());
+    }
+    if !out.is_empty() {
+        lines.push((fold, out));
+    }
+    lines
 }
 
 /// The collector's stand-in description for a task nobody has named yet.
@@ -1437,7 +1663,10 @@ mod tests {
         ] {
             let mut bad = good.clone();
             bad[key] = value;
-            assert!(validate("workflow.context_recorded", &bad).is_err(), "{key}");
+            assert!(
+                validate("workflow.context_recorded", &bad).is_err(),
+                "{key}"
+            );
         }
         let mut missing = good.clone();
         missing.as_object_mut().unwrap().remove("entry_id");
@@ -1470,6 +1699,163 @@ mod tests {
         // A session replay never lists context among its events.
         let session = sessions(&[chunk("e1", 0, 0, "hello", 2)]);
         assert!(session.is_empty() || session[0]["events"].as_array().unwrap().is_empty());
+    }
+    #[test]
+    fn turn_context_json_indents_values_in_place_and_keeps_the_text_around_them() {
+        for (text, shown) in [
+            (
+                "Script completed\nWall time 0.3 seconds\nOutput:\n\n{\"chunk_id\":\"dd2077\",\"exit_code\":0,\"output\":\"hi\\n\"}",
+                "Script completed\nWall time 0.3 seconds\nOutput:\n\n{\n  \"chunk_id\": \"dd2077\",\n  \"exit_code\": 0,\n  \"output\": \"hi\\n\"\n}",
+            ),
+            (
+                "AUDIT DELIVERY QUEUED: TimeoutError\n{\"session_id\": \"x\", \"recorded\": true}\nAUDIT DELIVERY QUEUED: HTTP 503\ntodo plan: [1] done",
+                "AUDIT DELIVERY QUEUED: TimeoutError\n{\n  \"recorded\": true,\n  \"session_id\": \"x\"\n}\nAUDIT DELIVERY QUEUED: HTTP 503\ntodo plan: [1] done",
+            ),
+            (
+                "{\n  \"status\": \"failed\",\n  \"handoffs\": []\n}\nOK: step 17/200 recorded",
+                "{\n  \"handoffs\": [],\n  \"status\": \"failed\"\n}\nOK: step 17/200 recorded",
+            ),
+            (
+                "Bash {\"command\":\"ls -la\",\"timeout\":5}",
+                "Bash {\n  \"command\": \"ls -la\",\n  \"timeout\": 5\n}",
+            ),
+            ("{\"a\":1} trailing\n", "{\n  \"a\": 1\n} trailing\n"),
+            ("one\n  {\"a\":1}\n{\"b\":[]}", "one\n  {\n  \"a\": 1\n}\n{\n  \"b\": []\n}"),
+            (" [{\"a\":1},\"two\"] ", " [\n  {\n    \"a\": 1\n  },\n  \"two\"\n] "),
+            ("[1,2]", "[\n  1,\n  2\n]"),
+        ] {
+            assert_eq!(context_json(text).as_deref(), Some(shown), "{text}");
+        }
+    }
+    #[test]
+    fn turn_context_json_indents_cut_off_json_without_completing_it() {
+        for (text, shown) in [
+            (
+                "{\"type\": \"additional_tools\", \"tools\": [{\"name\": \"a,b\", \"x\": {}, \"d\": \"q\\\"{",
+                "{\n  \"type\": \"additional_tools\",\n  \"tools\": [\n    {\n      \"name\": \"a,b\",\n      \"x\": {},\n      \"d\": \"q\\\"{",
+            ),
+            ("Output:\n{\"a\": [1, 2", "Output:\n{\n  \"a\": [\n    1,\n    2"),
+            ("{\"a\": {\"b\": 1},", "{\n  \"a\": {\n    \"b\": 1\n  },"),
+            ("Bash {\"command\":\"ls", "Bash {\n  \"command\": \"ls"),
+            ("[{\"a\":1},{", "[\n  {\n    \"a\": 1\n  },\n  {"),
+        ] {
+            assert_eq!(context_json(text).as_deref(), Some(shown), "{text}");
+        }
+    }
+    #[test]
+    fn turn_context_json_leaves_other_text_alone() {
+        let chunk = |text: &str| json!({"payload":{"entry_id":"e","entry_index":0,"role":"assistant","kind":"text","part_index":0,"part_count":1,"text":text}});
+        for text in [
+            "all done, see {the notes}",
+            "{the notes}",
+            "[1] done",
+            "[1] [2]",
+            "note\n[1, 2, 3]\nmore",
+            "42",
+            r#""hi""#,
+            "true",
+            "{}",
+            "[]",
+            "{'a': 1}",
+            r#"{"a":1,}"#,
+            "{\"a\":1,}\nrest",
+            "{\"a\": \"cut\nmore text",
+            r#"Two words {"a":1}"#,
+            "ends with {",
+            "list\n[1, 2",
+            "",
+        ] {
+            assert_eq!(context_json(text), None, "{text}");
+            let entry = &context_turn(&[chunk(text)], 10)["entries"][0];
+            assert_eq!(entry["text"], text);
+            assert_eq!(entry["json"], Value::Null);
+        }
+        // The stored text stays as it was beside the display form.
+        let text = r#"Read {"file_path":"/a"}"#;
+        let entry = &context_turn(&[chunk(text)], 10)["entries"][0];
+        assert_eq!(entry["text"], text);
+        assert_eq!(entry["json"], "Read {\n  \"file_path\": \"/a\"\n}");
+    }
+    #[test]
+    fn turn_context_json_tokens_fold_each_object_and_array_two_levels_open() {
+        let tokens = context_json_tokens(r#"Bash {"a":{"b":[{"c":1}],"e":{}},"d":2}"#).unwrap();
+        assert_eq!(
+            json!(tokens),
+            json!([
+                {"kind":"open","text":"Bash {","depth":0,"open":true,"count":2,"hint":" … 2 keys }"},
+                {"kind":"open","text":"  \"a\": {","depth":1,"open":true,"count":2,"hint":" … 2 keys },"},
+                {"kind":"open","text":"    \"b\": [","depth":2,"open":false,"count":1,"hint":" … 1 item ],"},
+                {"kind":"open","text":"      {","depth":3,"open":false,"count":1,"hint":" … 1 key }"},
+                {"kind":"line","text":"        \"c\": 1"},
+                {"kind":"close","text":"      }"},
+                {"kind":"close","text":"    ],"},
+                {"kind":"line","text":"    \"e\": {}"},
+                {"kind":"close","text":"  },"},
+                {"kind":"line","text":"  \"d\": 2"},
+                {"kind":"close","text":"}"},
+            ])
+        );
+        // Cut-off JSON folds too; its missing brackets close the markup without text.
+        let tokens = context_json_tokens("Output:\n{\"tools\": [{\"name\": \"a\"}, {\"na").unwrap();
+        assert_eq!(
+            json!(tokens),
+            json!([
+                {"kind":"line","text":"Output:"},
+                {"kind":"open","text":"{","depth":0,"open":true,"count":1,"hint":" … 1 key"},
+                {"kind":"open","text":"  \"tools\": [","depth":1,"open":true,"count":2,"hint":" … 2 items"},
+                {"kind":"open","text":"    {","depth":2,"open":false,"count":1,"hint":" … 1 key },"},
+                {"kind":"line","text":"      \"name\": \"a\""},
+                {"kind":"close","text":"    },"},
+                {"kind":"open","text":"    {","depth":2,"open":false,"count":1,"hint":" … 1 key"},
+                {"kind":"line","text":"      \"na"},
+                {"kind":"close","text":null},
+                {"kind":"close","text":null},
+                {"kind":"close","text":null},
+            ])
+        );
+    }
+    #[test]
+    fn turn_context_json_tokens_balance_and_spell_out_the_json_string() {
+        for text in [
+            r#"{"b":[1,{"x":[]}],"a":"x"}"#,
+            r#"Bash {"command":"ls -la","timeout":5}"#,
+            "Script completed\nOutput:\n\n{\"chunk_id\":\"dd2077\",\"output\":\"hi\\n\"}",
+            "QUEUED\n{\"session_id\": \"x\", \"recorded\": true}\nHTTP 503\ntodo: [1] done",
+            "{\n  \"status\": \"failed\",\n  \"handoffs\": [{\"a\": [1]}]\n} tail\nOK: step 17\n",
+            "one\n  {\"a\":1}\n{\"b\":[]}",
+            "{\"type\": \"additional_tools\", \"tools\": [{\"name\": \"a,b\", \"d\": \"q\\\"{",
+            "Output:\n{\"a\": [1, 2",
+            "{\"a\": {\"b\": 1},",
+            "[{\"a\":1},{",
+            "{\"a\":",
+        ] {
+            let tokens = context_json_tokens(text).unwrap();
+            let kind = |kind: &str| tokens.iter().filter(|t| t["kind"] == kind).count();
+            assert!(kind("open") > 0, "{text}");
+            assert_eq!(kind("open"), kind("close"), "{text}");
+            let mut depth = 0i64;
+            for token in &tokens {
+                depth += i64::from(token["kind"] == "open") - i64::from(token["kind"] == "close");
+                assert!(depth >= 0, "{text}");
+            }
+            let spelled: Vec<&str> = tokens.iter().filter_map(|t| t["text"].as_str()).collect();
+            assert_eq!(Some(spelled.join("\n")), context_json(text), "{text}");
+        }
+        assert_eq!(context_json_tokens("[1] done\n{the notes}"), None);
+        // Only the page asks for tokens, and only JSON entries get them.
+        let chunk = |entry: &str, text: &str| json!({"payload":{"entry_id":entry,"entry_index":0,"role":"assistant","kind":"text","part_index":0,"part_count":1,"text":text}});
+        let mut turn = context_turn(&[chunk("a", r#"{"a":1}"#), chunk("b", "prose")], 10);
+        let stored = turn.clone();
+        assert_eq!(turn["entries"][0].get("json_tokens"), None);
+        context_display(&mut turn);
+        assert_eq!(
+            turn["entries"][0]["json_tokens"].as_array().unwrap().len(),
+            3
+        );
+        assert_eq!(turn["entries"][1].get("json_tokens"), None);
+        for key in ["text", "json"] {
+            assert_eq!(turn["entries"][0][key], stored["entries"][0][key]);
+        }
     }
     #[test]
     fn prompt_chunks_reassemble_only_when_complete_and_preserve_initial_goal() {
@@ -1819,15 +2205,15 @@ mod tests {
         assert_eq!(humanize("Add Workflow audit"), "Add Workflow audit");
         assert_eq!(humanize("v2"), "v2");
         assert_eq!(
-            project("/Users/me/.codex/worktrees/e294/arc"),
+            project("/home/me/.codex/worktrees/example/arc"),
             ("arc".into(), true)
         );
         assert_eq!(
-            project("/Users/me/app.worktrees/docs-site"),
+            project("/home/me/app.worktrees/docs-site"),
             ("docs-site".into(), true)
         );
         assert_eq!(
-            project("/Users/me/projects/Example-App"),
+            project("/home/me/projects/Example-App"),
             ("Example-App".into(), false)
         );
         assert_eq!(project("Unknown"), ("Unknown".into(), false));
@@ -1846,7 +2232,7 @@ mod tests {
         assert_eq!(elapsed("bad", "2026-10-05T04:00:00Z"), "");
 
         let probe = sessions(&[
-            row("session_started", 0, json!({"cwd": "/Users/me/Probe"})),
+            row("session_started", 0, json!({"cwd": "/home/me/Probe"})),
             row("task_started", 0, json!({"name": "Session work"})),
             row("tool_completed", 1, json!({"tool_name": "Bash"})),
         ]);

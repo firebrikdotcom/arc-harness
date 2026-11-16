@@ -1,0 +1,27 @@
+{
+  "goal": "Make the pretty-printed JSON in the workflow page's turn context collapsible: every non-empty object and array in an entry, at any depth, can be collapsed and expanded on its own, on top of the indentation already in place. Text with no JSON is shown as before.",
+  "deliverables": [
+    "services/harness-audit/src/workflow.rs",
+    "services/harness-audit/src/ui.rs",
+    "services/harness-audit/resources/views/audit/partials/turn-context.html",
+    "services/harness-audit/public/styles.css",
+    "progress.md"
+  ],
+  "constraints": [
+    "No new dependencies and no JavaScript: collapsing uses native <details>/<summary> rendered on the server.",
+    "Keep each entry's stored and API `text` and the existing `json` display string unchanged; add display fields beside them.",
+    "Keep Tera auto-escaping: nothing from an entry is marked safe.",
+    "Everything the indented form shows today is still shown when all levels are expanded: surrounding text verbatim and in order, embedded values in place, cut-off JSON as far as it goes with nothing completed or invented.",
+    "Build on the current working tree; preserve every edit already in place in these files, committed or not."
+  ],
+  "non_goals": [
+    {"description": "Do not change what the hooks capture or send.", "paths": ["scripts/workflow_audit.py", "scripts/audit_transport.py"]},
+    {"description": "Do not change event storage or migrations.", "paths": ["services/harness-audit/migrations/"]},
+    {"description": "No syntax highlighting, search, or expand-all controls."}
+  ],
+  "acceptance": [
+    {"id": "collapsible", "criterion": "Each non-empty object and array in a JSON entry renders as its own <details> with a summary naming its key and bracket, nested to match the JSON, and the markup stays balanced", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked", "turn_context_json"]},
+    {"id": "same-content", "criterion": "Expanded output carries the same text as the indented form for whole, embedded and cut-off JSON, and entries with no JSON render as before, all HTML-escaped", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked", "turn_context_json"]},
+    {"id": "suite", "criterion": "The audit service suite still passes", "command": ["cargo", "test", "--manifest-path", "services/harness-audit/Cargo.toml", "--locked"]}
+  ]
+}

@@ -1476,8 +1476,14 @@ mod tests {
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0]["prompt_id"], "p9");
         assert_eq!(f.store.session_prompts("s", 0, 10).unwrap().unwrap().1, 1);
-        let (rows, _) = f.store.session_timeline("s", "all", "oldest", 0, 50).unwrap().unwrap();
-        assert!(rows.iter().all(|row| row["event_type"] != "workflow.context_recorded"));
+        let (rows, _) = f
+            .store
+            .session_timeline("s", "all", "oldest", 0, 50)
+            .unwrap()
+            .unwrap();
+        assert!(rows
+            .iter()
+            .all(|row| row["event_type"] != "workflow.context_recorded"));
     }
     #[test]
     fn prompt_pages_keep_order_and_report_total() {

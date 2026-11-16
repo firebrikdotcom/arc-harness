@@ -571,3 +571,11 @@ details[open] > .row-summary::after { content:"\2212"; }
 .turn-context__list { list-style:none; margin:.5rem 0 0; padding:0; display:grid; gap:.6rem; }
 .turn-entry__meta { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; margin:0 0 .25rem; }
 .turn-entry .prompt-text { margin:0; font-size:.8rem; }
+.turn-entry__json { font-family:var(--mono); }
+.turn-entry__json div { min-height:1.6em; }
+.turn-entry__json > div:last-child:empty { display:none; }
+.turn-entry__json summary { color:inherit; font-size:inherit; list-style:none; }
+.turn-entry__json summary::-webkit-details-marker { display:none; }
+.turn-entry__json details[open] > summary::after { content:" \25BE"; color:var(--ink-muted); }
+.turn-entry__json details[open] > summary > .turn-entry__hint { display:none; }
+.turn-entry__hint { color:var(--ink-muted); }
