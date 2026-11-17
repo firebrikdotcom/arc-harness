@@ -1,3 +1,11 @@
+# Repository consolidation — 2026-11-17
+
+Master executable code includes the older branch implementations; an independent branch/tree/patch audit found no missing executable code. Restored the historical `tasks/audit-projections.json` document. Pre-rewrite histories must not be merged or pushed because they contain intentionally removed personal history. A verified complete local Git bundle preserves all original refs and stashes at `~/.local/share/harness/git-backups/harness-template-20261117-consolidation.bundle`; retain the three stashes.
+
+Published master `b6c62e5` and removed the already-merged remote feature branch; GitHub now has only master. Local verification passed through the managed runtime (`/tmp/harness-consolidation-verify.log`). Remaining: commit/push this preservation note and task document, verify final CI, and remove superseded local branches/worktree after resolving the instruction that permits only `git branch -d` (rewritten/cherry-picked history is not ancestry-merged). No feature work is added by this consolidation.
+
+---
+
 # Handoff: Task Managers (Basecamp) in the Arc audit service
 
 Updated 2026-11-14 (local). Read this first; earlier versions are in git history.

@@ -1,0 +1,66 @@
+{
+  "goal": "Make the audit dashboard pages read per-session projections instead of replaying every event on each request, add a timeline scrubber to session details, and let todo bookkeeping run while a harness run is paused.",
+  "deliverables": [
+    "services/harness-audit/src/ (projectors, indexed session queries, scrubber snapshots)",
+    "services/harness-audit/migrations/ (projection tables and indexes)",
+    "services/harness-audit/resources/views/audit/ (scrubber markup and script)",
+    "services/harness-audit/public/styles.css",
+    "services/harness-audit/README.md",
+    "scripts/workflow_gate.py (trusted checkout todo bookkeeping during a pause)",
+    "tests/harness-hook.sh",
+    "services/harness-audit/Dockerfile.test and compose.test.yml (reproducible container tests)"
+  ],
+  "constraints": [
+    "No new crate or Python dependencies.",
+    "The JSON API responses keep their shape.",
+    "Pages show the same content as before for the same events; tests compare projection output with a full replay.",
+    "Startup still rebuilds every projection from the event store."
+  ],
+  "non_goals": [
+    {
+      "description": "No change to what the collectors record or the event schema.",
+      "paths": [
+        "scripts/workflow_audit.py",
+        "scripts/workflow_todos.py",
+        "scripts/observe_commands.py"
+      ]
+    },
+    {
+      "description": "No live push or polling of running sessions in this task."
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "service-tests",
+      "criterion": "The audit service test suite passes",
+      "command": [
+        "docker",
+        "compose",
+        "-f",
+        "services/harness-audit/compose.test.yml",
+        "run",
+        "--rm",
+        "tests",
+        "cargo",
+        "test",
+        "--locked"
+      ]
+    },
+    {
+      "id": "hook-tests",
+      "criterion": "The phase guard tests pass, including todo bookkeeping during a pause",
+      "command": [
+        "sh",
+        "tests/harness-hook.sh"
+      ]
+    },
+    {
+      "id": "speed",
+      "criterion": "Against the live database, /workflow and the largest session render at least five times faster than the baseline (1.78 s and 0.83 s)"
+    },
+    {
+      "id": "scrubber",
+      "criterion": "Dragging the scrubber updates the verdict strip, todos and flow highlight without a request per step"
+    }
+  ]
+}
